@@ -80,17 +80,52 @@ class NativeConflictDetectorTests(unittest.TestCase):
                 self.assertFalse(NativeConflictDetector(command_runner=runner).conflict_active())
 
 
+
+    def test_refreshes_helper_owned_evidence_on_every_conflict_check(self):
+        evidences = iter([OwnedSessionEvidence(interfaces={"utun4"}), OwnedSessionEvidence(interfaces={"utun7"})])
+        routes = iter(["interface: utun4\n", "interface: utun4\n"])
+        def runner(argv, timeout):
+            if argv == ["/bin/ps", "-axo", "comm="]:
+                return CommandResult(tuple(argv), 0, "/Applications/GlobalProtect.app/Contents/MacOS/PanGPS\n", "")
+            return CommandResult(tuple(argv), 0, next(routes), "")
+
+        detector = NativeConflictDetector(command_runner=runner, owned_session_provider=lambda: next(evidences), native_status=lambda: "connected")
+
+        self.assertFalse(detector.conflict_active())
+        self.assertTrue(detector.conflict_active())
+
+    def test_later_malformed_helper_evidence_fails_closed_on_next_conflict_check(self):
+        evidences = iter([OwnedSessionEvidence(interfaces={"utun4"}), OwnedSessionEvidence()])
+        def runner(argv, timeout):
+            if argv == ["/bin/ps", "-axo", "comm="]:
+                return CommandResult(tuple(argv), 0, "/Applications/GlobalProtect.app/Contents/MacOS/PanGPS\n", "")
+            return CommandResult(tuple(argv), 0, "interface: utun4\n", "")
+
+        detector = NativeConflictDetector(command_runner=runner, owned_session_provider=lambda: next(evidences), native_status=lambda: "connected")
+
+        self.assertFalse(detector.conflict_active())
+        self.assertTrue(detector.conflict_active())
+
+    def test_main_passes_helper_provider_callback_not_captured_evidence(self):
+        with mock.patch("hyu_vpn.supervisor.HelperOwnedSessionProvider") as provider_cls, \
+             mock.patch("hyu_vpn.supervisor.NativeConflictDetector") as detector_cls, \
+             mock.patch("hyu_vpn.supervisor.Supervisor") as supervisor_cls:
+            supervisor_cls.return_value.run.return_value = 0
+            self.assertEqual(main([]), 0)
+
+        provider_cls.return_value.evidence.assert_not_called()
+        self.assertIs(detector_cls.call_args.kwargs["owned_session_provider"], provider_cls.return_value.evidence)
+
     def test_main_wires_helper_owned_evidence_into_native_conflict_detector(self):
         with mock.patch("hyu_vpn.supervisor.HelperOwnedSessionProvider") as provider_cls, \
              mock.patch("hyu_vpn.supervisor.NativeConflictDetector") as detector_cls, \
              mock.patch("hyu_vpn.supervisor.Supervisor") as supervisor_cls:
-            provider_cls.return_value.evidence.return_value = mock.sentinel.evidence
             supervisor_cls.return_value.run.return_value = 0
 
             self.assertEqual(main([]), 0)
 
         detector_cls.assert_called_once()
-        self.assertIs(detector_cls.call_args.kwargs["owned_session"], mock.sentinel.evidence)
+        self.assertIs(detector_cls.call_args.kwargs["owned_session_provider"], provider_cls.return_value.evidence)
 
     def test_disconnected_native_daemon_with_foreign_utun_does_not_conflict(self):
         def runner(argv, timeout):

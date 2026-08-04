@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 import sys
 
@@ -262,6 +263,73 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
 
         self.assertEqual(store.set_calls, [])
 
+
+
+    def test_suppress_auto_launch_rolls_back_applied_targets_when_later_disable_fails(self):
+        class FailingSecondDisableStore(FakeAutoLaunchStore):
+            def set_enabled(self, identifier, enabled):
+                if identifier == "com.paloaltonetworks.gp.pangps" and enabled is False:
+                    raise NativeClientConflict("disable failed")
+                super().set_enabled(identifier, enabled)
+
+        store = FailingSecondDisableStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).suppress_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+
+        self.assertEqual(store.set_calls, [
+            ("com.paloaltonetworks.gp.pangpsd", False),
+            ("com.paloaltonetworks.gp.pangpsd", True),
+        ])
+
+    def test_suppress_auto_launch_retains_rollback_required_journal_when_rollback_fails_and_restore_uses_applied_only(self):
+        class RollbackFailStore(FakeAutoLaunchStore):
+            def set_enabled(self, identifier, enabled):
+                if identifier == "com.paloaltonetworks.gp.pangps" and enabled is False:
+                    raise NativeClientConflict("disable failed")
+                if identifier == "com.paloaltonetworks.gp.pangpsd" and enabled is True:
+                    raise NativeClientConflict("rollback failed")
+                super().set_enabled(identifier, enabled)
+
+        store = RollbackFailStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).suppress_auto_launch(record_path)
+            journal = json.loads(record_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(journal["phase"], "rollback-required")
+            self.assertEqual(journal["applied_identifiers"], ["com.paloaltonetworks.gp.pangpsd"])
+
+            restore_store = FakeAutoLaunchStore([
+                AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", False, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+                AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"),
+            ])
+            NativeAutoLaunchManager(store=restore_store, console_uid=501).restore_auto_launch(record_path)
+
+        self.assertEqual(restore_store.set_calls, [("com.paloaltonetworks.gp.pangpsd", True)])
+
+    def test_production_suppress_restore_entrypoints_construct_manager(self):
+        from hyu_vpn.native_client import suppress_globalprotect_auto_launch, restore_globalprotect_auto_launch
+        with mock.patch("hyu_vpn.native_client.production_auto_launch_manager") as factory:
+            suppress_globalprotect_auto_launch("/tmp/record.json", console_uid=501, fs=mock.sentinel.fs, runner=mock.sentinel.runner)
+            restore_globalprotect_auto_launch("/tmp/record.json", console_uid=501, fs=mock.sentinel.fs, runner=mock.sentinel.runner)
+
+        factory.assert_has_calls([
+            mock.call(console_uid=501, fs=mock.sentinel.fs, runner=mock.sentinel.runner),
+            mock.call().suppress_auto_launch("/tmp/record.json"),
+            mock.call(console_uid=501, fs=mock.sentinel.fs, runner=mock.sentinel.runner),
+            mock.call().restore_auto_launch("/tmp/record.json"),
+        ])
 
     def test_pangpa_status_reader_uses_bounded_binary_tail_and_strict_state_tokens(self):
         from hyu_vpn.native_client import GlobalProtectStatusReader

@@ -56,12 +56,14 @@ class NativeConflictDetector:
         timeout: float = 2.0,
         protected_route: str = PROTECTED_ROUTE,
         owned_session: Optional[OwnedSessionEvidence] = None,
+        owned_session_provider: Optional[Callable[[], OwnedSessionEvidence]] = None,
         native_status: Optional[Callable[[], str]] = None,
     ) -> None:
         self.command_runner = command_runner or _run_command
         self.timeout = timeout
         self.protected_route = protected_route
         self.owned_session = owned_session or OwnedSessionEvidence()
+        self.owned_session_provider = owned_session_provider
         self.native_status = native_status
 
     def conflict_active(self) -> bool:
@@ -71,7 +73,8 @@ class NativeConflictDetector:
         processes = _native_processes(ps.stdout)
         route = self.command_runner(["/sbin/route", "-n", "get", self.protected_route], self.timeout)
         interface = route_interface(route.stdout) if route.returncode == 0 else None
-        if self.owned_session.owns_interface(interface):
+        owned_session = self.owned_session_provider() if self.owned_session_provider is not None else self.owned_session
+        if owned_session.owns_interface(interface):
             return False
         status = self.native_status() if self.native_status is not None else "unknown"
         if self.native_status is None and interface is not None and interface.startswith("utun"):
@@ -257,6 +260,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if argv:
         sys.stderr.write("hyu-vpn-service does not accept arguments\n")
         return 2
-    owned_session = HelperOwnedSessionProvider().evidence()
-    detector = NativeConflictDetector(owned_session=owned_session, native_status=production_status_reader().read_state)
+    helper_provider = HelperOwnedSessionProvider()
+    detector = NativeConflictDetector(owned_session_provider=helper_provider.evidence, native_status=production_status_reader().read_state)
     return Supervisor(conflict_detector=detector, readiness=NetworkReadiness()).run()

@@ -82,23 +82,54 @@ class NativeAutoLaunchManager:
         self.console_uid = console_uid
 
     def suppress_auto_launch(self, record_path: os.PathLike[str] | str) -> None:
+        path = Path(record_path)
         mechanisms = self.store.list_mechanisms()
         targets = [m for m in mechanisms if _is_known_gp(m)]
         ambiguous = [m for m in mechanisms if not _is_known_gp(m) and _is_suspicious_gp(m)]
         if ambiguous:
             raise NativeClientConflict("ambiguous GlobalProtect auto-launch mechanism")
+        self._validate_mechanism_list(targets)
+        applied: list[str] = []
+        self._write_journal(path, targets, phase="preparing", applied_identifiers=applied)
+        try:
+            for mechanism in targets:
+                if not mechanism.enabled:
+                    continue
+                self._write_journal(path, targets, phase="disabling", applied_identifiers=applied)
+                self.store.set_enabled(mechanism.identifier, False)
+                applied.append(mechanism.identifier)
+                self._write_journal(path, targets, phase="disabling", applied_identifiers=applied)
+        except Exception as exc:
+            remaining = list(applied)
+            rollback_failed = False
+            for identifier in reversed(applied):
+                self._write_journal(path, targets, phase="rolling-back", applied_identifiers=remaining)
+                try:
+                    self.store.set_enabled(identifier, True)
+                    remaining.remove(identifier)
+                except Exception:
+                    rollback_failed = True
+                    break
+            if rollback_failed:
+                self._write_journal(path, targets, phase="rollback-required", applied_identifiers=remaining)
+            else:
+                self._remove_record(path)
+            if isinstance(exc, NativeClientConflict):
+                raise exc
+            raise NativeClientConflict("native auto-launch suppression failed") from None
         record = {
             "schema_version": 1,
             "console_uid": self.console_uid,
             "mechanisms": [asdict(m) for m in targets],
         }
-        self._write_record(Path(record_path), record)
-        for mechanism in targets:
-            if mechanism.enabled:
-                self.store.set_enabled(mechanism.identifier, False)
+        self._write_record(path, record)
 
     def restore_auto_launch(self, record_path: os.PathLike[str] | str) -> None:
-        data = self._read_record(Path(record_path))
+        path = Path(record_path)
+        data = self._read_record(path)
+        if data.get("phase") == "rollback-required":
+            self._restore_rollback_required(path, data)
+            return
         recorded = [AutoLaunchMechanism(**item) for item in data["mechanisms"]]
         current = {m.identifier: m for m in self.store.list_mechanisms()}
         changes: list[tuple[str, bool]] = []
@@ -114,13 +145,56 @@ class NativeAutoLaunchManager:
         for identifier, enabled in changes:
             self.store.set_enabled(identifier, enabled)
 
+    def _restore_rollback_required(self, path: Path, data: dict) -> None:
+        recorded = [AutoLaunchMechanism(**item) for item in data["mechanisms"]]
+        by_id = {m.identifier: m for m in recorded}
+        applied = list(data["applied_identifiers"])
+        current = {m.identifier: m for m in self.store.list_mechanisms()}
+        changes: list[str] = []
+        for identifier in applied:
+            mechanism = by_id[identifier]
+            now = current.get(identifier)
+            if now is None or now.kind != mechanism.kind or now.exact_target != mechanism.exact_target:
+                raise NativeClientConflict("recorded native auto-launch target changed")
+            if not now.enabled:
+                changes.append(identifier)
+        for identifier in reversed(changes):
+            self.store.set_enabled(identifier, True)
+        self._remove_record(path)
+
+    def _write_journal(self, path: Path, mechanisms: list[AutoLaunchMechanism], *, phase: str, applied_identifiers: list[str]) -> None:
+        self._write_record(path, {
+            "schema_version": 1,
+            "console_uid": self.console_uid,
+            "phase": phase,
+            "mechanisms": [asdict(m) for m in mechanisms],
+            "applied_identifiers": list(applied_identifiers),
+        })
+
+    def _remove_record(self, path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise NativeClientConflict("could not remove native suppression record") from None
+
     def _read_record(self, path: Path) -> dict:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             raise NativeClientConflict("missing or corrupt native suppression record") from None
-        if not isinstance(data, dict) or set(data) != _RECORD_KEYS:
+        if not isinstance(data, dict):
             raise NativeClientConflict("invalid native suppression record schema")
+        phase = data.get("phase")
+        if phase is None:
+            if set(data) != _RECORD_KEYS:
+                raise NativeClientConflict("invalid native suppression record schema")
+        elif phase == "rollback-required":
+            if set(data) != {"schema_version", "console_uid", "phase", "mechanisms", "applied_identifiers"}:
+                raise NativeClientConflict("invalid native rollback journal schema")
+        else:
+            raise NativeClientConflict("native suppression journal is not restorable")
         if data.get("schema_version") != 1:
             raise NativeClientConflict("unsupported native suppression record schema")
         record_uid = data.get("console_uid")
@@ -131,6 +205,7 @@ class NativeAutoLaunchManager:
         mechanisms = data.get("mechanisms")
         if not isinstance(mechanisms, list):
             raise NativeClientConflict("invalid native suppression record mechanisms")
+        parsed: list[AutoLaunchMechanism] = []
         for item in mechanisms:
             if not isinstance(item, dict) or set(item) != _MECHANISM_KEYS:
                 raise NativeClientConflict("invalid native suppression record mechanism")
@@ -140,7 +215,18 @@ class NativeAutoLaunchManager:
                 raise NativeClientConflict("invalid native suppression record mechanism") from None
             if not _valid_mechanism(mechanism):
                 raise NativeClientConflict("invalid native suppression record mechanism")
+            parsed.append(mechanism)
+        if phase == "rollback-required":
+            applied = data.get("applied_identifiers")
+            ids = {m.identifier for m in parsed}
+            if not isinstance(applied, list) or any(not isinstance(i, str) or i not in ids for i in applied):
+                raise NativeClientConflict("invalid native rollback journal applied targets")
         return data
+
+    def _validate_mechanism_list(self, mechanisms: list[AutoLaunchMechanism]) -> None:
+        for mechanism in mechanisms:
+            if not _valid_mechanism(mechanism):
+                raise NativeClientConflict("invalid GlobalProtect auto-launch target")
 
     def _write_record(self, path: Path, record: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,6 +364,14 @@ def _run_subprocess(argv: list[str], timeout: float):
 
 def production_auto_launch_manager(*, console_uid: int, fs: object = None, runner=None) -> NativeAutoLaunchManager:
     return NativeAutoLaunchManager(store=MacOSLaunchctlAutoLaunchStore(console_uid=console_uid, fs=fs, runner=runner), console_uid=console_uid)
+
+
+def suppress_globalprotect_auto_launch(record_path: os.PathLike[str] | str, *, console_uid: int, fs: object = None, runner=None) -> None:
+    production_auto_launch_manager(console_uid=console_uid, fs=fs, runner=runner).suppress_auto_launch(record_path)
+
+
+def restore_globalprotect_auto_launch(record_path: os.PathLike[str] | str, *, console_uid: int, fs: object = None, runner=None) -> None:
+    production_auto_launch_manager(console_uid=console_uid, fs=fs, runner=runner).restore_auto_launch(record_path)
 
 
 class GlobalProtectStatusReader:
