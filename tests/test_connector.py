@@ -11,7 +11,16 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from hyu_vpn.connector import ConnectorConfig, PromptSession, build_openconnect_argv, main
+from hyu_vpn.connector import (
+    ConnectorConfig,
+    ConnectorEvent,
+    ConnectorEventParser,
+    PromptSession,
+    build_helper_argv,
+    build_openconnect_argv,
+    main,
+    parse_connector_event_line,
+)
 from hyu_vpn.otp import Keychain, TotpError, TotpProvider
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +33,162 @@ def read_json(path):
 
 
 class ConnectorTests(unittest.TestCase):
+    def test_build_helper_argv_is_fixed_and_contains_no_username_or_runtime_override(self):
+        argv = build_helper_argv(config=ConnectorConfig(helper_path="/Library/PrivilegedHelperTools/com.hyu.vpn.helper"))
+
+        self.assertEqual(argv, [
+            "/usr/bin/sudo",
+            "-n",
+            "/Library/PrivilegedHelperTools/com.hyu.vpn.helper",
+            "start",
+        ])
+        self.assertNotIn("alice", "\n".join(argv))
+        self.assertFalse(any("openconnect" in value.lower() or "--script" in value for value in argv))
+
+    def test_helper_start_header_precedes_password_and_prompt_responses(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "helper.json"
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "helper_header"}
+            provider = mock.Mock()
+            provider.current.side_effect = ["111111", "222222"]
+            session = PromptSession(
+                [sys.executable, str(FAKE_OPENCONNECT)],
+                password="PASSWORD-CANARY",
+                totp_provider=provider,
+                start_username="alice@hanyang.ac.kr",
+                environ=env,
+                stdout=None,
+            )
+
+            rc = session.run()
+            responses = read_json(marker)["responses"]
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(responses, [
+            "HYU-Username: alice@hanyang.ac.kr",
+            "",
+            "PASSWORD-CANARY",
+            "111111",
+            "PASSWORD-CANARY",
+            "222222",
+        ])
+
+    def test_invalid_helper_username_is_rejected_before_child_launch(self):
+        stderr = mock.Mock()
+        session = PromptSession(
+            ["/should/not/launch"],
+            password="PASSWORD-CANARY",
+            totp_provider=mock.Mock(),
+            start_username="bad\nheader",
+            stdout=None,
+            stderr=stderr,
+        )
+        with mock.patch("hyu_vpn.connector.subprocess.Popen") as popen:
+            rc = session.run()
+
+        self.assertEqual(rc, 1)
+        popen.assert_not_called()
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("start request invalid", written.lower())
+        self.assertNotIn("bad", written)
+        self.assertNotIn("PASSWORD-CANARY", written)
+
+    def test_event_parser_emits_only_bounded_sanitized_events(self):
+        parser = ConnectorEventParser()
+        hostile = "PASSWORD-CANARY authcookie=COOKIE-CANARY username=USER-CANARY\n"
+
+        first = parser.feed(hostile + "HIP report submitted successfully\nSession authentication will exp")
+        second = parser.feed("ire at Tue, 04 Aug 2026 21:59:30 KST\nESP session established with server\n")
+
+        self.assertEqual([event.kind for event in first + second], ["hip-succeeded", "session-expiry", "connected"])
+        serialized = repr(first + second)
+        for secret in ("PASSWORD-CANARY", "COOKIE-CANARY", "USER-CANARY", "authcookie"):
+            self.assertNotIn(secret, serialized)
+        expiry_event = next(event for event in second if event.kind == "session-expiry")
+        self.assertEqual(expiry_event.timestamp.isoformat(), "2026-08-04T12:59:30+00:00")
+
+    def test_connector_event_wire_format_is_exact_bounded_and_rejects_secrets(self):
+        event = ConnectorEvent("session-expiry", __import__("datetime").datetime(2026, 8, 4, 12, 59, 30, tzinfo=__import__("datetime").timezone.utc))
+
+        line = event.to_json_line()
+
+        self.assertLessEqual(len(line.encode("utf-8")), 512)
+        self.assertEqual(parse_connector_event_line(line), event)
+        document = json.loads(line)
+        self.assertEqual(set(document), {"schema_version", "event", "timestamp"})
+        for malformed in (
+            '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:59:30Z","password":"CANARY"}',
+            '{"schema_version":1,"event":"raw-output","timestamp":"2026-08-04T12:59:30Z"}',
+            '{"schema_version":true,"event":"connected","timestamp":"2026-08-04T12:59:30Z"}',
+            '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T21:59:30+09:00"}',
+            '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:59:30.123Z"}',
+            "not-json",
+            "{}",
+        ):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(ValueError):
+                    parse_connector_event_line(malformed)
+
+    def test_generic_connected_text_does_not_create_a_false_session_event(self):
+        parser = ConnectorEventParser()
+
+        self.assertEqual(parser.feed("connected\n"), [])
+        self.assertEqual(
+            [event.kind for event in parser.feed("ESP session established with server\n")],
+            ["connected"],
+        )
+
+    def test_prompt_session_sends_sanitized_events_without_forwarding_raw_output(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "helper.json"
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "helper_header"}
+            provider = mock.Mock()
+            provider.current.side_effect = ["111111", "222222"]
+            events = []
+            session = PromptSession(
+                [sys.executable, str(FAKE_OPENCONNECT)],
+                password="PASSWORD-CANARY",
+                totp_provider=provider,
+                start_username="alice",
+                environ=env,
+                stdout=None,
+                event_sink=events.append,
+            )
+
+            self.assertEqual(session.run(), 0)
+
+        self.assertEqual([event.kind for event in events], ["hip-succeeded", "session-expiry", "connected"])
+
+    def test_event_sink_failure_returns_redacted_error_and_reaps_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "helper.json"
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "helper_header"}
+            provider = mock.Mock()
+            provider.current.side_effect = ["111111", "222222"]
+            stderr = mock.Mock()
+            session = PromptSession(
+                [sys.executable, str(FAKE_OPENCONNECT)],
+                password="PASSWORD-CANARY",
+                totp_provider=provider,
+                start_username="alice",
+                environ=env,
+                stdout=None,
+                stderr=stderr,
+                event_sink=lambda _event: (_ for _ in ()).throw(RuntimeError("COOKIE-CANARY")),
+            )
+
+            rc = session.run()
+
+        self.assertEqual(rc, 1)
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("event channel failed", written.lower())
+        self.assertNotIn("COOKIE-CANARY", written)
+        self.assertNotIn("PASSWORD-CANARY", written)
+
+    def test_main_rejects_all_arguments_before_keychain_access(self):
+        with mock.patch("hyu_vpn.connector.Keychain") as keychain:
+            self.assertEqual(main(["--helper", "/tmp/evil"]), 2)
+        keychain.assert_not_called()
     def test_uses_distinct_totp_for_portal_and_gateway(self):
         with tempfile.TemporaryDirectory() as td:
             marker = Path(td) / "openconnect.json"
@@ -210,7 +375,7 @@ class ConnectorTests(unittest.TestCase):
         with mock.patch("hyu_vpn.otp.subprocess.run", side_effect=fake_run), \
              mock.patch("hyu_vpn.connector.PromptSession") as session_cls:
             session_cls.return_value.run.return_value = 0
-            rc = main(config=ConnectorConfig(openconnect_path="/bin/echo", hip_wrapper="/repo/bin/gp-hip-report"))
+            rc = main(config=ConnectorConfig(helper_path="/bin/echo"))
 
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [
@@ -221,6 +386,10 @@ class ConnectorTests(unittest.TestCase):
         provider = session_cls.call_args.kwargs["totp_provider"]
         self.assertEqual(provider.state_path.name, "totp-counter.json")
         self.assertIn("hyu-openconnect", str(provider.state_path))
+        self.assertEqual(session_cls.call_args.args[0], ["/usr/bin/sudo", "-n", "/bin/echo", "start"])
+        self.assertEqual(session_cls.call_args.kwargs["start_username"], "alice")
+        self.assertIsNone(session_cls.call_args.kwargs["stdout"])
+        self.assertTrue(callable(session_cls.call_args.kwargs["event_sink"]))
 
 
 class TotpProviderTests(unittest.TestCase):

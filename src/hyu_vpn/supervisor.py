@@ -10,12 +10,16 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import FrameType
 from typing import Callable, Optional, Sequence, TextIO
 
+from .control import AutoReconnectPreference, ControlServer
 from .network import HelperOwnedSessionProvider, NetworkReadiness, OwnedSessionEvidence, route_interface
 from .native_client import NativeClientState, production_status_reader
+from .connector import parse_connector_event_line
+from .status import VpnStatus, write_status
 
 
 PROTECTED_ROUTE = "166.104.100.100"
@@ -116,6 +120,11 @@ class SupervisorConfig:
     stop_timeout: float = 10.0
     conflict_poll_interval: float = 10.0
     max_iterations: Optional[int] = None
+    status_path: str = str(Path.home() / "Library" / "Application Support" / "hyu-openconnect" / "status.json")
+    preference_path: str = str(Path.home() / "Library" / "Application Support" / "hyu-openconnect" / "auto-reconnect.json")
+    control_socket_path: str = str(Path.home() / "Library" / "Application Support" / "hyu-openconnect" / "control.sock")
+    helper_path: str = "/Library/PrivilegedHelperTools/com.hyu.vpn.helper"
+    helper_timeout: float = 5.0
 
 
 class Supervisor:
@@ -129,6 +138,8 @@ class Supervisor:
         sleep: Optional[Callable[[float], None]] = None,
         stderr: Optional[TextIO] = sys.stderr,
         readiness: Optional[NetworkReadiness] = None,
+        command_runner: Optional[Callable[[list[str], float], CommandResult]] = None,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self.config = config
         self.conflict_detector = conflict_detector or NativeConflictDetector()
@@ -137,10 +148,242 @@ class Supervisor:
         self.sleep = sleep
         self.stderr = stderr
         self.readiness = readiness
+        self.command_runner = command_runner or _run_command
+        self.now = now
+        self.preference = AutoReconnectPreference(self.config.preference_path)
+        self._state_lock = threading.RLock()
+        self._command_lock = threading.Lock()
+        self._repair_required = False
+        self._status = self._base_status("disabled")
         self.policy = ReconnectPolicy()
         self._stop_requested = False
         self._stop_event = threading.Event()
+        self._control_event = threading.Event()
         self._child: Optional[subprocess.Popen] = None
+        self._stdout_reader: Optional[threading.Thread] = None
+        self._control_server: Optional[ControlServer] = None
+        self._control_thread: Optional[threading.Thread] = None
+        self._state_changed = threading.Condition(self._state_lock)
+        self._teardown_lock = threading.Lock()
+        self._active_generation: Optional[int] = None
+        self._starting_generation: Optional[int] = None
+        self._disconnect_in_progress = False
+        self._next_generation = 0
+
+    def handle_control_command(self, command: str) -> tuple[bool, Optional[str]]:
+        with self._command_lock:
+            if self._repair_required and command in {"automatic-on", "connect", "reconnect"}:
+                self.preference.write(False)
+                self._write_current_status(state="error", automatic=False, error_code="REPAIR_REQUIRED")
+                return False, "REPAIR_REQUIRED"
+            if command == "automatic-on":
+                self.preference.write(True)
+                self._write_current_status(state=self._status.state, automatic=True)
+                self._control_event.set()
+                return True, None
+            if command == "automatic-off":
+                self.preference.write(False)
+                if self._child is None or self._child.poll() is not None:
+                    self._write_current_status(state="disabled", automatic=False)
+                else:
+                    self._write_current_status(state=self._status.state, automatic=False)
+                self._control_event.set()
+                return True, None
+            if command == "disconnect":
+                self.preference.write(False)
+                result = self._disconnect_locked()
+                self._control_event.set()
+                return result
+            if command == "reconnect":
+                self.preference.write(False)
+                ok, error = self._disconnect_locked(disable_auto=False)
+                if not ok:
+                    return ok, error
+                self.preference.write(True)
+                self._write_current_status(state="connecting", automatic=True)
+                self._control_event.set()
+                return True, None
+            if command == "connect":
+                if self._repair_required:
+                    return False, "REPAIR_REQUIRED"
+                self.preference.write(True)
+                if self._child is None or self._child.poll() is not None:
+                    self._write_current_status(state="connecting", automatic=True)
+                else:
+                    self._write_current_status(state=self._status.state, automatic=True)
+                self._control_event.set()
+                return True, None
+            return False, "BAD_REQUEST"
+
+    def _disconnect_locked(self, *, disable_auto: bool = True) -> tuple[bool, Optional[str]]:
+        with self._state_changed:
+            self._disconnect_in_progress = True
+            self._active_generation = None
+            self._state_changed.notify_all()
+        try:
+            self._write_current_status(state="disconnecting", automatic=False if disable_auto else None)
+            if not self._wait_for_start_publication(timeout=self.config.stop_timeout):
+                self._enter_repair_required(automatic=False if disable_auto else None)
+                return False, "REPAIR_REQUIRED"
+            if self._repair_required and self._no_user_connector_lifecycle_active():
+                self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=False if disable_auto else None)
+                return False, "REPAIR_REQUIRED"
+            if not self._stop_helper_and_teardown_user_connector(automatic=False if disable_auto else None):
+                self._enter_repair_required(automatic=False if disable_auto else None)
+                return False, "REPAIR_REQUIRED"
+            self._repair_required = False
+            self._write_current_status(state="disabled", automatic=False if disable_auto else None)
+            return True, None
+        finally:
+            with self._state_changed:
+                self._disconnect_in_progress = False
+                self._state_changed.notify_all()
+
+    def _enter_repair_required(self, *, automatic: Optional[bool] = None) -> None:
+        self._repair_required = True
+        self._invalidate_active_generation()
+        self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+
+    def _invalidate_active_generation(self) -> None:
+        with self._state_changed:
+            self._active_generation = None
+            self._state_changed.notify_all()
+
+    def _stop_helper_and_teardown_user_connector(self, *, automatic: Optional[bool] = None, keep_repair: bool = False) -> bool:
+        with self._teardown_lock:
+            if keep_repair is False and self._repair_required and self._no_user_connector_lifecycle_active():
+                self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+                return False
+            result = self.command_runner(["/usr/bin/sudo", "-n", self.config.helper_path, "stop"], self.config.helper_timeout)
+            helper_ok = result.returncode == 0
+            reap_ok = self._reap_user_connector_only()
+            if keep_repair and self._repair_required:
+                self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+            return helper_ok and reap_ok
+
+    def _no_user_connector_lifecycle_active(self) -> bool:
+        with self._state_lock:
+            return self._starting_generation is None and self._child is None and self._stdout_reader is None
+
+    def _reap_user_connector_only(self) -> bool:
+        with self._state_lock:
+            child = self._child
+        if child is not None:
+            try:
+                child.wait(timeout=self.config.stop_timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=self.config.stop_timeout)
+                except subprocess.TimeoutExpired:
+                    pass
+                with self._state_changed:
+                    if self._child is child:
+                        self._child = None
+                    self._state_changed.notify_all()
+                return False
+            with self._state_changed:
+                if self._child is child:
+                    self._child = None
+                self._state_changed.notify_all()
+        return self._join_stdout_reader()
+
+    def _wait_for_start_publication(self, *, timeout: float) -> bool:
+        deadline = self.monotonic() + timeout
+        with self._state_changed:
+            while self._starting_generation is not None:
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    return False
+                self._state_changed.wait(remaining)
+            return True
+
+    def _wait_for_child_cleared(self, *, timeout: float) -> bool:
+        deadline = self.monotonic() + timeout
+        with self._state_changed:
+            while self._child is not None:
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    return False
+                self._state_changed.wait(remaining)
+            return True
+
+    def apply_connector_event_line(self, line: str, *, generation: Optional[int] = None) -> None:
+        try:
+            event = parse_connector_event_line(line.rstrip("\n"))
+        except ValueError:
+            return
+        with self._state_lock:
+            if generation is not None:
+                if generation != self._active_generation:
+                    return
+                if self._status.state in {"disabled", "disconnecting", "error", "backoff"}:
+                    return
+            if event.kind == "hip-succeeded":
+                self._write_current_status(last_successful_hip_at=event.timestamp)
+            elif event.kind == "session-expiry":
+                self._write_current_status(session_expires_at=event.timestamp)
+            elif event.kind == "connected":
+                self._write_current_status(state="connected", connected_at=event.timestamp)
+
+    def _base_status(self, state: str) -> VpnStatus:
+        return VpnStatus(state=state, automatic_reconnect_enabled=self.preference.read(default=True), last_transition_at=self.now())
+
+    _PRESERVE = object()
+
+    def _write_current_status(
+        self,
+        *,
+        state: Optional[str] = None,
+        automatic: Optional[bool] = None,
+        connected_at=_PRESERVE,
+        session_expires_at=_PRESERVE,
+        last_successful_hip_at=_PRESERVE,
+        tunnel_interface=_PRESERVE,
+        next_retry_at=_PRESERVE,
+        error_code=_PRESERVE,
+    ) -> None:
+        with self._state_lock:
+            previous = self._status
+            new_state = state or previous.state
+            transition = state is not None and new_state != previous.state
+            if transition and new_state in {"disabled", "error", "connecting"}:
+                default_clear = None
+            else:
+                default_clear = self._PRESERVE
+            if transition and new_state == "backoff":
+                connected_at = None if connected_at is self._PRESERVE else connected_at
+                session_expires_at = None if session_expires_at is self._PRESERVE else session_expires_at
+                last_successful_hip_at = None if last_successful_hip_at is self._PRESERVE else last_successful_hip_at
+                tunnel_interface = None if tunnel_interface is self._PRESERVE else tunnel_interface
+            elif default_clear is None:
+                connected_at = None if connected_at is self._PRESERVE else connected_at
+                session_expires_at = None if session_expires_at is self._PRESERVE else session_expires_at
+                last_successful_hip_at = None if last_successful_hip_at is self._PRESERVE else last_successful_hip_at
+                tunnel_interface = None if tunnel_interface is self._PRESERVE else tunnel_interface
+                next_retry_at = None if next_retry_at is self._PRESERVE else next_retry_at
+            if new_state == "connected":
+                next_retry_at = None if next_retry_at is self._PRESERVE else next_retry_at
+                error_code = None if error_code is self._PRESERVE else error_code
+            elif new_state != "error":
+                error_code = None if error_code is self._PRESERVE else error_code
+            status = VpnStatus(
+                state=new_state,
+                automatic_reconnect_enabled=previous.automatic_reconnect_enabled if automatic is None else automatic,
+                connected_at=previous.connected_at if connected_at is self._PRESERVE else connected_at,
+                session_expires_at=previous.session_expires_at if session_expires_at is self._PRESERVE else session_expires_at,
+                last_successful_hip_at=previous.last_successful_hip_at if last_successful_hip_at is self._PRESERVE else last_successful_hip_at,
+                tunnel_interface=previous.tunnel_interface if tunnel_interface is self._PRESERVE else tunnel_interface,
+                next_retry_at=previous.next_retry_at if next_retry_at is self._PRESERVE else next_retry_at,
+                error_code=previous.error_code if error_code is self._PRESERVE else error_code,
+                last_transition_at=self.now() if new_state != previous.state else previous.last_transition_at,
+                backend_build_version=previous.backend_build_version,
+            )
+            write_status(self.config.status_path, status)
+            self._status = status
 
     def run(self) -> int:
         lock_file = self._acquire_lock()
@@ -151,40 +394,103 @@ class Supervisor:
         last_returncode = 0
         try:
             self._install_signal_handlers(old_handlers)
+            self._start_control_server()
             while not self._stop_requested:
+                if self._repair_required:
+                    self._write_current_status(state="error", error_code="REPAIR_REQUIRED")
+                    self._wait_for_control_or_stop(self.config.conflict_poll_interval)
+                    continue
+                if not self.preference.read(default=True):
+                    self._write_current_status(state="disabled", automatic=False)
+                    self._wait_for_control_or_stop(self.config.conflict_poll_interval)
+                    continue
                 while not self._stop_requested and self.conflict_detector.conflict_active():
-                    self._sleep_stop_aware(self.config.conflict_poll_interval)
+                    self._write_current_status(state="waiting-for-network", automatic=True)
+                    self._wait_for_control_or_stop(self.config.conflict_poll_interval)
+                    if not self.preference.read(default=True):
+                        break
                 if self._stop_requested:
                     break
-                if self.readiness is not None and not self.readiness.wait_until_ready(stop_requested=lambda: self._stop_requested):
-                    break
+                if not self.preference.read(default=True):
+                    continue
+                if self.readiness is not None:
+                    self._write_current_status(state="waiting-for-network", automatic=True)
+                    if not self.readiness.wait_until_ready(stop_requested=lambda: self._stop_requested):
+                        break
+                if self._stop_requested or not self.preference.read(default=True):
+                    continue
 
                 started_at = self.monotonic()
                 iterations += 1
+                self._write_current_status(state="connecting", automatic=self.preference.read(default=True))
                 try:
-                    self._child = self.popen_factory([self.config.connect_path], start_new_session=True, close_fds=True)
+                    generation = self._begin_new_generation()
+                    child = self.popen_factory(
+                        [self.config.connect_path],
+                        start_new_session=True,
+                        close_fds=True,
+                        stdout=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                    )
+                    if not self._publish_started_child(child, generation):
+                        with self._state_lock:
+                            disconnecting = self._disconnect_in_progress
+                        if disconnecting:
+                            if not self._wait_for_child_cleared(timeout=self.config.stop_timeout):
+                                self._enter_repair_required()
+                                last_returncode = 1
+                        elif not self._stop_helper_and_teardown_user_connector(keep_repair=True):
+                            self._enter_repair_required()
+                            last_returncode = 1
+                        if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
+                            break
+                        continue
+                    self._start_stdout_reader(child, generation)
                 except (OSError, subprocess.SubprocessError):
+                    self._finish_failed_start()
                     last_returncode = 1
                     failures = self.policy.record_exit(1, runtime_seconds=0)
+                    delay = self.policy.next_delay(failures)
+                    if delay > 0:
+                        self._write_current_status(state="backoff", next_retry_at=self.now() + timedelta(seconds=delay))
                     if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
                         break
-                    self._sleep_stop_aware(self.policy.next_delay(failures))
+                    self._wait_for_control_or_stop(delay)
                     continue
 
                 last_returncode = self._wait_for_child()
+                self._invalidate_active_generation()
+                if not self._join_stdout_reader():
+                    last_returncode = 1
                 runtime = self.monotonic() - started_at
                 failures = self.policy.record_exit(last_returncode, runtime_seconds=runtime)
-                self._child = None
+                with self._state_changed:
+                    self._child = None
+                    self._state_changed.notify_all()
                 if self._stop_requested:
                     break
+                if not self.preference.read(default=True):
+                    self._write_current_status(state="disabled", automatic=False)
+                    if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
+                        break
+                    self._wait_for_control_or_stop(self.config.conflict_poll_interval)
+                    continue
+                delay = self.policy.next_delay(max(failures, 1))
+                if delay > 0:
+                    self._write_current_status(state="backoff", next_retry_at=self.now() + timedelta(seconds=delay))
                 if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
                     break
-                self._sleep_stop_aware(self.policy.next_delay(max(failures, 1)))
+                self._wait_for_control_or_stop(delay)
             return last_returncode
         finally:
             self._restore_signal_handlers(old_handlers)
+            self._stop_control_server()
             if self._child is not None and self._child.poll() is None:
                 self._stop_child()
+            self._join_stdout_reader()
             try:
                 lock_file.close()
             except OSError:
@@ -211,24 +517,117 @@ class Supervisor:
             return None
         return lock_file
 
+    def _start_control_server(self) -> None:
+        self._control_server = ControlServer(self.config.control_socket_path, self.handle_control_command)
+        self._control_thread = threading.Thread(
+            target=self._control_server.serve_forever,
+            args=(self._stop_event,),
+            name="hyu-vpn-control",
+            daemon=True,
+        )
+        self._control_thread.start()
+        self._control_server.wait_until_ready(timeout=2.0)
+
+    def _stop_control_server(self) -> None:
+        self._stop_event.set()
+        thread = self._control_thread
+        if thread is not None:
+            thread.join(timeout=1.0)
+        self._control_thread = None
+        self._control_server = None
+
     def _install_signal_handlers(self, old_handlers: dict[int, object]) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            return
         for signum in (signal.SIGINT, signal.SIGTERM):
             old_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, self._handle_signal)
 
     def _restore_signal_handlers(self, old_handlers: dict[int, object]) -> None:
+        if not old_handlers:
+            return
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
 
     def _handle_signal(self, signum: int, _frame: Optional[FrameType]) -> None:
         self._stop_requested = True
         self._stop_event.set()
+        self._control_event.set()
         self._stop_child(signum)
 
+    def _finish_failed_start(self) -> None:
+        with self._state_changed:
+            self._starting_generation = None
+            self._active_generation = None
+            self._state_changed.notify_all()
+
+    def _begin_new_generation(self) -> int:
+        with self._state_changed:
+            self._next_generation += 1
+            self._active_generation = self._next_generation
+            self._starting_generation = self._active_generation
+            self._state_changed.notify_all()
+            return self._active_generation
+
+    def _publish_started_child(self, child: subprocess.Popen, generation: int) -> bool:
+        with self._state_changed:
+            self._starting_generation = None
+            self._child = child
+            accepted = self._active_generation == generation and not self._repair_required and self.preference.read(default=True)
+            self._state_changed.notify_all()
+            return accepted
+
+    def _start_stdout_reader(self, child: subprocess.Popen, generation: Optional[int] = None) -> None:
+        stdout = getattr(child, "stdout", None)
+        if stdout is None:
+            self._stdout_reader = None
+            return
+
+        def drain() -> None:
+            try:
+                while True:
+                    line = stdout.readline(513)
+                    if line == "":
+                        return
+                    if len(line.encode("utf-8", errors="replace")) > 512 and not line.endswith("\n"):
+                        self._discard_oversize_stdout_line(stdout)
+                        continue
+                    self.apply_connector_event_line(line, generation=generation)
+            except (OSError, ValueError):
+                return
+            finally:
+                try:
+                    stdout.close()
+                except OSError:
+                    pass
+
+        self._stdout_reader = threading.Thread(target=drain, name="hyu-vpn-connector-events", daemon=True)
+        self._stdout_reader.start()
+
+    def _discard_oversize_stdout_line(self, stdout) -> None:
+        for _ in range(8):
+            chunk = stdout.readline(513)
+            if chunk == "" or chunk.endswith("\n"):
+                return
+
+    def _join_stdout_reader(self) -> bool:
+        reader = self._stdout_reader
+        if reader is None:
+            return True
+        reader.join(timeout=1.0)
+        if reader.is_alive():
+            self._enter_repair_required()
+            return False
+        if self._stdout_reader is reader:
+            self._stdout_reader = None
+        return True
+
     def _wait_for_child(self) -> int:
-        if self._child is None:
+        with self._state_lock:
+            child = self._child
+        if child is None:
             return 0
-        return self._child.wait() or 0
+        return child.wait() or 0
 
     def _stop_child(self, signum: int = signal.SIGTERM) -> None:
         child = self._child
@@ -254,6 +653,15 @@ class Supervisor:
             self.sleep(delay)
         else:
             self._stop_event.wait(delay)
+
+    def _wait_for_control_or_stop(self, delay: float) -> None:
+        if delay <= 0 or self._stop_requested:
+            return
+        if self.sleep is not None:
+            self.sleep(delay)
+            return
+        self._control_event.wait(delay)
+        self._control_event.clear()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

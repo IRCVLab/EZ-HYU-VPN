@@ -7,7 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from hyu_vpn.connector import ConnectorConfig, build_openconnect_argv
+from hyu_vpn.connector import ConnectorConfig, build_helper_argv, build_openconnect_argv
 from hyu_vpn.hip_xml import HostInfo, MacPosture, NetworkInterface
 
 
@@ -81,6 +81,19 @@ class SecurityPrivacyTests(unittest.TestCase):
         self.assertNotIn("654321", joined)
         self.assertNotIn("authcookie=AUTHCOOKIE-CANARY", joined)
         self.assertFalse(any("PanGP" in part or "GlobalProtect" in part for part in argv))
+
+    def test_production_helper_argv_contains_no_identity_credential_or_path_override(self):
+        argv = build_helper_argv(config=ConnectorConfig())
+        joined = "\n".join(argv)
+
+        self.assertEqual(argv, [
+            "/usr/bin/sudo",
+            "-n",
+            "/Library/PrivilegedHelperTools/com.hyu.vpn.helper",
+            "start",
+        ])
+        for forbidden in ("USER-CANARY", "PASSWORD-CANARY", "SEED-CANARY", "654321", "authcookie", "--script", "openconnect"):
+            self.assertNotIn(forbidden, joined)
 
 
 if __name__ == "__main__":

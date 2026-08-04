@@ -1,11 +1,16 @@
 import fcntl
+import io
+import json
 import os
+import stat
 import signal
 import subprocess
+import threading
 import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -265,6 +270,101 @@ class SupervisorLoopTests(unittest.TestCase):
         self.assertEqual(clock.sleeps, [10, 20])
 
 
+    def test_backoff_wait_wakes_for_connect_command_without_remaining_delay(self):
+        with tempfile.TemporaryDirectory() as td:
+            socket_path = Path(td) / "control.sock"
+            status_path = Path(td) / "status.json"
+            processes = [FakeProcess(returncode=1), FakeProcess(returncode=0)]
+            starts = []
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "supervisor.lock"),
+                    max_iterations=2,
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(socket_path),
+                    conflict_poll_interval=30,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: starts.append(time.monotonic()) or processes.pop(0),
+            )
+            run_thread = threading.Thread(target=supervisor.run)
+            run_thread.start()
+            from hyu_vpn.control import send_control_command
+            from hyu_vpn.status import read_status
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    if socket_path.exists() and read_status(status_path).state == "backoff":
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.01)
+            self.assertEqual(read_status(status_path).state, "backoff")
+
+            self.assertEqual(send_control_command(socket_path, "connect"), {"schema_version": 1, "ok": True, "error_code": None})
+            run_thread.join(timeout=2)
+
+            self.assertFalse(run_thread.is_alive())
+            self.assertEqual(len(starts), 2)
+
+    def test_failed_child_writes_backoff_status_with_next_retry(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "supervisor.lock"),
+                    max_iterations=1,
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: FakeProcess(returncode=1),
+                now=lambda: now,
+            )
+
+            self.assertEqual(supervisor.run(), 1)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(status.state, "backoff")
+            self.assertEqual(status.next_retry_at.isoformat(), "2026-08-04T12:00:10+00:00")
+
+
+    def test_supervisor_drains_child_stdout_connector_events_into_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            stdout = io.StringIO(
+                '{"schema_version":1,"event":"hip-succeeded","timestamp":"2026-08-04T12:00:00Z"}\n'
+                '{"schema_version":1,"event":"session-expiry","timestamp":"2026-08-04T12:59:30Z"}\n'
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z"}\n'
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","password":"CANARY"}\n'
+            )
+            process = FakeProcess(returncode=0)
+            process.stdout = stdout
+
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "supervisor.lock"),
+                    max_iterations=1,
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+            )
+
+            self.assertEqual(supervisor.run(), 0)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            raw = status_path.read_text(encoding="utf-8")
+            self.assertEqual(status.state, "backoff")
+            self.assertNotIn("CANARY", raw)
+
+
     def test_waits_for_network_readiness_before_starting_child(self):
         clock = FakeClock()
         started = []
@@ -369,6 +469,670 @@ class SupervisorLoopTests(unittest.TestCase):
                 if proc.poll() is None:
                     proc.kill()
                     proc.wait(timeout=2)
+
+
+class SupervisorControlTests(unittest.TestCase):
+    def test_blocked_popen_timeout_late_publication_gets_helper_stop_reap_but_stays_repair(self):
+        with tempfile.TemporaryDirectory() as td:
+            popen_entered = threading.Event()
+            release_popen = threading.Event()
+            events = []
+
+            class LateProcess(FakeProcess):
+                stdout = io.StringIO("")
+
+                def __init__(self):
+                    super().__init__(returncode=0)
+
+                def wait(self, timeout=None):
+                    events.append("child-reap")
+                    return super().wait(timeout=timeout)
+
+            def popen(*_args, **_kwargs):
+                events.append("popen-enter")
+                popen_entered.set()
+                release_popen.wait(2)
+                events.append("popen-return")
+                return LateProcess()
+
+            def runner(argv, timeout):
+                events.append("helper-stop")
+                return CommandResult(tuple(argv), 0, "", "")
+
+            status_path = Path(td) / "status.json"
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                    max_iterations=1,
+                    stop_timeout=0.1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=runner,
+                popen_factory=popen,
+            )
+            run_thread = threading.Thread(target=supervisor.run)
+            run_thread.start()
+            self.assertTrue(popen_entered.wait(2))
+
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+            self.assertEqual(events, ["popen-enter"])
+            release_popen.set()
+            run_thread.join(timeout=2)
+
+            from hyu_vpn.status import read_status
+            self.assertFalse(run_thread.is_alive())
+            self.assertEqual(events, ["popen-enter", "popen-return", "helper-stop", "child-reap"])
+            status = read_status(status_path)
+            self.assertEqual(status.state, "error")
+            self.assertEqual(status.error_code, "REPAIR_REQUIRED")
+
+    def test_concurrent_second_disconnect_does_not_duplicate_late_start_teardown(self):
+        with tempfile.TemporaryDirectory() as td:
+            popen_entered = threading.Event()
+            release_popen = threading.Event()
+            helper_entered = threading.Event()
+            release_helper = threading.Event()
+            events = []
+
+            class LateProcess(FakeProcess):
+                stdout = io.StringIO("")
+
+                def wait(self, timeout=None):
+                    events.append("child-reap")
+                    return super().wait(timeout=timeout)
+
+            def popen(*_args, **_kwargs):
+                popen_entered.set()
+                release_popen.wait(2)
+                events.append("popen-return")
+                return LateProcess(returncode=0)
+
+            def runner(argv, timeout):
+                events.append("helper-stop")
+                helper_entered.set()
+                release_helper.wait(2)
+                return CommandResult(tuple(argv), 0, "", "")
+
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(Path(td) / "status.json"),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                    max_iterations=1,
+                    stop_timeout=0.1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=runner,
+                popen_factory=popen,
+            )
+            run_thread = threading.Thread(target=supervisor.run)
+            run_thread.start()
+            self.assertTrue(popen_entered.wait(2))
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+            release_popen.set()
+            self.assertTrue(helper_entered.wait(2))
+
+            second_result = []
+            second = threading.Thread(target=lambda: second_result.append(supervisor.handle_control_command("disconnect")))
+            second.start()
+            time.sleep(0.05)
+            release_helper.set()
+            second.join(timeout=2)
+            run_thread.join(timeout=2)
+
+            self.assertEqual(events.count("helper-stop"), 1)
+            self.assertEqual(events.count("child-reap"), 1)
+            self.assertEqual(second_result, [(False, "REPAIR_REQUIRED")])
+
+    def test_disconnect_blocked_popen_timeout_enters_repair_without_deadlock(self):
+        with tempfile.TemporaryDirectory() as td:
+            popen_entered = threading.Event()
+            release_popen = threading.Event()
+            helper_calls = []
+
+            def popen(*_args, **_kwargs):
+                popen_entered.set()
+                release_popen.wait(2)
+                return FakeProcess(returncode=0)
+
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(Path(td) / "status.json"),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                    max_iterations=1,
+                    stop_timeout=0.1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=lambda argv, timeout: helper_calls.append(tuple(argv)) or CommandResult(tuple(argv), 0, "", ""),
+                popen_factory=popen,
+            )
+            run_thread = threading.Thread(target=supervisor.run)
+            run_thread.start()
+            self.assertTrue(popen_entered.wait(2))
+
+            started = time.monotonic()
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+            elapsed = time.monotonic() - started
+            self.assertEqual(helper_calls, [])
+            release_popen.set()
+            run_thread.join(timeout=2)
+
+            self.assertLess(elapsed, 1.0)
+            self.assertEqual(helper_calls, [("/usr/bin/sudo", "-n", "/helper", "stop")])
+            self.assertEqual(supervisor.handle_control_command("connect"), (False, "REPAIR_REQUIRED"))
+
+    def test_disconnect_orders_post_publication_helper_stop_before_reap_and_response(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            popen_entered = threading.Event()
+            release_popen = threading.Event()
+            events = []
+
+            class PublishedProcess(FakeProcess):
+                stdout = io.StringIO("")
+
+                def __init__(self):
+                    super().__init__(returncode=0)
+
+                def wait(self, timeout=None):
+                    events.append("child-reap")
+                    return super().wait(timeout=timeout)
+
+            process = PublishedProcess()
+
+            def popen(*_args, **_kwargs):
+                events.append("popen-enter")
+                popen_entered.set()
+                release_popen.wait(2)
+                events.append("popen-return")
+                return process
+
+            def runner(argv, timeout):
+                events.append("helper-stop")
+                return CommandResult(tuple(argv), 0, "", "")
+
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                    max_iterations=1,
+                    stop_timeout=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=runner,
+                popen_factory=popen,
+            )
+            run_thread = threading.Thread(target=supervisor.run)
+            run_thread.start()
+            self.assertTrue(popen_entered.wait(2))
+
+            result = []
+            disconnect_thread = threading.Thread(target=lambda: result.append(supervisor.handle_control_command("disconnect")))
+            disconnect_thread.start()
+            time.sleep(0.05)
+            self.assertEqual(events, ["popen-enter"])
+            self.assertEqual(result, [])
+
+            release_popen.set()
+            disconnect_thread.join(timeout=2)
+            run_thread.join(timeout=2)
+
+            self.assertEqual(result, [(True, None)])
+            self.assertLess(events.index("popen-return"), events.index("helper-stop"))
+            self.assertLess(events.index("helper-stop"), events.index("child-reap"))
+            self.assertEqual(events[-1], "child-reap")
+
+    def test_disconnect_waits_for_blocked_popen_publication_and_reaps_invalid_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            socket_path = Path(td) / "control.sock"
+            popen_entered = threading.Event()
+            release_popen = threading.Event()
+            child_waited = []
+
+            class PublishedAfterDisconnectProcess(FakeProcess):
+                stdout = io.StringIO("")
+
+                def __init__(self):
+                    super().__init__(returncode=0)
+
+                def wait(self, timeout=None):
+                    child_waited.append(timeout)
+                    return super().wait(timeout=timeout)
+
+            process = PublishedAfterDisconnectProcess()
+
+            def popen(*_args, **_kwargs):
+                popen_entered.set()
+                release_popen.wait(2)
+                return process
+
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(socket_path),
+                    helper_path="/helper",
+                    max_iterations=1,
+                    stop_timeout=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, "", ""),
+                popen_factory=popen,
+            )
+            run_thread = threading.Thread(target=supervisor.run)
+            run_thread.start()
+            self.assertTrue(popen_entered.wait(2))
+
+            result = []
+            disconnect_thread = threading.Thread(target=lambda: result.append(supervisor.handle_control_command("disconnect")))
+            disconnect_thread.start()
+            time.sleep(0.05)
+            self.assertEqual(result, [])
+
+            release_popen.set()
+            disconnect_thread.join(timeout=2)
+            run_thread.join(timeout=2)
+
+            from hyu_vpn.status import read_status
+            self.assertEqual(result, [(True, None)])
+            self.assertFalse(run_thread.is_alive())
+            self.assertIsNone(supervisor._child)
+            self.assertIn(1, child_waited)
+            self.assertEqual(read_status(status_path).state, "disabled")
+
+    def test_status_updates_are_state_locked_and_preserve_nonconflicting_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+            supervisor._write_current_status(state="connecting", automatic=True)
+            supervisor.apply_connector_event_line(
+                '{"schema_version":1,"event":"hip-succeeded","timestamp":"2026-08-04T12:00:00Z"}'
+            )
+            supervisor._write_current_status(automatic=False)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertFalse(status.automatic_reconnect_enabled)
+            self.assertEqual(status.last_successful_hip_at.isoformat(), "2026-08-04T12:00:00+00:00")
+
+    def test_automatic_on_after_repair_required_fails_and_keeps_preference_false(self):
+        with tempfile.TemporaryDirectory() as td:
+            pref_path = Path(td) / "auto.json"
+            status_path = Path(td) / "status.json"
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 1, "", "failed"),
+            )
+
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+            self.assertEqual(supervisor.handle_control_command("automatic-on"), (False, "REPAIR_REQUIRED"))
+            self.assertFalse(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
+
+    def test_disconnect_child_wait_timeout_kills_and_enters_repair_required(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            process = FakeProcess(returncode=None, wait_side_effect=[subprocess.TimeoutExpired(["child"], 0.1), 0])
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                    stop_timeout=0.1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, "", ""),
+            )
+            supervisor._child = process
+            killed = []
+            with mock.patch("hyu_vpn.supervisor.os.killpg", side_effect=lambda pid, sig: killed.append((pid, sig))):
+                self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+
+            from hyu_vpn.status import read_status
+            self.assertEqual(killed, [(4321, signal.SIGKILL)])
+            self.assertEqual(read_status(status_path).state, "error")
+            self.assertEqual(read_status(status_path).error_code, "REPAIR_REQUIRED")
+            self.assertEqual(supervisor.handle_control_command("connect"), (False, "REPAIR_REQUIRED"))
+
+    def test_disconnect_waits_for_helper_child_reap_and_reader_before_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            release = threading.Event()
+            waited = []
+
+            class BlockingProcess(FakeProcess):
+                stdout = io.StringIO("")
+
+                def __init__(self):
+                    super().__init__(returncode=None)
+
+                def wait(self, timeout=None):
+                    waited.append(timeout)
+                    if not release.wait(1.0 if timeout is None else min(timeout, 1.0)):
+                        if timeout is not None:
+                            raise subprocess.TimeoutExpired(["child"], timeout)
+                    self.returncode = 0
+                    return 0
+
+            process = BlockingProcess()
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                    stop_timeout=0.5,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, "", ""),
+            )
+            supervisor._child = process
+            supervisor._start_stdout_reader(process)
+
+            result_holder = []
+            thread = threading.Thread(target=lambda: result_holder.append(supervisor.handle_control_command("disconnect")))
+            thread.start()
+            time.sleep(0.05)
+            self.assertEqual(result_holder, [])
+            release.set()
+            thread.join(timeout=2)
+
+            self.assertEqual(result_holder, [(True, None)])
+            from hyu_vpn.status import read_status
+            self.assertEqual(read_status(status_path).state, "disabled")
+            self.assertIsNone(supervisor._child)
+            self.assertIn(0.5, waited)
+
+    def test_stale_generation_events_after_disconnect_or_next_session_are_ignored(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, "", ""),
+            )
+            supervisor._active_generation = 1
+            supervisor._write_current_status(state="connecting", automatic=True)
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (True, None))
+            supervisor.apply_connector_event_line(
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z"}',
+                generation=1,
+            )
+            supervisor._write_current_status(state="connecting", automatic=True)
+            supervisor._active_generation = 2
+            supervisor.apply_connector_event_line(
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:02:00Z"}',
+                generation=1,
+            )
+            supervisor.apply_connector_event_line(
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:03:00Z"}',
+                generation=2,
+            )
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(status.state, "connected")
+            self.assertEqual(status.connected_at.isoformat(), "2026-08-04T12:03:00+00:00")
+
+    def test_auto_off_idles_until_control_wake_connects(self):
+        with tempfile.TemporaryDirectory() as td:
+            socket_path = Path(td) / "control.sock"
+            pref_path = Path(td) / "auto.json"
+            status_path = Path(td) / "status.json"
+            from hyu_vpn.control import AutoReconnectPreference, send_control_command
+
+            AutoReconnectPreference(pref_path).write(False)
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(socket_path),
+                    conflict_poll_interval=30,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+            supervisor._start_control_server()
+            try:
+                wait_thread = threading.Thread(target=lambda: supervisor._wait_for_control_or_stop(30))
+                wait_thread.start()
+
+                self.assertEqual(send_control_command(socket_path, "connect"), {"schema_version": 1, "ok": True, "error_code": None})
+                wait_thread.join(timeout=2)
+
+                self.assertFalse(wait_thread.is_alive())
+                self.assertTrue(AutoReconnectPreference(pref_path).read(default=False))
+            finally:
+                supervisor._stop_control_server()
+
+    def test_disconnect_during_child_exit_disables_auto_and_prevents_immediate_reconnect(self):
+        with tempfile.TemporaryDirectory() as td:
+            socket_path = Path(td) / "control.sock"
+            pref_path = Path(td) / "auto.json"
+            status_path = Path(td) / "status.json"
+            release = threading.Event()
+            starts = []
+
+            class BlockingProcess(FakeProcess):
+                stdout = io.StringIO("")
+
+                def __init__(self):
+                    super().__init__(returncode=None)
+
+                def wait(self, timeout=None):
+                    release.wait(2 if timeout is None else min(timeout, 2))
+                    self.returncode = 0
+                    return 0
+
+            process = BlockingProcess()
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(socket_path),
+                    helper_path="/helper",
+                    max_iterations=1,
+                    stop_timeout=2,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, "", ""),
+                popen_factory=lambda *_args, **_kwargs: starts.append(True) or process,
+            )
+            run_thread = threading.Thread(target=supervisor.run)
+            run_thread.start()
+            while not socket_path.exists():
+                time.sleep(0.01)
+
+            from hyu_vpn.control import send_control_command
+            result_holder = []
+            client_thread = threading.Thread(target=lambda: result_holder.append(send_control_command(socket_path, "disconnect", timeout=5)))
+            client_thread.start()
+            time.sleep(0.05)
+            self.assertEqual(result_holder, [])
+            release.set()
+            client_thread.join(timeout=2)
+            run_thread.join(timeout=2)
+
+            from hyu_vpn.status import read_status
+            self.assertFalse(run_thread.is_alive())
+            self.assertEqual(starts, [True])
+            self.assertEqual(result_holder, [{"schema_version": 1, "ok": True, "error_code": None}])
+            status = read_status(status_path)
+            self.assertEqual(status.state, "disabled")
+            self.assertFalse(status.automatic_reconnect_enabled)
+
+    def test_state_transitions_clear_stale_session_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(Path(td) / "auto.json"),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+            supervisor.apply_connector_event_line(
+                '{"schema_version":1,"event":"hip-succeeded","timestamp":"2026-08-04T12:00:00Z"}'
+            )
+            supervisor.apply_connector_event_line(
+                '{"schema_version":1,"event":"session-expiry","timestamp":"2026-08-04T12:59:30Z"}'
+            )
+            supervisor.apply_connector_event_line(
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z"}'
+            )
+
+            supervisor.handle_control_command("connect")
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(status.state, "connecting")
+            self.assertIsNone(status.connected_at)
+            self.assertIsNone(status.session_expires_at)
+            self.assertIsNone(status.last_successful_hip_at)
+            self.assertIsNone(status.tunnel_interface)
+            self.assertIsNone(status.next_retry_at)
+
+    def test_run_exposes_mode_0600_socket_and_applies_control_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            socket_path = Path(td) / "control.sock"
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+
+            class ControlClientProcess(FakeProcess):
+                def wait(self, timeout=None):
+                    from hyu_vpn.control import send_control_command
+
+                    self.socket_mode = stat.S_IMODE(socket_path.stat().st_mode)
+                    self.response = send_control_command(socket_path, "automatic-off")
+                    return super().wait(timeout=timeout)
+
+            process = ControlClientProcess(returncode=0)
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(socket_path),
+                    max_iterations=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+            )
+
+            self.assertEqual(supervisor.run(), 0)
+
+            from hyu_vpn.status import read_status
+            self.assertEqual(process.socket_mode, 0o600)
+            self.assertEqual(process.response, {"schema_version": 1, "ok": True, "error_code": None})
+            self.assertFalse(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
+            self.assertFalse(read_status(status_path).automatic_reconnect_enabled)
+            self.assertFalse(socket_path.exists())
+
+    def test_disconnect_command_disables_auto_reconnect_stops_helper_and_writes_disabled_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            calls = []
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            def runner(argv, timeout):
+                calls.append((tuple(argv), timeout))
+                return CommandResult(tuple(argv), 0, "", "")
+
+            supervisor = Supervisor(
+                SupervisorConfig(lock_path=str(Path(td) / "lock"), status_path=str(status_path), preference_path=str(pref_path), helper_path="/helper"),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=runner,
+            )
+
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (True, None))
+
+            from hyu_vpn.status import read_status
+            self.assertFalse(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
+            self.assertEqual(read_status(status_path).state, "disabled")
+            self.assertEqual(calls, [(("/usr/bin/sudo", "-n", "/helper", "stop"), 5.0)])
+
+    def test_disconnect_helper_failure_enters_repair_required_and_blocks_reconnect(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            def runner(argv, timeout):
+                return CommandResult(tuple(argv), 1, "SECRET", "failed")
+            supervisor = Supervisor(
+                SupervisorConfig(lock_path=str(Path(td) / "lock"), status_path=str(status_path), preference_path=str(Path(td) / "auto.json"), helper_path="/helper"),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=runner,
+            )
+
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+            self.assertEqual(supervisor.handle_control_command("reconnect"), (False, "REPAIR_REQUIRED"))
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(status.state, "error")
+            self.assertEqual(status.error_code, "REPAIR_REQUIRED")
+            self.assertNotIn("SECRET", status_path.read_text(encoding="utf-8"))
+
+    def test_connector_events_update_status_without_persisting_raw_or_secret_output(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            supervisor = Supervisor(
+                SupervisorConfig(lock_path=str(Path(td) / "lock"), status_path=str(status_path), preference_path=str(Path(td) / "auto.json")),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+
+            supervisor.apply_connector_event_line('{"schema_version":1,"event":"hip-succeeded","timestamp":"2026-08-04T12:00:00Z"}')
+            supervisor.apply_connector_event_line('{"schema_version":1,"event":"session-expiry","timestamp":"2026-08-04T12:59:30Z"}')
+            supervisor.apply_connector_event_line('{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z"}')
+            supervisor.apply_connector_event_line('{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","password":"CANARY"}')
+            supervisor.apply_connector_event_line('x' * 2048)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            raw = status_path.read_text(encoding="utf-8")
+            self.assertEqual(status.state, "connected")
+            self.assertEqual(status.last_successful_hip_at.isoformat(), "2026-08-04T12:00:00+00:00")
+            self.assertEqual(status.session_expires_at.isoformat(), "2026-08-04T12:59:30+00:00")
+            self.assertNotIn("CANARY", raw)
+            self.assertNotIn("xxxx", raw)
+
 
 if __name__ == "__main__":
     unittest.main()

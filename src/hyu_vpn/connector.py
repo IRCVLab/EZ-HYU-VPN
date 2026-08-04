@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import pty
 import re
@@ -12,30 +13,133 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
-from typing import BinaryIO, Mapping, Optional, Sequence, TextIO
+from typing import BinaryIO, Callable, Mapping, Optional, Sequence, TextIO
 
 from .otp import Keychain, TotpError, TotpProvider
+from .status import OpenConnectExpiryParser
 
 
 PORTAL = "secure.hanyang.ac.kr"
 AUTHGROUP = "HYU-ExternalGW-General"
 OPENCONNECT = "/opt/homebrew/bin/openconnect"
 VPNC_SCRIPT = "/opt/homebrew/etc/vpnc/vpnc-script"
+PRIVILEGED_HELPER = "/Library/PrivilegedHelperTools/com.hyu.vpn.helper"
 TOTP_STATE_PATH = Path.home() / "Library" / "Application Support" / "hyu-openconnect" / "totp-counter.json"
 
 _PROMPT_RE = re.compile(rb"(?:Password|Challenge):\s*$", re.IGNORECASE)
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}$")
+_EVENT_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+class ConnectorProtocolError(RuntimeError):
+    """Raised for a local bounded control/event protocol failure."""
 
 
 @dataclass(frozen=True)
 class ConnectorConfig:
+    helper_path: str = PRIVILEGED_HELPER
     openconnect_path: str = OPENCONNECT
     portal: str = PORTAL
     authgroup: str = AUTHGROUP
     vpnc_script: str = VPNC_SCRIPT
     hip_wrapper: Optional[str] = None
     sudo_path: Optional[str] = "/usr/bin/sudo"
+
+
+@dataclass(frozen=True)
+class ConnectorEvent:
+    kind: str
+    timestamp: Optional[datetime] = None
+
+    def to_json_line(self) -> str:
+        if self.kind not in {"hip-succeeded", "session-expiry", "connected"}:
+            raise ValueError("invalid connector event")
+        if self.timestamp is None or self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
+            raise ValueError("connector event timestamp is required")
+        timestamp = self.timestamp.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        line = json.dumps(
+            {"schema_version": 1, "event": self.kind, "timestamp": timestamp},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if len(line.encode("utf-8")) > 512 or "\n" in line:
+            raise ValueError("oversized connector event")
+        return line
+
+
+def parse_connector_event_line(line: str) -> ConnectorEvent:
+    if not isinstance(line, str) or len(line.encode("utf-8")) > 512 or "\n" in line:
+        raise ValueError("invalid connector event line")
+    try:
+        document = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid connector event line") from exc
+    if not isinstance(document, dict) or set(document) != {"schema_version", "event", "timestamp"}:
+        raise ValueError("invalid connector event schema")
+    schema_version = document.get("schema_version")
+    event_name = document.get("event")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
+        raise ValueError("invalid connector event schema")
+    if not isinstance(event_name, str) or event_name not in {"hip-succeeded", "session-expiry", "connected"}:
+        raise ValueError("invalid connector event schema")
+    raw_timestamp = document.get("timestamp")
+    if not isinstance(raw_timestamp, str):
+        raise ValueError("invalid connector event timestamp")
+    if _EVENT_TIMESTAMP_RE.fullmatch(raw_timestamp) is None:
+        raise ValueError("invalid connector event timestamp")
+    try:
+        timestamp = datetime.strptime(raw_timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError("invalid connector event timestamp") from exc
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("invalid connector event timestamp")
+    return ConnectorEvent(event_name, timestamp.astimezone(timezone.utc).replace(microsecond=0))
+
+
+def write_connector_event(event: ConnectorEvent, *, stream: TextIO = sys.stdout) -> None:
+    stream.write(event.to_json_line() + "\n")
+    stream.flush()
+
+
+class ConnectorEventParser:
+    """Extract only fixed, non-secret lifecycle events from bounded progress text."""
+
+    _HIP_SUCCESS = "HIP report submitted successfully"
+    _CONNECTED = ("ESP session established with server",)
+
+    def __init__(self, *, now=lambda: datetime.now(timezone.utc), max_buffer_bytes: int = 4096) -> None:
+        if isinstance(max_buffer_bytes, bool) or not isinstance(max_buffer_bytes, int) or max_buffer_bytes <= 0 or max_buffer_bytes > 65536:
+            raise ValueError("invalid connector event buffer size")
+        self.now = now
+        self.max_buffer_bytes = max_buffer_bytes
+        self._expiry = OpenConnectExpiryParser(max_buffer_bytes=max_buffer_bytes, now=now)
+        self._buffer = ""
+        self._connected_emitted = False
+
+    def feed(self, chunk: bytes | str) -> list[ConnectorEvent]:
+        text = chunk.decode("utf-8", "replace") if isinstance(chunk, bytes) else chunk
+        events: list[ConnectorEvent] = []
+        expiry = self._expiry.feed(text)
+        combined = self._buffer + text
+        bounded = combined.encode("utf-8", "replace")[-self.max_buffer_bytes :]
+        combined = bounded.decode("utf-8", "ignore")
+        lines = combined.replace("\r", "\n").split("\n")
+        self._buffer = lines.pop() if lines else ""
+        for line in lines:
+            normalized = " ".join(line.strip().split())
+            if re.search(r"(?:^|:)\s*HIP report submitted successfully$", normalized):
+                events.append(ConnectorEvent("hip-succeeded", self.now()))
+        if expiry is not None:
+            events.append(ConnectorEvent("session-expiry", expiry))
+        for line in lines:
+            normalized = " ".join(line.strip().split())
+            if not self._connected_emitted and normalized in self._CONNECTED:
+                self._connected_emitted = True
+                events.append(ConnectorEvent("connected", self.now()))
+        return events
 
 
 def default_hip_wrapper() -> str:
@@ -59,6 +163,14 @@ def build_openconnect_argv(username: str, *, config: ConnectorConfig = Connector
     return command
 
 
+def build_helper_argv(*, config: ConnectorConfig = ConnectorConfig()) -> list[str]:
+    command: list[str] = []
+    if config.sudo_path:
+        command.extend([config.sudo_path, "-n"])
+    command.extend([config.helper_path, "start"])
+    return command
+
+
 class PromptSession:
     def __init__(
         self,
@@ -66,22 +178,30 @@ class PromptSession:
         *,
         password: str,
         totp_provider: Optional[TotpProvider],
+        start_username: Optional[str] = None,
         environ: Optional[Mapping[str, str]] = None,
         stdout: Optional[BinaryIO] = sys.stdout.buffer,
         stderr: Optional[TextIO] = sys.stderr,
+        event_sink: Optional[Callable[[ConnectorEvent], None]] = None,
         terminate_timeout: float = 5.0,
     ) -> None:
         self.argv = list(argv)
         self.password = password
         self.totp_provider = totp_provider
+        self.start_username = start_username
         self.environ = dict(environ) if environ is not None else None
         self.stdout = stdout
         self.stderr = stderr
+        self.event_sink = event_sink
+        self.event_parser = ConnectorEventParser()
         self.terminate_timeout = terminate_timeout
         self._proc: Optional[subprocess.Popen[bytes]] = None
         self._received_signal: Optional[int] = None
 
     def run(self) -> int:
+        if self.start_username is not None and _USERNAME_RE.fullmatch(self.start_username) is None:
+            self._write_error("Helper start request invalid\n")
+            return 1
         master, slave = pty.openpty()
         old_handlers: dict[int, object] = {}
         try:
@@ -103,6 +223,8 @@ class PromptSession:
             slave = -1
             self._install_signal_handlers(old_handlers)
             try:
+                if self.start_username is not None:
+                    self._send_start_header(self.start_username)
                 self._send_line(self.password)
                 return self._pump_until_exit(master)
             except (BrokenPipeError, OSError):
@@ -111,6 +233,10 @@ class PromptSession:
                 return 1
         except TotpError:
             self._write_error("TOTP generation failed\n")
+            self._stop_child()
+            return 1
+        except ConnectorProtocolError:
+            self._write_error("Connector event channel failed\n")
             self._stop_child()
             return 1
         finally:
@@ -153,9 +279,7 @@ class PromptSession:
                     raise
                 if not chunk:
                     break
-                if self.stdout is not None:
-                    self.stdout.write(chunk)
-                    self.stdout.flush()
+                self._handle_output_chunk(chunk)
                 tail = (tail + chunk)[-512:]
                 prompt = self._prompt_from_tail(tail)
                 if prompt is not None:
@@ -201,6 +325,13 @@ class PromptSession:
         proc.stdin.write(value.encode("utf-8") + b"\n")
         proc.stdin.flush()
 
+    def _send_start_header(self, username: str) -> None:
+        proc = self._require_proc()
+        if proc.stdin is None:
+            raise BrokenPipeError("child stdin unavailable")
+        proc.stdin.write(f"HYU-Username: {username}\n\n".encode("ascii"))
+        proc.stdin.flush()
+
     def _drain(self, master: int) -> None:
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
@@ -213,9 +344,18 @@ class PromptSession:
                 break
             if not chunk:
                 break
-            if self.stdout is not None:
-                self.stdout.write(chunk)
-                self.stdout.flush()
+            self._handle_output_chunk(chunk)
+
+    def _handle_output_chunk(self, chunk: bytes) -> None:
+        if self.stdout is not None:
+            self.stdout.write(chunk)
+            self.stdout.flush()
+        if self.event_sink is not None:
+            try:
+                for event in self.event_parser.feed(chunk):
+                    self.event_sink(event)
+            except Exception:
+                raise ConnectorProtocolError("connector event sink failed") from None
 
     def _terminate_child(self, signum: int) -> None:
         proc = self._proc
@@ -260,7 +400,9 @@ class PromptSession:
 
 
 def main(argv: Optional[Sequence[str]] = None, *, config: ConnectorConfig = ConnectorConfig()) -> int:
-    del argv  # reserved for future CLI flags; avoid parsing secrets from arguments.
+    if argv:
+        print("hyu-vpn-connect does not accept arguments", file=sys.stderr)
+        return 2
     try:
         keychain = Keychain()
         username = keychain.read("gp-vpn-username")
@@ -271,9 +413,12 @@ def main(argv: Optional[Sequence[str]] = None, *, config: ConnectorConfig = Conn
         return 1
     provider = TotpProvider(totp_seed, state_path=TOTP_STATE_PATH)
     return PromptSession(
-        build_openconnect_argv(username, config=config),
+        build_helper_argv(config=config),
         password=password,
         totp_provider=provider,
+        start_username=username,
+        stdout=None,
+        event_sink=write_connector_event,
     ).run()
 
 

@@ -30,7 +30,21 @@ signal.signal(signal.SIGINT, record_signal)
 signal.signal(signal.SIGTERM, record_signal)
 marker.write_text(json.dumps({"responses": responses, "pid": os.getpid(), "pgid": os.getpgrp()}, sort_keys=True), encoding="utf-8")
 
-if mode == "sleep":
+if mode == "helper_header":
+    read_line()
+    read_line()
+    read_line()
+    write("Challenge:")
+    read_line()
+    write("Password:")
+    read_line()
+    write("Challenge:")
+    read_line()
+    write("HIP report submitted successfully\n")
+    write("Session authentication will expire at Tue, 04 Aug 2026 21:59:30 KST\n")
+    write("ESP session established with server\n")
+    raise SystemExit(0)
+elif mode == "sleep":
     while True:
         time.sleep(0.1)
 elif mode == "error":
