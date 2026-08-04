@@ -94,22 +94,43 @@ class TotpProvider:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                 last_counter = self._read_last_counter()
-                value = self._generate()
                 now = self.clock()
                 counter = _totp_counter(now)
                 if last_counter is not None and counter <= last_counter:
                     wait = _seconds_until_next_totp_window(now, self.max_wait)
                     self.sleep(wait)
-                    value = self._generate()
-                    counter = _totp_counter(self.clock())
+                    now = self.clock()
+                    counter = _totp_counter(now)
                     if counter <= last_counter:
+                        raise TotpError("TOTP generation failed")
+                value = self._generate()
+                generated_counter = _totp_counter(self.clock())
+                if generated_counter != counter:
+                    counter = generated_counter
+                    if last_counter is not None and counter <= last_counter:
+                        raise TotpError("TOTP generation failed")
+                    value = self._generate()
+                    stable_counter = _totp_counter(self.clock())
+                    if stable_counter != counter:
                         raise TotpError("TOTP generation failed")
                 if self._last is not None and value == self._last:
                     now = self.clock()
                     wait = _seconds_until_next_totp_window(now, self.max_wait)
                     self.sleep(wait)
+                    now = self.clock()
+                    counter = _totp_counter(now)
+                    if last_counter is not None and counter <= last_counter:
+                        raise TotpError("TOTP generation failed")
                     value = self._generate()
-                    counter = _totp_counter(self.clock())
+                    generated_counter = _totp_counter(self.clock())
+                    if generated_counter != counter:
+                        counter = generated_counter
+                        if last_counter is not None and counter <= last_counter:
+                            raise TotpError("TOTP generation failed")
+                        value = self._generate()
+                        stable_counter = _totp_counter(self.clock())
+                        if stable_counter != counter:
+                            raise TotpError("TOTP generation failed")
                     if value == self._last:
                         raise TotpError("TOTP generation failed")
                 self._write_last_counter(counter)

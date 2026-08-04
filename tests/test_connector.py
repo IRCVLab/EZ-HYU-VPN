@@ -250,9 +250,9 @@ class TotpProviderTests(unittest.TestCase):
             state_path = Path(td) / "totp-state.json"
             state_path.write_text(json.dumps({"last_counter": 0}), encoding="utf-8")
             state_path.chmod(0o600)
-            clocks = iter([1, 31])
+            clocks = iter([1, 31, 31])
             sleeps = []
-            values = iter(["111111", "222222"])
+            values = iter(["222222"])
 
             def fake_run(argv, **kwargs):
                 return mock.Mock(returncode=0, stdout=next(values), stderr="")
@@ -276,6 +276,48 @@ class TotpProviderTests(unittest.TestCase):
         self.assertNotIn("111111", serialized)
         self.assertNotIn("222222", serialized)
         self.assertNotIn("SEED-CANARY", serialized)
+
+
+    def test_persisted_counter_guard_sleeps_before_first_generate_and_records_generated_window(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "totp-state.json"
+            state_path.write_text(json.dumps({"last_counter": 0}), encoding="utf-8")
+            events = []
+            clocks = iter([1, 31, 31])
+
+            def fake_run(argv, **kwargs):
+                events.append("generate")
+                return mock.Mock(returncode=0, stdout="222222", stderr="")
+
+            provider = TotpProvider("SEED-CANARY", runner=fake_run, clock=lambda: next(clocks), sleep=lambda delay: events.append(("sleep", delay)), state_path=state_path)
+
+            self.assertEqual(provider.current(), "222222")
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(events, [("sleep", 29), "generate"])
+        self.assertEqual(data, {"last_counter": 1})
+
+
+    def test_persisted_counter_guard_regenerates_when_generation_crosses_window_boundary(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "totp-state.json"
+            state_path.write_text(json.dumps({"last_counter": 0}), encoding="utf-8")
+            events = []
+            clocks = iter([31, 61, 61])
+            values = iter(["111111", "222222"])
+
+            def fake_run(argv, **kwargs):
+                value = next(values)
+                events.append(("generate", value))
+                return mock.Mock(returncode=0, stdout=value, stderr="")
+
+            provider = TotpProvider("SEED-CANARY", runner=fake_run, clock=lambda: next(clocks), sleep=lambda delay: events.append(("sleep", delay)), state_path=state_path)
+
+            self.assertEqual(provider.current(), "222222")
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(events, [("generate", "111111"), ("generate", "222222")])
+        self.assertEqual(data, {"last_counter": 2})
 
     def test_corrupt_persisted_counter_fails_safe_without_generating_totp(self):
         with tempfile.TemporaryDirectory() as td:

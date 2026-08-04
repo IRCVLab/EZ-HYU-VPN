@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -114,3 +116,41 @@ class NetworkReadiness:
                 break
             self.sleep(self.poll_interval)
         return False
+
+
+_HELPER_STATUS_ARGV = ["/usr/bin/sudo", "-n", "/Library/PrivilegedHelperTools/com.hyu.vpn.helper", "status"]
+_NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{3,128}$")
+_UTUN_RE = re.compile(r"^utun[0-9]+$")
+
+
+class HelperOwnedSessionProvider:
+    def __init__(self, *, command_runner: Optional[Callable[[list[str], float], object]] = None, timeout: float = 2.0) -> None:
+        self.command_runner = command_runner or _run_command
+        self.timeout = timeout
+
+    def evidence(self) -> OwnedSessionEvidence:
+        result = self.command_runner(list(_HELPER_STATUS_ARGV), self.timeout)
+        if getattr(result, "returncode", 1) != 0:
+            return OwnedSessionEvidence()
+        stdout = getattr(result, "stdout", "")
+        if stdout.count("\n") > 1 or ("\n" in stdout and not stdout.endswith("\n")):
+            return OwnedSessionEvidence()
+        line = stdout.rstrip("\n")
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return OwnedSessionEvidence()
+        if set(data) != {"schema_version", "state", "pid", "session_nonce", "tunnel_interface"}:
+            return OwnedSessionEvidence()
+        if data.get("schema_version") != 1 or data.get("state") != "running":
+            return OwnedSessionEvidence()
+        pid = data.get("pid")
+        nonce = data.get("session_nonce")
+        interface = data.get("tunnel_interface")
+        if not isinstance(pid, int) or pid <= 0:
+            return OwnedSessionEvidence()
+        if not isinstance(nonce, str) or _NONCE_RE.fullmatch(nonce) is None:
+            return OwnedSessionEvidence()
+        if not isinstance(interface, str) or _UTUN_RE.fullmatch(interface) is None:
+            return OwnedSessionEvidence()
+        return OwnedSessionEvidence(interfaces={interface})

@@ -115,3 +115,32 @@ class NetworkReadinessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class HelperOwnedSessionProviderTests(unittest.TestCase):
+    def test_helper_status_provider_accepts_only_strict_running_one_line_json(self):
+        from hyu_vpn.network import HelperOwnedSessionProvider
+        calls = []
+
+        def runner(argv, timeout):
+            calls.append((tuple(argv), timeout))
+            return CommandResult(tuple(argv), 0, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"abc-DEF_123","tunnel_interface":"utun4"}\n', "")
+
+        evidence = HelperOwnedSessionProvider(command_runner=runner, timeout=1.5).evidence()
+
+        self.assertTrue(evidence.owns_interface("utun4"))
+        self.assertEqual(calls, [(("/usr/bin/sudo", "-n", "/Library/PrivilegedHelperTools/com.hyu.vpn.helper", "status"), 1.5)])
+
+    def test_helper_status_provider_rejects_malformed_nonzero_or_unsafe_fields(self):
+        from hyu_vpn.network import HelperOwnedSessionProvider
+        bad_outputs = [
+            (1, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"abc","tunnel_interface":"utun4"}\n'),
+            (0, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"abc","tunnel_interface":"utun4"}\nextra'),
+            (0, '{"schema_version":1,"state":"stopped","pid":123,"session_nonce":"abc","tunnel_interface":"utun4"}\n'),
+            (0, '{"schema_version":1,"state":"running","pid":0,"session_nonce":"abc","tunnel_interface":"utun4"}\n'),
+            (0, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"bad space","tunnel_interface":"utun4"}\n'),
+            (0, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"abc","tunnel_interface":"en0"}\n'),
+        ]
+        for returncode, stdout in bad_outputs:
+            with self.subTest(stdout=stdout):
+                provider = HelperOwnedSessionProvider(command_runner=lambda argv, timeout, r=returncode, s=stdout: CommandResult(tuple(argv), r, s, ""))
+                self.assertFalse(provider.evidence().interfaces)

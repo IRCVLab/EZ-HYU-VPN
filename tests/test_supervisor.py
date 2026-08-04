@@ -11,6 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from hyu_vpn.network import OwnedSessionEvidence
 from hyu_vpn.supervisor import CommandResult, NativeConflictDetector, ReconnectPolicy, Supervisor, SupervisorConfig, main
 
 
@@ -77,6 +78,47 @@ class NativeConflictDetectorTests(unittest.TestCase):
                     raise AssertionError(argv)
 
                 self.assertFalse(NativeConflictDetector(command_runner=runner).conflict_active())
+
+
+    def test_main_wires_helper_owned_evidence_into_native_conflict_detector(self):
+        with mock.patch("hyu_vpn.supervisor.HelperOwnedSessionProvider") as provider_cls, \
+             mock.patch("hyu_vpn.supervisor.NativeConflictDetector") as detector_cls, \
+             mock.patch("hyu_vpn.supervisor.Supervisor") as supervisor_cls:
+            provider_cls.return_value.evidence.return_value = mock.sentinel.evidence
+            supervisor_cls.return_value.run.return_value = 0
+
+            self.assertEqual(main([]), 0)
+
+        detector_cls.assert_called_once()
+        self.assertIs(detector_cls.call_args.kwargs["owned_session"], mock.sentinel.evidence)
+
+    def test_disconnected_native_daemon_with_foreign_utun_does_not_conflict(self):
+        def runner(argv, timeout):
+            if argv == ["/bin/ps", "-axo", "comm="]:
+                return CommandResult(tuple(argv), 0, "/Applications/GlobalProtect.app/Contents/MacOS/PanGPS\n", "")
+            return CommandResult(tuple(argv), 0, "interface: utun7\n", "")
+
+        detector = NativeConflictDetector(command_runner=runner, native_status=lambda: "disconnected")
+        self.assertFalse(detector.conflict_active())
+
+    def test_connecting_native_without_route_blocks_when_status_is_fresh(self):
+        def runner(argv, timeout):
+            if argv == ["/bin/ps", "-axo", "comm="]:
+                return CommandResult(tuple(argv), 0, "/Applications/GlobalProtect.app/Contents/MacOS/GlobalProtect\n", "")
+            return CommandResult(tuple(argv), 1, "", "no route")
+
+        detector = NativeConflictDetector(command_runner=runner, native_status=lambda: "connecting")
+        self.assertTrue(detector.conflict_active())
+
+    def test_helper_owned_utun_does_not_block_even_when_native_status_connected(self):
+        owned = OwnedSessionEvidence(interfaces={"utun4"})
+        def runner(argv, timeout):
+            if argv == ["/bin/ps", "-axo", "comm="]:
+                return CommandResult(tuple(argv), 0, "/Applications/GlobalProtect.app/Contents/MacOS/PanGPS\n", "")
+            return CommandResult(tuple(argv), 0, "interface: utun4\n", "")
+
+        detector = NativeConflictDetector(command_runner=runner, owned_session=owned, native_status=lambda: "connected")
+        self.assertFalse(detector.conflict_active())
 
     def test_command_errors_are_not_conflicts(self):
         def runner(argv, timeout):

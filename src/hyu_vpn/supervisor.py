@@ -14,7 +14,8 @@ from pathlib import Path
 from types import FrameType
 from typing import Callable, Optional, Sequence, TextIO
 
-from .network import NetworkReadiness, OwnedSessionEvidence, route_interface
+from .network import HelperOwnedSessionProvider, NetworkReadiness, OwnedSessionEvidence, route_interface
+from .native_client import NativeClientState, production_status_reader
 
 
 PROTECTED_ROUTE = "166.104.100.100"
@@ -55,23 +56,27 @@ class NativeConflictDetector:
         timeout: float = 2.0,
         protected_route: str = PROTECTED_ROUTE,
         owned_session: Optional[OwnedSessionEvidence] = None,
+        native_status: Optional[Callable[[], str]] = None,
     ) -> None:
         self.command_runner = command_runner or _run_command
         self.timeout = timeout
         self.protected_route = protected_route
         self.owned_session = owned_session or OwnedSessionEvidence()
+        self.native_status = native_status
 
     def conflict_active(self) -> bool:
         ps = self.command_runner(["/bin/ps", "-axo", "comm="], self.timeout)
         if ps.returncode != 0 or not _has_native_process(ps.stdout):
             return False
+        processes = _native_processes(ps.stdout)
         route = self.command_runner(["/sbin/route", "-n", "get", self.protected_route], self.timeout)
-        if route.returncode != 0:
-            return False
-        interface = route_interface(route.stdout)
+        interface = route_interface(route.stdout) if route.returncode == 0 else None
         if self.owned_session.owns_interface(interface):
             return False
-        return bool(interface and interface.startswith("utun"))
+        status = self.native_status() if self.native_status is not None else "unknown"
+        if self.native_status is None and interface is not None and interface.startswith("utun"):
+            status = "connected"
+        return NativeClientState(processes=processes, route_interface=interface, status=status).blocks_openconnect()
 
 
 def _run_command(argv: list[str], timeout: float) -> CommandResult:
@@ -82,12 +87,16 @@ def _run_command(argv: list[str], timeout: float) -> CommandResult:
         return CommandResult(tuple(argv), 1, "", exc.__class__.__name__)
 
 
-def _has_native_process(stdout: str) -> bool:
-    return any(
-        os.path.basename(line.strip()) in _NATIVE_PROCESS_NAMES
+def _native_processes(stdout: str) -> set[str]:
+    return {
+        os.path.basename(line.strip())
         for line in stdout.splitlines()
-        if line.strip()
-    )
+        if line.strip() and os.path.basename(line.strip()) in _NATIVE_PROCESS_NAMES
+    }
+
+
+def _has_native_process(stdout: str) -> bool:
+    return bool(_native_processes(stdout))
 
 
 def _route_uses_utun(stdout: str) -> bool:
@@ -248,4 +257,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if argv:
         sys.stderr.write("hyu-vpn-service does not accept arguments\n")
         return 2
-    return Supervisor(readiness=NetworkReadiness()).run()
+    owned_session = HelperOwnedSessionProvider().evidence()
+    detector = NativeConflictDetector(owned_session=owned_session, native_status=production_status_reader().read_state)
+    return Supervisor(conflict_detector=detector, readiness=NetworkReadiness()).run()
