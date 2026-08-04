@@ -54,9 +54,16 @@ FINAL_USER_EXISTS=0; keychain_exists gp-vpn-username && FINAL_USER_EXISTS=1 || t
 FINAL_PASS_EXISTS=0; keychain_exists gp-vpn-password && FINAL_PASS_EXISTS=1 || true
 FINAL_TOTP_EXISTS=0; keychain_exists gp-vpn-totp && FINAL_TOTP_EXISTS=1 || true
 if [[ $FINAL_USER_EXISTS -eq 0 ]]; then /usr/bin/security add-generic-password -s "$TMP_USER_SERVICE" -a hyu-vpn -w "$HYU_VPN_USERNAME" || { cleanup; exit 1; }; fi
-if [[ $FINAL_PASS_EXISTS -eq 0 ]]; then /usr/bin/security add-generic-password -s "$TMP_PASS_SERVICE" -a hyu-vpn -w || { cleanup; exit 1; }; fi
-if [[ $FINAL_TOTP_EXISTS -eq 0 ]]; then /usr/bin/security add-generic-password -s "$TMP_TOTP_SERVICE" -a hyu-vpn -w || { cleanup; exit 1; }; fi
+if [[ $FINAL_PASS_EXISTS -eq 0 ]]; then
+  print "HYU VPN password (not the Mac administrator password): enter it twice at the next prompts."
+  /usr/bin/security add-generic-password -s "$TMP_PASS_SERVICE" -a hyu-vpn -w || { cleanup; exit 1; }
+fi
+if [[ $FINAL_TOTP_EXISTS -eq 0 ]]; then
+  print "TOTP secret seed (not the current 6-digit OTP code): enter the authenticator setup secret twice at the next prompts."
+  /usr/bin/security add-generic-password -s "$TMP_TOTP_SERVICE" -a hyu-vpn -w || { cleanup; exit 1; }
+fi
 # Exactly one administrator-authentication phase begins after manifest verification, staging, and credentials.
+print "Mac administrator authorization: the next Password prompt is your Mac login password."
 set +e
 /usr/bin/sudo /bin/zsh "$SCRIPT_DIR/root-admin.sh" --payload "$PAYLOAD_DIR" --manifest "$PAYLOAD_DIR/manifest.json" --stage "$STAGE_DIR" --administrator-phase install --stage-manifest-sha256 "$STAGE_MANIFEST_SHA256" --package-manifest-sha256 "$PACKAGE_MANIFEST_SHA256" --live-install "$LIVE_NONCE"
 STATUS=$?
@@ -96,8 +103,8 @@ PREF_PATH="$HOME/Library/Application Support/hyu-openconnect/auto-reconnect.json
 [[ -f "$MENUBAR_PLIST" ]] || { print -u2 "missing installed menu LaunchAgent"; exit 1; }
 /bin/launchctl bootstrap "gui/$USER_UID" "$SERVICE_PLIST" >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
 /bin/launchctl bootstrap "gui/$USER_UID" "$MENUBAR_PLIST" >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
-/bin/launchctl kickstart "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
-/bin/launchctl kickstart "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
+/bin/launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
+/bin/launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
 /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
 /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
 [[ -d "/Applications/HYU VPN.app" ]] && /usr/bin/open -a "/Applications/HYU VPN.app" >/dev/null 2>&1 || true

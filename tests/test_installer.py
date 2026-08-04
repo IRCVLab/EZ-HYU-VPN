@@ -215,7 +215,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
             elif name == "netstat" and route_output:
                 body = f"#!/bin/sh\nprintf '%s\\n' {route_output!r}\n"
             elif name == "env":
-                body = '#!/bin/sh\nroot=""\nfor arg in "$@"; do\n  case "$arg" in */Library/Application\\ Support/HYU\\ VPN/*) root=${arg%%/Library/Application\\ Support/HYU\\ VPN/*};; esac\ndone\nstate="$root/private/var/db/hyu-vpn"\nmkdir -p "$state"\nprintf \'%s\n\' \'{"schema_version":1,"console_uid":501,"mechanisms":[{"identifier":"com.paloaltonetworks.gp.pangps","kind":"launchd-gui","enabled":true,"exact_target":"/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist","running":false}]}\' > "$state/native-suppression.json"\nchmod 600 "$state/native-suppression.json"\nexit 0\n'
+                body = '#!/bin/sh\nroot=""\nfor arg in "$@"; do\n  case "$arg" in */Library/Application\\ Support/HYU\\ VPN/*) root=${arg%%/Library/Application\\ Support/HYU\\ VPN/*};; esac\ndone\nstate="$root/private/var/db/hyu-vpn"\nmkdir -p "$state"\ncase " $* " in\n  *" verify-suppressed "*) exit 0 ;;\n  *" suppress-auto-launch "*) printf \'%s\n\' \'{"schema_version":1,"console_uid":501,"mechanisms":[{"identifier":"com.paloaltonetworks.gp.pangps","kind":"launchd-gui","enabled":true,"exact_target":"/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist","running":false}]}\' > "$state/native-suppression.json"; chmod 600 "$state/native-suppression.json"; exit 0 ;;\n  *" restore-auto-launch "*) rm -f "$state/native-suppression.json"; exit 0 ;;\nesac\nexit 99\n'
             else:
                 body = "#!/bin/sh\nexit 0\n"
             path.write_text(body, encoding="utf-8")
@@ -237,6 +237,8 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertTrue((app_support / "runtime/current/bin/openconnect").exists())
         self.assertTrue((app_support / "runtime/vpnc/hyu-vpnc-wrapperd.sha256").exists())
         self.assertTrue((app_support / "bin/hyu-vpn-service").exists())
+        self.assertTrue((root / "etc/sudoers.d/hyu-vpn").exists())
+        self.assertFalse((root / "etc/sudoers.d/com.hyu.vpn").exists())
         service = plistlib.loads((root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist").read_bytes())
         menubar = plistlib.loads((root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.menubar.plist").read_bytes())
         self.assertEqual(service["ProgramArguments"], ["/usr/bin/python3", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service"])
@@ -261,8 +263,56 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         stage2 = stage_user_payload(env2)
         proc = self.run_root_admin(env2, stage2, extra_env={"HYU_VPN_FAIL_AFTER": "sudoers"})
         self.assertNotEqual(proc.returncode, 0)
-        self.assertFalse((env2.root / "etc/sudoers.d/com.hyu.vpn").exists())
+        self.assertFalse((env2.root / "etc/sudoers.d/hyu-vpn").exists())
         self.assertIn("rollback-complete", (env2.root / "private/var/db/hyu-vpn/install-transaction.log").read_text())
+
+    def test_root_admin_migrates_legacy_dotted_sudoers_fragment(self):
+        env = DryRunEnvironment(root=self.root / "dry sudoers migration", payload=self.payload, home=self.root / "home sudoers migration", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        launchctl = tools / "bin/launchctl"
+        legacy = env.root / "etc/sudoers.d/com.hyu.vpn"
+        launchctl.write_text(
+            "#!/bin/sh\n"
+            f"mkdir -p {str(legacy.parent)!r}\n"
+            f"printf '%s\\n' legacy-rule > {str(legacy)!r}\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+
+        proc = self.run_root_admin(env, stage, tools_root=tools)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertTrue((env.root / "etc/sudoers.d/hyu-vpn").exists())
+        self.assertFalse(legacy.exists())
+        installed_paths = (env.root / "private/var/db/hyu-vpn/installed-paths.tsv").read_text(encoding="utf-8")
+        self.assertIn("etc/sudoers.d/hyu-vpn", installed_paths)
+        self.assertNotIn("etc/sudoers.d/com.hyu.vpn", installed_paths)
+
+    def test_upgrade_preserves_existing_native_suppression_snapshot(self):
+        env = DryRunEnvironment(root=self.root / "dry native upgrade", payload=self.payload, home=self.root / "home native upgrade", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        state = env.root / "private/var/db/hyu-vpn"
+        state.mkdir(parents=True, exist_ok=True)
+        record = state / "native-suppression.json"
+        original = (
+            '{"schema_version":1,"console_uid":501,"mechanisms":['
+            '{"identifier":"com.paloaltonetworks.gp.pangps","kind":"launchd-gui",'
+            '"enabled":true,"exact_target":"/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist","running":false}'
+            ']}\n'
+        )
+        record.write_text(original, encoding="utf-8")
+        record.chmod(0o600)
+
+        proc = self.run_root_admin(env, stage, tools_root=self.make_fake_tools_for(env))
+
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertEqual(record.read_text(encoding="utf-8"), original)
+        commands = (state / "command-log.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("suppress-auto-launch", commands)
+        self.assertIn("verify-suppressed", commands)
+        self.assertIn("native-suppression-preserved", (state / "install-transaction.log").read_text(encoding="utf-8"))
 
     def test_malicious_stage_with_regenerated_digest_cannot_override_verified_package(self):
         env = self.env()
@@ -398,6 +448,36 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertIn("rollback-native-restored", journal)
         self.assertLess(commands.index("suppress-auto-launch"), commands.index("restore-auto-launch"))
 
+    def test_native_suppress_command_failure_is_marked_for_root_rollback_before_cli_runs(self):
+        env = DryRunEnvironment(root=self.root / "dry native command failure", payload=self.payload, home=self.root / "home native command failure", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        env_tool = tools / "usr/bin/env"
+        env_tool.write_text(
+            '#!/bin/sh\n'
+            'root=""\n'
+            'for arg in "$@"; do case "$arg" in */Library/Application\\ Support/HYU\\ VPN/*) root=${arg%%/Library/Application\\ Support/HYU\\ VPN/*};; esac; done\n'
+            'state="$root/private/var/db/hyu-vpn"\n'
+            'mkdir -p "$state"\n'
+            'case " $* " in\n'
+            '  *" suppress-auto-launch "*) printf \'%s\\n\' \'{"schema_version":1,"console_uid":501,"phase":"rollback-required","pending_identifier":null,"applied_identifiers":["com.paloaltonetworks.gp.pangps"],"stopped_identifiers":[],"mechanisms":[{"identifier":"com.paloaltonetworks.gp.pangps","kind":"launchd-gui","enabled":true,"exact_target":"/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist","running":false}]}\' > "$state/native-suppression.json"; chmod 600 "$state/native-suppression.json"; exit 42 ;;\n'
+            '  *" restore-auto-launch "*) rm -f "$state/native-suppression.json"; exit 0 ;;\n'
+            'esac\n'
+            'exit 99\n',
+            encoding="utf-8",
+        )
+        env_tool.chmod(0o755)
+
+        proc = self.run_root_admin(env, stage, tools_root=tools)
+
+        self.assertNotEqual(proc.returncode, 0)
+        commands = (env.root / "private/var/db/hyu-vpn/command-log.jsonl").read_text(encoding="utf-8")
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        self.assertIn("suppress-auto-launch", commands)
+        self.assertIn("restore-auto-launch", commands)
+        self.assertLess(commands.index("suppress-auto-launch"), commands.index("restore-auto-launch"))
+        self.assertIn("rollback-native-restored", journal)
+
     def test_dry_root_must_be_fresh_marked_temp_and_tools_root_confined(self):
         args = ["--dry-run-root", "/", "--stage", str(self.payload), "--package-manifest-sha256", hashlib.sha256((self.payload / "manifest.json").read_bytes()).hexdigest(), "--payload", str(self.payload), "--manifest", str(self.manifest_path), "--admin-user", "tester", "--admin-uid", "501", "--administrator-phase", "install"]
         proc = self.run_root_admin_raw(args)
@@ -457,6 +537,32 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("legacy tunnel route remains", proc.stderr)
 
+    def test_sudoers_candidate_is_outside_includedir_and_removed_when_validation_fails(self):
+        env = DryRunEnvironment(root=self.root / "dry visudo failure", payload=self.payload, home=self.root / "home visudo failure", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+
+        proc = self.run_root_admin(env, stage, tools_root=self.make_fake_tools_for(env, "visudo"))
+
+        self.assertNotEqual(proc.returncode, 0)
+        sudoers_dir = env.root / "etc/sudoers.d"
+        self.assertEqual(list(sudoers_dir.iterdir()) if sudoers_dir.exists() else [], [])
+        state = env.root / "private/var/db/hyu-vpn"
+        self.assertEqual(list(state.glob("sudoers-candidate.*")), [])
+
+    def test_sudoers_activation_is_recorded_before_move_that_applies_then_fails(self):
+        env = DryRunEnvironment(root=self.root / "dry sudoers move failure", payload=self.payload, home=self.root / "home sudoers move failure", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        mv = tools / "bin/mv"
+        mv.write_text('#!/bin/sh\n/bin/mv "$@"\nexit 42\n', encoding="utf-8")
+        mv.chmod(0o755)
+
+        proc = self.run_root_admin(env, stage, tools_root=tools)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse((env.root / "etc/sudoers.d/hyu-vpn").exists())
+        self.assertEqual(list((env.root / "private/var/db/hyu-vpn").glob("sudoers-candidate.*")), [])
+
     def test_uninstall_is_idempotent_allowlisted_and_uses_singleton_keychain_account(self):
         env = self.env()
         stage = stage_user_payload(env)
@@ -502,6 +608,12 @@ class RootAdminShellHarnessTests(InstallerTestCase):
 
     def test_root_admin_static_security_contracts(self):
         text = (REPO / "installer/root-admin.sh").read_text(encoding="utf-8")
+        self.assertIn('SUDOERS_DST="$(map_path /etc/sudoers.d/hyu-vpn)"', text)
+        self.assertIn('LEGACY_SUDOERS_DST="$(map_path /etc/sudoers.d/com.hyu.vpn)"', text)
+        self.assertIn('SUDOERS_TMP="$STATE_DIR/sudoers-candidate.$$"', text)
+        self.assertIn('/bin/rm -f "$SUDOERS_TMP"', text)
+        self.assertIn('backup_target "$LEGACY_SUDOERS_DST"', text)
+        self.assertIn("etc/sudoers.d/hyu-vpn|etc/sudoers.d/com.hyu.vpn", text)
         self.assertIn('capture_cmd(){', text)
         self.assertIn('else "$exe" "$@"', text)
         self.assertIn("validate_native_snapshot", text)
@@ -580,10 +692,14 @@ class LauncherAndTemplateTests(InstallerTestCase):
         self.assertNotIn("HYU_VPN_INSTALL_NONCE", install)
         self.assertIn("-w \"$HYU_VPN_USERNAME\"", install)
         self.assertIn("hyu-vpn-install-password-", install)
+        self.assertIn("HYU VPN password (not the Mac administrator password)", install)
+        self.assertIn("TOTP secret seed (not the current 6-digit OTP code)", install)
         self.assertIn("find-generic-password -w -s \"$TMP_PASS_SERVICE\"", install)
         self.assertIn("AutoReconnectPreference", install)
         self.assertIn("launchctl bootstrap", install)
         self.assertIn("launchctl kickstart", install)
+        self.assertIn('launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.service"', install)
+        self.assertIn('launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.menubar"', install)
         self.assertIn("launchctl print", install)
         self.assertIn("missing installed service LaunchAgent", install)
         self.assertIn("/usr/bin/open -a", install)

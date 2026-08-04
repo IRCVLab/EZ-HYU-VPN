@@ -12,7 +12,7 @@ from hyu_vpn.native_client import NativeClientConflict, native_client_cli_main
 class NativeClientCLITests(unittest.TestCase):
     _DEFAULT_SUDO_UID = object()
 
-    def run_cli(self, argv, *, euid=0, sudo_uid=_DEFAULT_SUDO_UID, console_uid=501, suppress=None, restore=None, env_extra=None):
+    def run_cli(self, argv, *, euid=0, sudo_uid=_DEFAULT_SUDO_UID, console_uid=501, suppress=None, restore=None, verify=None, env_extra=None):
         calls = []
         env = {} if sudo_uid is self._DEFAULT_SUDO_UID else {"SUDO_UID": sudo_uid}
         if sudo_uid is self._DEFAULT_SUDO_UID:
@@ -33,6 +33,11 @@ class NativeClientCLITests(unittest.TestCase):
             if restore:
                 restore()
 
+        def fake_verify(record_path, *, console_uid):
+            calls.append(("verify", str(record_path), console_uid))
+            if verify:
+                verify()
+
         out = []
         err = []
         code = native_client_cli_main(
@@ -42,6 +47,7 @@ class NativeClientCLITests(unittest.TestCase):
             active_console_uid=fake_console_uid,
             suppress=fake_suppress,
             restore=fake_restore,
+            verify=fake_verify,
             stdout=out.append,
             stderr=err.append,
         )
@@ -61,6 +67,13 @@ class NativeClientCLITests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payloads, [{"schema_version": 1, "ok": True, "operation": "restore-auto-launch"}])
         self.assertEqual(calls, [("restore", "/private/var/db/hyu-vpn/native-suppression.json", 501)])
+
+    def test_verify_uses_same_fixed_record_path_and_console_uid(self):
+        code, payloads, calls = self.run_cli(["verify-suppressed"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payloads, [{"schema_version": 1, "ok": True, "operation": "verify-suppressed"}])
+        self.assertEqual(calls, [("verify", "/private/var/db/hyu-vpn/native-suppression.json", 501)])
 
     def test_rejects_any_arbitrary_label_path_uid_or_extra_option_surface(self):
         for argv in (

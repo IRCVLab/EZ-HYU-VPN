@@ -144,6 +144,27 @@ class NativeAutoLaunchManager:
         }
         self._write_record(path, record)
 
+    def verify_suppressed(self, record_path: os.PathLike[str] | str) -> None:
+        data = self._read_record(Path(record_path))
+        if data.get("phase") is not None:
+            raise NativeClientConflict("native suppression transaction is incomplete")
+        recorded = [AutoLaunchMechanism(**item) for item in data["mechanisms"]]
+        mechanisms = self.store.list_mechanisms()
+        ambiguous = [m for m in mechanisms if not _is_known_gp(m) and _is_suspicious_gp(m)]
+        if ambiguous:
+            raise NativeClientConflict("ambiguous GlobalProtect auto-launch mechanism")
+        current_targets = [m for m in mechanisms if _is_known_gp(m)]
+        self._validate_mechanism_list(current_targets)
+        current = {m.identifier: m for m in current_targets}
+        if len(current) != len(current_targets) or set(current) != {m.identifier for m in recorded}:
+            raise NativeClientConflict("native auto-launch targets changed")
+        for mechanism in recorded:
+            now = current[mechanism.identifier]
+            if now.kind != mechanism.kind or now.exact_target != mechanism.exact_target:
+                raise NativeClientConflict("recorded native auto-launch target changed")
+            if now.enabled or now.running:
+                raise NativeClientConflict("native auto-launch state was modified by user")
+
     def restore_auto_launch(self, record_path: os.PathLike[str] | str) -> None:
         path = Path(record_path)
         data = self._read_record(path)
@@ -457,9 +478,9 @@ class MacOSLaunchctlAutoLaunchStore:
             raise NativeClientConflict("launchctl print-disabled failed")
         states: dict[str, bool] = {}
         for line in getattr(result, "stdout", "").splitlines():
-            match = re.search(r'"([^"]+)"\s*=>\s*(true|false)', line)
+            match = re.search(r'"([^"]+)"\s*=>\s*(true|false|enabled|disabled)', line)
             if match:
-                states[match.group(1)] = match.group(2) == "true"
+                states[match.group(1)] = match.group(2) in {"true", "disabled"}
         return states
 
     def _domain(self, target: _LaunchdTarget) -> str:
@@ -512,6 +533,10 @@ def restore_globalprotect_auto_launch(record_path: os.PathLike[str] | str, *, co
     production_auto_launch_manager(console_uid=console_uid, fs=fs, runner=runner).restore_auto_launch(record_path)
 
 
+def verify_globalprotect_suppressed(record_path: os.PathLike[str] | str, *, console_uid: int, fs: object = None, runner=None) -> None:
+    production_auto_launch_manager(console_uid=console_uid, fs=fs, runner=runner).verify_suppressed(record_path)
+
+
 class GlobalProtectStatusReader:
     _STATE_RE = re.compile(r"<state>\s*(Connected|Connecting|Disconnected)\s*</state>|\bSTATE_TUNNEL_(CONNECTED|CONNECTING|DISCONNECTED)\b", re.IGNORECASE)
 
@@ -551,7 +576,7 @@ def production_status_reader() -> GlobalProtectStatusReader:
 
 
 NATIVE_SUPPRESSION_RECORD_PATH = Path("/private/var/db/hyu-vpn/native-suppression.json")
-_NATIVE_CLIENT_CLI_COMMANDS = {"suppress-auto-launch", "restore-auto-launch"}
+_NATIVE_CLIENT_CLI_COMMANDS = {"suppress-auto-launch", "restore-auto-launch", "verify-suppressed"}
 
 
 def _active_console_uid_from_dev_console() -> int:
@@ -577,6 +602,7 @@ def native_client_cli_main(
     active_console_uid=_active_console_uid_from_dev_console,
     suppress=suppress_globalprotect_auto_launch,
     restore=restore_globalprotect_auto_launch,
+    verify=verify_globalprotect_suppressed,
     stdout=print,
     stderr=_print_stderr,
 ) -> int:
@@ -609,8 +635,10 @@ def native_client_cli_main(
     try:
         if operation == "suppress-auto-launch":
             suppress(NATIVE_SUPPRESSION_RECORD_PATH, console_uid=console_uid)
-        else:
+        elif operation == "restore-auto-launch":
             restore(NATIVE_SUPPRESSION_RECORD_PATH, console_uid=console_uid)
+        else:
+            verify(NATIVE_SUPPRESSION_RECORD_PATH, console_uid=console_uid)
     except NativeClientConflict:
         _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "NATIVE_CLIENT_CONFLICT"})
         return 1
