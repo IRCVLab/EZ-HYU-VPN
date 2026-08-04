@@ -14,6 +14,8 @@ from pathlib import Path
 from types import FrameType
 from typing import Callable, Optional, Sequence, TextIO
 
+from .network import NetworkReadiness, OwnedSessionEvidence, route_interface
+
 
 PROTECTED_ROUTE = "166.104.100.100"
 _NATIVE_PROCESS_NAMES = ("PanGPS", "PanGPA", "PanGpHip", "PanGpHipMp", "GlobalProtect")
@@ -52,10 +54,12 @@ class NativeConflictDetector:
         command_runner: Optional[Callable[[list[str], float], CommandResult]] = None,
         timeout: float = 2.0,
         protected_route: str = PROTECTED_ROUTE,
+        owned_session: Optional[OwnedSessionEvidence] = None,
     ) -> None:
         self.command_runner = command_runner or _run_command
         self.timeout = timeout
         self.protected_route = protected_route
+        self.owned_session = owned_session or OwnedSessionEvidence()
 
     def conflict_active(self) -> bool:
         ps = self.command_runner(["/bin/ps", "-axo", "comm="], self.timeout)
@@ -64,7 +68,10 @@ class NativeConflictDetector:
         route = self.command_runner(["/sbin/route", "-n", "get", self.protected_route], self.timeout)
         if route.returncode != 0:
             return False
-        return _route_uses_utun(route.stdout)
+        interface = route_interface(route.stdout)
+        if self.owned_session.owns_interface(interface):
+            return False
+        return bool(interface and interface.startswith("utun"))
 
 
 def _run_command(argv: list[str], timeout: float) -> CommandResult:
@@ -109,6 +116,7 @@ class Supervisor:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Optional[Callable[[float], None]] = None,
         stderr: Optional[TextIO] = sys.stderr,
+        readiness: Optional[NetworkReadiness] = None,
     ) -> None:
         self.config = config
         self.conflict_detector = conflict_detector or NativeConflictDetector()
@@ -116,6 +124,7 @@ class Supervisor:
         self.monotonic = monotonic
         self.sleep = sleep
         self.stderr = stderr
+        self.readiness = readiness
         self.policy = ReconnectPolicy()
         self._stop_requested = False
         self._stop_event = threading.Event()
@@ -134,6 +143,8 @@ class Supervisor:
                 while not self._stop_requested and self.conflict_detector.conflict_active():
                     self._sleep_stop_aware(self.config.conflict_poll_interval)
                 if self._stop_requested:
+                    break
+                if self.readiness is not None and not self.readiness.wait_until_ready(stop_requested=lambda: self._stop_requested):
                     break
 
                 started_at = self.monotonic()
@@ -237,4 +248,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if argv:
         sys.stderr.write("hyu-vpn-service does not accept arguments\n")
         return 2
-    return Supervisor().run()
+    return Supervisor(readiness=NetworkReadiness()).run()

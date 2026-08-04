@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from hyu_vpn.supervisor import CommandResult, NativeConflictDetector, ReconnectPolicy, Supervisor, SupervisorConfig
+from hyu_vpn.supervisor import CommandResult, NativeConflictDetector, ReconnectPolicy, Supervisor, SupervisorConfig, main
 
 
 class FakeClock:
@@ -187,6 +187,41 @@ class SupervisorLoopTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(clock.sleeps, [10, 20])
 
+
+    def test_waits_for_network_readiness_before_starting_child(self):
+        clock = FakeClock()
+        started = []
+        readiness = mock.Mock()
+        readiness.wait_until_ready.return_value = True
+
+        supervisor = Supervisor(
+            SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "supervisor.lock"), max_iterations=1),
+            conflict_detector=mock.Mock(conflict_active=lambda: False),
+            readiness=readiness,
+            popen_factory=lambda argv, **kwargs: started.append(argv) or FakeProcess(returncode=0),
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+
+        self.assertEqual(supervisor.run(), 0)
+        self.assertEqual(len(started), 1)
+        readiness.wait_until_ready.assert_called_once()
+
+    def test_does_not_start_child_when_network_readiness_stops(self):
+        readiness = mock.Mock()
+        readiness.wait_until_ready.return_value = False
+        popen = mock.Mock()
+
+        supervisor = Supervisor(
+            SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "supervisor.lock"), max_iterations=1),
+            conflict_detector=mock.Mock(conflict_active=lambda: False),
+            readiness=readiness,
+            popen_factory=popen,
+        )
+
+        self.assertEqual(supervisor.run(), 0)
+        popen.assert_not_called()
+
     def test_existing_lock_causes_safe_failure_and_lock_file_is_mode_0600(self):
         with tempfile.TemporaryDirectory() as td:
             lock_path = Path(td) / "state" / "supervisor.lock"
@@ -225,6 +260,16 @@ class SupervisorLoopTests(unittest.TestCase):
         self.assertTrue(supervisor._stop_requested)
         self.assertEqual(sent, [(4321, signal.SIGTERM), (4321, signal.SIGKILL)])
         self.assertEqual(proc.wait_calls, [0.25, 0.25])
+
+
+    def test_main_enables_network_readiness_gate(self):
+        with mock.patch("hyu_vpn.supervisor.Supervisor") as supervisor_cls:
+            supervisor_cls.return_value.run.return_value = 0
+
+            self.assertEqual(main([]), 0)
+
+        readiness = supervisor_cls.call_args.kwargs["readiness"]
+        self.assertEqual(readiness.__class__.__name__, "NetworkReadiness")
 
     def test_real_sigterm_interrupts_native_conflict_sleep_promptly(self):
         with tempfile.TemporaryDirectory() as td:

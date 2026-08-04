@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import subprocess
+import tempfile
 import time
 import re
+from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 
@@ -51,6 +56,7 @@ class TotpProvider:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
         max_wait: float = 31.0,
+        state_path: Optional[os.PathLike[str] | str] = None,
     ) -> None:
         self.secret = secret
         self.oathtool_path = oathtool_path
@@ -59,9 +65,12 @@ class TotpProvider:
         self.clock = clock
         self.sleep = sleep
         self.max_wait = max_wait
+        self.state_path = Path(state_path) if state_path is not None else None
         self._last: Optional[str] = None
 
     def current(self) -> str:
+        if self.state_path is not None:
+            return self._current_with_counter_guard()
         value = self._generate()
         if self._last is not None and value == self._last:
             wait = _seconds_until_next_totp_window(self.clock(), self.max_wait)
@@ -71,6 +80,83 @@ class TotpProvider:
                 raise TotpError("TOTP generation failed")
         self._last = value
         return value
+
+    def _current_with_counter_guard(self) -> str:
+        assert self.state_path is not None
+        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.chmod(lock_path, 0o600)
+        except OSError:
+            raise TotpError("TOTP generation failed") from None
+        with os.fdopen(lock_fd, "r+") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                last_counter = self._read_last_counter()
+                value = self._generate()
+                now = self.clock()
+                counter = _totp_counter(now)
+                if last_counter is not None and counter <= last_counter:
+                    wait = _seconds_until_next_totp_window(now, self.max_wait)
+                    self.sleep(wait)
+                    value = self._generate()
+                    counter = _totp_counter(self.clock())
+                    if counter <= last_counter:
+                        raise TotpError("TOTP generation failed")
+                if self._last is not None and value == self._last:
+                    now = self.clock()
+                    wait = _seconds_until_next_totp_window(now, self.max_wait)
+                    self.sleep(wait)
+                    value = self._generate()
+                    counter = _totp_counter(self.clock())
+                    if value == self._last:
+                        raise TotpError("TOTP generation failed")
+                self._write_last_counter(counter)
+                self._last = value
+                return value
+            except TotpError:
+                raise
+            except OSError:
+                raise TotpError("TOTP generation failed") from None
+
+    def _read_last_counter(self) -> Optional[int]:
+        assert self.state_path is not None
+        if not self.state_path.exists():
+            return None
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise TotpError("TOTP generation failed") from None
+        if not isinstance(data, dict):
+            raise TotpError("TOTP generation failed")
+        if set(data) != {"last_counter"}:
+            raise TotpError("TOTP generation failed")
+        counter = data.get("last_counter")
+        if not isinstance(counter, int) or counter < 0:
+            raise TotpError("TOTP generation failed")
+        return counter
+
+    def _write_last_counter(self, counter: int) -> None:
+        assert self.state_path is not None
+        payload = json.dumps({"last_counter": counter}, separators=(",", ":"))
+        tmp_name = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(prefix=self.state_path.name + ".", suffix=".tmp", dir=str(self.state_path.parent))
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, self.state_path)
+            os.chmod(self.state_path, 0o600)
+        except OSError:
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+            raise TotpError("TOTP generation failed") from None
 
     def _generate(self) -> str:
         try:
@@ -94,3 +180,7 @@ def _seconds_until_next_totp_window(now: float, max_wait: float) -> float:
     remainder = int(now) % 30
     wait = 30 - remainder if remainder else 30
     return min(max(wait, 1), max_wait)
+
+
+def _totp_counter(now: float) -> int:
+    return int(now) // 30

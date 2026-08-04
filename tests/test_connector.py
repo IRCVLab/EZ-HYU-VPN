@@ -218,6 +218,9 @@ class ConnectorTests(unittest.TestCase):
             ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-password", "-w"),
             ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-totp", "-w"),
         ])
+        provider = session_cls.call_args.kwargs["totp_provider"]
+        self.assertEqual(provider.state_path.name, "totp-counter.json")
+        self.assertIn("hyu-openconnect", str(provider.state_path))
 
 
 class TotpProviderTests(unittest.TestCase):
@@ -240,6 +243,56 @@ class TotpProviderTests(unittest.TestCase):
                 )
                 with self.assertRaises(TotpError):
                     provider.current()
+
+
+    def test_persisted_counter_guard_waits_across_processes_without_storing_secret_or_otp(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "totp-state.json"
+            state_path.write_text(json.dumps({"last_counter": 0}), encoding="utf-8")
+            state_path.chmod(0o600)
+            clocks = iter([1, 31])
+            sleeps = []
+            values = iter(["111111", "222222"])
+
+            def fake_run(argv, **kwargs):
+                return mock.Mock(returncode=0, stdout=next(values), stderr="")
+
+            provider = TotpProvider(
+                "SEED-CANARY",
+                runner=fake_run,
+                clock=lambda: next(clocks),
+                sleep=sleeps.append,
+                state_path=state_path,
+            )
+
+            self.assertEqual(provider.current(), "222222")
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            mode = state_path.stat().st_mode & 0o777
+
+        self.assertEqual(sleeps, [29])
+        self.assertEqual(data, {"last_counter": 1})
+        self.assertEqual(mode, 0o600)
+        serialized = json.dumps(data)
+        self.assertNotIn("111111", serialized)
+        self.assertNotIn("222222", serialized)
+        self.assertNotIn("SEED-CANARY", serialized)
+
+    def test_corrupt_persisted_counter_fails_safe_without_generating_totp(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "totp-state.json"
+            state_path.write_text("not json", encoding="utf-8")
+            calls = []
+
+            def fake_run(argv, **kwargs):
+                calls.append(argv)
+                return mock.Mock(returncode=0, stdout="123456", stderr="")
+
+            provider = TotpProvider("SEED-CANARY", runner=fake_run, state_path=state_path)
+
+            with self.assertRaises(TotpError):
+                provider.current()
+
+        self.assertEqual(calls, [])
 
     def test_keychain_and_oathtool_timeouts_are_redacted(self):
         def timeout(*_args, **_kwargs):

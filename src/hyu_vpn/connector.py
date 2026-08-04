@@ -23,6 +23,7 @@ PORTAL = "secure.hanyang.ac.kr"
 AUTHGROUP = "HYU-ExternalGW-General"
 OPENCONNECT = "/opt/homebrew/bin/openconnect"
 VPNC_SCRIPT = "/opt/homebrew/etc/vpnc/vpnc-script"
+TOTP_STATE_PATH = Path.home() / "Library" / "Application Support" / "hyu-openconnect" / "totp-counter.json"
 
 _PROMPT_RE = re.compile(rb"(?:Password|Challenge):\s*$", re.IGNORECASE)
 
@@ -268,7 +269,7 @@ def main(argv: Optional[Sequence[str]] = None, *, config: ConnectorConfig = Conn
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    provider = TotpProvider(totp_seed)
+    provider = TotpProvider(totp_seed, state_path=TOTP_STATE_PATH)
     return PromptSession(
         build_openconnect_argv(username, config=config),
         password=password,
