@@ -11,8 +11,8 @@ Success requires more than establishing a tunnel. The shipped system must connec
 - Internal lab distribution outside the Mac App Store.
 - Ad-hoc signed application and DMG; no Apple notarization in the first release.
 - Users accept the one-time Gatekeeper **Open** action.
-- Apple silicon and Intel Homebrew prefixes are detected during installation.
-- The first release may require Homebrew plus `openconnect` and `oath-toolkit`; it does not bundle or reimplement OpenConnect.
+- Apple silicon and Intel Homebrew prefixes may be used only as installer-time sources for pinned dependencies.
+- The first release may require Homebrew plus `openconnect` and `oath-toolkit` at build/install time, but no root process executes a user-owned Homebrew binary or library. The installer copies the verified OpenConnect executable and its complete runtime-library closure into the root-owned HYU VPN runtime and ships the corresponding license/source notices.
 - Removing GlobalProtect is outside scope. The installer disables only conflicting automatic operation and preserves the native client as a manual recovery option.
 
 ## Validated foundation
@@ -75,7 +75,7 @@ It must:
 The control channel is a foreground pipe contract, not a daemonized or detached process:
 
 1. the user supervisor opens a PTY for progress output and a private stdin pipe;
-2. it starts `sudo -n <helper> start <validated-username>`;
+2. it starts the exact command `sudo -n <helper> start` and writes one bounded `HYU-Username` header to the helper's private stdin before any password/OTP bytes;
 3. the root helper remains the parent/monitor of one OpenConnect child and inherits those file descriptors;
 4. the supervisor writes only password and OTP responses to the private stdin pipe;
 5. OpenConnect prompt/progress output returns through the PTY;
@@ -110,7 +110,7 @@ The helper is a compiled command-line program rather than a user-editable shell 
 - resolved OpenConnect executable identity; and
 - per-session network ledger path.
 
-`stop` and `repair` reject stale or reused PIDs unless PID, process group, birth time, executable path, portal identity, UID, and nonce all match the live helper-owned session. A root-owned non-blocking lock permits only one session per console UID. The helper never signals a process based solely on a PID file.
+`stop` and `repair` reject stale or reused PIDs unless PID, process group, birth time, executable path, portal identity, UID, and nonce all match the live helper-owned session. Cleanup remains possible if a later installer transaction replaces the on-disk runtime: stop verifies the live process identity recorded at launch rather than requiring the current runtime inode to remain unchanged. A root-owned non-blocking lock permits only one session per console UID. The helper never signals a process based solely on a PID file.
 
 ### 4. Root-owned network wrapper and change ledger
 
@@ -121,7 +121,7 @@ The fixed vpnc entry point wraps the Homebrew vpnc script and creates a root-own
 - the exact known HYU routes and their prior values; and
 - the new tunnel interface identity.
 
-After the vpnc script succeeds, it records only the deltas actually installed for that session: exact destination, gateway, interface, resolver/search-domain values, and service identifier. Teardown calls the upstream script first and then verifies the ledger.
+After the vpnc script succeeds, it records only the deltas actually installed for that session: exact before/applied route tuples, destination, gateway, interface, resolver/search-domain values, and service identifier. Teardown first proves the current state is either the session-applied value or the recorded baseline, then calls the upstream script, verifies its result, and repairs only exact session-owned values that remain.
 
 `repair` may remove a route only when its current destination, gateway, interface, and session nonce-derived ledger all match the session-installed value. It may restore resolver state only when the current resolver still matches the value applied by that same session. If the default network, service identifier, or resolver changed independently during the VPN session, the helper refuses to overwrite it, records `repair-required`, and waits for the new network to stabilize. It never restores a pre-reboot snapshot and never edits raw SystemConfiguration preference files.
 
@@ -179,13 +179,16 @@ Installation is transactional:
 2. locate Homebrew and verify/install user-space dependencies;
 3. collect username, password, and TOTP seed without echo and store them in the user Keychain;
 4. request administrator authentication once;
-5. install the immutable privileged helper, backend, configuration, and constrained sudoers rule;
-6. validate sudoers with `visudo -c` before activation;
-7. install and bootstrap the LaunchAgent;
-8. copy the menu app to `/Applications`; and
-9. perform a dry-run status check without disconnecting an existing working tunnel.
+5. gracefully stop and permanently disable the exact obsolete `local.hyu-openconnect` LaunchAgent before installing any replacement, then prove its OpenConnect process group, tunnel routes, and VPN resolver are gone;
+6. install the immutable privileged helper, complete backend module tree, HIP wrapper, configuration, and constrained sudoers rule;
+7. validate sudoers with `visudo -c` before activation;
+8. transactionally suppress only GlobalProtect automatic operation through the fixed root-only `hyu-vpn-native-client suppress-auto-launch|restore-auto-launch` surface, which accepts no label/path/UID arguments and binds the sudo UID to the independently observed console UID, while preserving manual recovery;
+9. install the LaunchAgents and menu app, but bootstrap the new service only after credentials, runtime hashes, native suppression, legacy retirement, and rollback state are durable; and
+10. perform a dry-run status check before permitting the first connection.
 
-Resolved dependency paths, CPU architecture, file identities, and versions are written into a root-owned configuration during installation. Apple silicon `/opt/homebrew` and Intel `/usr/local` are supported; the helper validates the recorded executable path, owner, mode, and file identity on every start and refuses moved/replaced dependencies until the installer repairs the configuration.
+The obsolete `local.hyu-openconnect` job is a known-unsafe prototype, not a prior supported release: it used `RunAtLoad` plus unconditional `KeepAlive` with the generic Homebrew `vpnc-script`. A dead peer could leave the VPN resolver active, then the retry loop could no longer resolve the portal. Installation quarantines this exact label and never re-enables it automatically during rollback or uninstall. Any saved plist is retained only as diagnostic evidence until the new package has completed a verified cycle.
+
+Resolved source dependency paths, CPU architecture, file identities, versions, and the copied runtime manifest are written into a root-owned configuration during installation. Apple silicon `/opt/homebrew` and Intel `/usr/local` are supported only as dependency sources; the helper validates the root-owned runtime executable, library closure, owner, mode, hash, and file identity on every start and refuses moved/replaced dependencies until the installer repairs the configuration. The helper configuration remains an exact eight-key schema. Wrapper-daemon integrity is recorded separately in the fixed root-owned `runtime/vpnc/hyu-vpnc-wrapperd.sha256` file and checked, together with every parent directory, before wrapper execution.
 
 Privileged files and directories have an explicit trust boundary:
 
@@ -195,13 +198,15 @@ Privileged files and directories have an explicit trust boundary:
 | `/Library/Application Support/HYU VPN/` | `root:wheel`, `0755` |
 | executables below the application-support directory | `root:wheel`, `0755` |
 | configuration/manifests below it | `root:wheel`, `0644` |
-| `/var/run/hyu-vpn/` session state | `root:wheel`, `0700` |
+| `/private/var/db/hyu-vpn/` session state and ledgers | `root:wheel`, `0700` |
 | user application-support directory | console user, `0700` |
 | `status.json` and sanitized logs | console user, `0600` |
 
 The installer rejects symlinks or user-writable parent directories for privileged paths and verifies every payload against an embedded SHA-256 manifest before installing it.
 
 If installation fails, rollback runs in reverse phase order: stop and unload the newly bootstrapped LaunchAgent, restore or remove the app copy, restore the prior LaunchAgent and backend, validate and restore the prior sudoers fragment, restore the prior helper/config atomically, and remove only Keychain items created during this failed transaction. A root-owned transaction marker makes rollback idempotent after interruption or reboot. A live helper upgrade first drains the existing session through the old verified stop path; it never replaces an executing helper in place.
+
+The known-unsafe `local.hyu-openconnect` prototype is the sole exception to prior-LaunchAgent restoration: rollback leaves it disabled and reports the quarantine instead of recreating the proven DNS-black-hole path.
 
 The uninstaller first performs a verified disconnect, then unloads the LaunchAgent and removes only files installed by this package. Keychain credential removal is an explicit user choice.
 
@@ -216,6 +221,7 @@ The first internal release remains ad-hoc signed because the lab has no Develope
 - A failed teardown blocks a conflicting reconnect and surfaces `repair-required` in the menu.
 - Native GlobalProtect and OpenConnect are never deliberately active at the same time.
 - Raw network configuration files under `/Library/Preferences/SystemConfiguration` are never deleted or rewritten.
+- Build, unit-test, harness, installer dry-run, and DMG verification entry points default to an offline/temp-root mode and fail closed before `sudo`, `launchctl`, `security`, OpenConnect, or route/DNS mutation. A controlled live cycle requires a separate explicit opt-in gate and cannot be reached by `swift test`, Python unit tests, package assembly, or ordinary app build commands.
 
 ## Security and privacy
 
@@ -242,9 +248,11 @@ The first internal release remains ad-hoc signed because the lab has no Develope
 - interrupted rollback after LaunchAgent bootstrap;
 - Apple silicon and Intel dependency path tests, including moved/replaced binaries;
 - app menu-state snapshot tests;
+- visibly executing offline Swift harnesses for privileged-helper and menu behavior; on Command Line Tools-only hosts where `xctest` is absent, `swift test` is compile-only and is never accepted as behavioral proof;
 - secret-canary scans of all logs and artifacts;
 - universal DMG structure and ad-hoc signature verification; and
 - existing HIP schema, collector, connector, supervisor, and privacy suites.
+- an executable side-effect audit proving every ordinary verification command is confined to fakes or a temporary root and cannot resolve/connect to the real portal, register LaunchAgents, invoke sudo, or mutate live route/DNS state.
 
 ### Controlled live cycle
 
