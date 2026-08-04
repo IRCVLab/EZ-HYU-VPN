@@ -25,6 +25,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("auth-binds-sudo-user-uid-console", testAuthorization),
                 ("config-rejects-homebrew-front-door", testConfigRejectsHomebrewFrontDoor),
                 ("config-accepts-root-runtime-shape", testConfigAcceptsRuntimeShape),
+                ("config-rejects-unbound-runtime-shapes", testConfigRejectsUnboundRuntimeShapes),
                 ("installed-guard-secure-path-and-wrapperd-manifest", testInstalledGuardSecurePathAndManifest),
                 ("helper-config-fixture-mode-arguments", testHelperConfigFixtureModeArguments),
                 ("helper-config-fixture-mode-decodes-temp-file", testHelperConfigFixtureModeDecodesTempFile),
@@ -104,7 +105,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
     static func helperConfigArtifactPaths() -> [String] {
         [
             "/",
-            "/Library", "/Library/Application Support", "/Library/Application Support/HYU VPN", "/Library/Application Support/HYU VPN/runtime", "/Library/Application Support/HYU VPN/runtime/openconnect", "/Library/Application Support/HYU VPN/runtime/openconnect/9.12", "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin", "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect",
+            "/Library", "/Library/Application Support", "/Library/Application Support/HYU VPN", "/Library/Application Support/HYU VPN/runtime", "/Library/Application Support/HYU VPN/runtime/current", "/Library/Application Support/HYU VPN/runtime/current/bin", "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect",
             "/Library/Application Support/HYU VPN/runtime/vpnc", "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper",
             "/Library/Application Support/HYU VPN/runtime/gp-hip-report",
             "/private", "/private/var", "/private/var/db", "/private/var/db/hyu-vpn", "/private/var/db/hyu-vpn/ledger"
@@ -137,8 +138,19 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
     }
 
     static func testConfigAcceptsRuntimeShape() throws {
-        let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect"), vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
+        let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"), vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
         try config.validateStaticShape()
+    }
+
+    static func testConfigRejectsUnboundRuntimeShapes() throws {
+        for path in [
+            "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect",
+            "/Library/Application Support/HYU VPN/runtime/current/openconnect",
+            "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect2"
+        ] {
+            let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: path), vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
+            try expectThrows("unbound runtime rejected: \(path)") { try config.validateStaticShape() }
+        }
     }
 
 
@@ -531,7 +543,7 @@ func harnessTempDir() throws -> URL { let url = FileManager.default.temporaryDir
 func writeHelperConfigFixture(extra: String?) throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("hyu-helper-config-fixture-\(UUID().uuidString).json")
     var object: [String: String] = [
-        "openConnectExecutable": "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect",
+        "openConnectExecutable": "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect",
         "vpncScript": "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper",
         "hipWrapper": "/Library/Application Support/HYU VPN/runtime/gp-hip-report",
         "stateDirectory": "/private/var/db/hyu-vpn",

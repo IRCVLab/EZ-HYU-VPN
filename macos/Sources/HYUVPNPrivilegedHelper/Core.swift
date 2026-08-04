@@ -237,7 +237,7 @@ public struct HelperConfiguration: Equatable {
 
     public static func fallbackProduction() -> HelperConfiguration {
         HelperConfiguration(
-            openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect"),
+            openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"),
             vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"),
             hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"),
             stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"),
@@ -274,7 +274,7 @@ public struct HelperConfiguration: Equatable {
             guard !path.contains("/../"), !path.hasSuffix("/..") else { throw HelperError.forbiddenPath(path) }
             guard path.hasPrefix("/Library/Application Support/HYU VPN/runtime/") || path.hasPrefix("/private/var/db/hyu-vpn") || path.hasPrefix("/rooted/") else { throw HelperError.forbiddenPath(path) }
         }
-        guard openConnectExecutable.path == "/rooted/openconnect" || openConnectExecutable.path.range(of: "^/Library/Application Support/HYU VPN/runtime/openconnect/[^/]+/bin/openconnect$", options: .regularExpression) != nil else { throw HelperError.forbiddenPath(openConnectExecutable.path) }
+        guard openConnectExecutable.path == "/rooted/openconnect" || openConnectExecutable.path == "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect" else { throw HelperError.forbiddenPath(openConnectExecutable.path) }
         guard vpncScript.path == "/rooted/vpnc-script" || vpncScript.path == "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper" else { throw HelperError.forbiddenPath(vpncScript.path) }
         guard hipWrapper.path == "/rooted/gp-hip-report" || hipWrapper.path.hasPrefix("/Library/Application Support/HYU VPN/runtime/") else { throw HelperError.forbiddenPath(hipWrapper.path) }
         guard stateDirectory.path == "/private/var/db/hyu-vpn" || stateDirectory.path == "/rooted/state" else { throw HelperError.forbiddenPath(stateDirectory.path) }

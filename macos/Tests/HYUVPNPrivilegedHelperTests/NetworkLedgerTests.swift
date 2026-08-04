@@ -81,8 +81,9 @@ import Testing
         #expect(!source.contains("/Library/Application Support/HYU VPN/runtime/hyu-vpnc-wrapperd"))
         #expect(RuntimePaths.production.upstream.path == "/Library/Application Support/HYU VPN/runtime/vpnc/vpnc-script")
         #expect(HelperConfiguration.fallbackProduction().vpncScript.path == "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper")
+        #expect(HelperConfiguration.fallbackProduction().openConnectExecutable.path == "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect")
         let good = HelperConfiguration(
-            openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect"),
+            openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"),
             vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"),
             hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"),
             stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"),
@@ -92,6 +93,17 @@ import Testing
             hipWrapperSHA256: String(repeating: "c", count: 64)
         )
         try good.validateStaticShape()
+        let unboundVersioned = HelperConfiguration(
+            openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect"),
+            vpncScript: good.vpncScript,
+            hipWrapper: good.hipWrapper,
+            stateDirectory: good.stateDirectory,
+            ledgerDirectory: good.ledgerDirectory,
+            executableSHA256: good.executableSHA256,
+            vpncScriptSHA256: good.vpncScriptSHA256,
+            hipWrapperSHA256: good.hipWrapperSHA256
+        )
+        #expect(throws: (any Error).self) { try unboundVersioned.validateStaticShape() }
         let bad = HelperConfiguration(
             openConnectExecutable: good.openConnectExecutable,
             vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/vpnc-script"),
