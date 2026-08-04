@@ -9,6 +9,8 @@ PROTECTED_ENDPOINT=166.104.100.100
 PROTECTED_PORT=53
 LAUNCH_LABEL=local.hyu-openconnect
 MUTATION_AUDIT=${HYU_ACCEPTANCE_MUTATION_AUDIT:-}
+# shellcheck source=tests/live_acceptance_gate.sh
+source "$ROOT/tests/live_acceptance_gate.sh"
 
 MODE=dry-run
 STATE_DIR=
@@ -18,10 +20,6 @@ OWNED_OPENCONNECT_PGID=
 NATIVE_WAS_CONNECTED=0
 NATIVE_STOPPED=0
 CLEANUP_RUNNING=0
-
-usage() {
-    echo "usage: $0 [--dry-run|--execute|--check-log FILE]" >&2
-}
 
 record_mutation() {
     action=$1
@@ -91,23 +89,11 @@ launch_agent_state() {
 print_preconditions() {
     echo "mode=dry-run"
     echo "state_changes=none"
-    if [ -x "$CONNECTOR" ]; then
-        echo "connector=executable"
-    else
-        echo "connector=missing"
-    fi
-    if [ -x /opt/homebrew/bin/openconnect ] && [ -x /opt/homebrew/bin/oathtool ]; then
-        echo "dependencies=present"
-    else
-        echo "dependencies=missing"
-    fi
-    echo "launch_agent=$(launch_agent_state)"
-    if native_connection_active; then
-        echo "native_connection=connected"
-    else
-        echo "native_connection=not-connected"
-    fi
-    echo "execute_hint=run-with---execute-after-offline-suite"
+    echo "connector=not-read-dry-run"
+    echo "dependencies=not-read-dry-run"
+    echo "launch_agent=not-read-dry-run"
+    echo "native_connection=not-read-dry-run"
+    echo "execute_hint=run-with---execute---acknowledge-live-mutation-after-offline-suite"
 }
 
 snapshot_state() {
@@ -525,26 +511,16 @@ run_execute() {
     return 0
 }
 
-case ${1:-} in
-    ""|--dry-run) MODE=dry-run ;;
-    --execute) MODE=execute ;;
-    --check-log)
-        if [ "$#" -ne 2 ]; then
-            usage
-            exit 2
-        fi
-        if log_is_secret_safe "$2"; then
-            echo "log_privacy=passed"
-            exit 0
-        fi
-        echo "log_privacy=failed"
-        exit 1
-        ;;
-    *) usage; exit 2 ;;
-esac
-if [ "$#" -gt 1 ]; then
-    usage
-    exit 2
+parse_live_acceptance_args "$@" || exit $?
+MODE=$LIVE_ACCEPTANCE_MODE
+
+if [ "$MODE" = check-log ]; then
+    if log_is_secret_safe "$LIVE_ACCEPTANCE_CHECK_LOG"; then
+        echo "log_privacy=passed"
+        exit 0
+    fi
+    echo "log_privacy=failed"
+    exit 1
 fi
 
 if [ "$MODE" = dry-run ]; then
@@ -552,5 +528,6 @@ if [ "$MODE" = dry-run ]; then
     exit 0
 fi
 
+require_live_mutation_ack "$(/bin/date +%s)" || exit $?
 echo "mode=execute"
 run_execute

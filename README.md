@@ -30,7 +30,7 @@ Run foreground mode first:
 Expected offline-safe behavior before live use:
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m unittest tests.test_launchd_config tests.test_supervisor tests.test_offline_safety_static tests.test_live_acceptance_gate -v
 python3 -m compileall -q src bin tests
 plutil -lint launchd/local.hyu-openconnect.plist
 git diff --check
@@ -40,15 +40,16 @@ During a real foreground attempt, confirm OpenConnect reports successful HIP sub
 
 ## Service disabled by default
 
-The launchd service is disabled by default; in other words, service disabled by default until acceptance passes. Do not load it until after live acceptance. After live acceptance, install and load with `launchctl` from an reviewed checkout, for example:
+The tracked legacy plist at `launchd/local.hyu-openconnect.plist` is a quarantine-only inert template: it is disabled, does not run the VPN service, and must not be copied into `~/Library/LaunchAgents` as an install target. A reviewed release/install path must generate or install an explicit service plist only after offline checks and live acceptance have passed.
+
+Live acceptance is mutation-gated. Dry-run/read-only checks remain the default; a real mutation run requires all of these in the same invocation before any live reads or mutations happen:
 
 ```sh
-mkdir -p "$HOME/Library/LaunchAgents"
-cp launchd/local.hyu-openconnect.plist "$HOME/Library/LaunchAgents/"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.hyu-openconnect.plist"
+nonce="hyu-live-mutation-$(date +%s)"
+HYU_VPN_ALLOW_LIVE_MUTATION="$nonce" tests/live_acceptance.sh --execute --acknowledge-live-mutation "$nonce"
 ```
 
-Use `launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.hyu-openconnect.plist"` to stop the service.
+Use the installed service label's documented bootout command from the reviewed installer/release artifact to stop the service. Do not bootstrap `launchd/local.hyu-openconnect.plist`.
 
 ## Stop and rollback
 

@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from hyu_vpn.network import OwnedSessionEvidence
+from hyu_vpn.control import AutoReconnectPreference
 from hyu_vpn.supervisor import CommandResult, NativeConflictDetector, ReconnectPolicy, Supervisor, SupervisorConfig, main
 
 
@@ -191,7 +192,73 @@ class FakeProcess:
         return self.returncode
 
 
+
+
+def managed_temp_path(testcase: unittest.TestCase, *parts: str) -> Path:
+    td = tempfile.TemporaryDirectory()
+    testcase.addCleanup(td.cleanup)
+    return Path(td.name).joinpath(*parts)
+
+
+def enable_auto_reconnect(path: Path) -> str:
+    AutoReconnectPreference(path).write(True)
+    return str(path)
+
+
+def enabled_auto_reconnect_path(testcase: unittest.TestCase) -> str:
+    return enable_auto_reconnect(managed_temp_path(testcase, "auto.json"))
+
 class SupervisorLoopTests(unittest.TestCase):
+
+    def test_missing_auto_reconnect_preference_idles_disabled_without_launching_or_live_reads(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            popen = mock.Mock()
+            detector = mock.Mock(conflict_active=mock.Mock(return_value=False))
+
+            supervisor = None
+            def stop_after_idle(_delay):
+                supervisor._stop_requested = True
+
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    conflict_poll_interval=0.01,
+                ),
+                conflict_detector=detector,
+                popen_factory=popen,
+                sleep=stop_after_idle,
+            )
+
+            self.assertEqual(supervisor.run(), 0)
+
+            from hyu_vpn.status import read_status
+            self.assertFalse(pref_path.exists())
+            self.assertEqual(read_status(status_path).state, "disabled")
+            self.assertFalse(read_status(status_path).automatic_reconnect_enabled)
+            detector.conflict_active.assert_not_called()
+            popen.assert_not_called()
+
+    def test_explicit_connect_control_enables_auto_reconnect_preference(self):
+        with tempfile.TemporaryDirectory() as td:
+            pref_path = Path(td) / "auto.json"
+            supervisor = Supervisor(
+                SupervisorConfig(
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(Path(td) / "status.json"),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+
+            self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
+            self.assertTrue(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
+
     def test_polls_native_conflict_with_sleep_and_starts_only_after_clear(self):
         clock = FakeClock()
         conflicts = iter([True, True, False])
@@ -201,7 +268,7 @@ class SupervisorLoopTests(unittest.TestCase):
             return FakeProcess(returncode=0)
 
         supervisor = Supervisor(
-            SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "state" / "supervisor.lock"), conflict_poll_interval=7, max_iterations=1),
+            SupervisorConfig(lock_path=str(managed_temp_path(self, "state", "supervisor.lock")), preference_path=enabled_auto_reconnect_path(self), conflict_poll_interval=7, max_iterations=1),
             conflict_detector=mock.Mock(conflict_active=lambda: next(conflicts)),
             popen_factory=popen,
             monotonic=clock.monotonic,
@@ -223,7 +290,7 @@ class SupervisorLoopTests(unittest.TestCase):
             return processes.pop(0)
 
         supervisor = Supervisor(
-            SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "supervisor.lock"), max_iterations=3),
+            SupervisorConfig(lock_path=str(managed_temp_path(self, "supervisor.lock")), preference_path=enabled_auto_reconnect_path(self), max_iterations=3),
             conflict_detector=mock.Mock(conflict_active=lambda: False),
             popen_factory=popen,
             monotonic=clock.monotonic,
@@ -238,7 +305,7 @@ class SupervisorLoopTests(unittest.TestCase):
         processes = [FakeProcess(returncode=0), FakeProcess(returncode=0)]
 
         supervisor = Supervisor(
-            SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "supervisor.lock"), max_iterations=2),
+            SupervisorConfig(lock_path=str(managed_temp_path(self, "supervisor.lock")), preference_path=enabled_auto_reconnect_path(self), max_iterations=2),
             conflict_detector=mock.Mock(conflict_active=lambda: False),
             popen_factory=lambda *_args, **_kwargs: processes.pop(0),
             monotonic=clock.monotonic,
@@ -258,7 +325,7 @@ class SupervisorLoopTests(unittest.TestCase):
             raise FileNotFoundError("path canary")
 
         supervisor = Supervisor(
-            SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "supervisor.lock"), max_iterations=3),
+            SupervisorConfig(lock_path=str(managed_temp_path(self, "supervisor.lock")), preference_path=enabled_auto_reconnect_path(self), max_iterations=3),
             conflict_detector=mock.Mock(conflict_active=lambda: False),
             popen_factory=fail_launch,
             monotonic=clock.monotonic,
@@ -276,12 +343,14 @@ class SupervisorLoopTests(unittest.TestCase):
             status_path = Path(td) / "status.json"
             processes = [FakeProcess(returncode=1), FakeProcess(returncode=0)]
             starts = []
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "supervisor.lock"),
                     max_iterations=2,
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(socket_path),
                     conflict_poll_interval=30,
                 ),
@@ -311,13 +380,15 @@ class SupervisorLoopTests(unittest.TestCase):
     def test_failed_child_writes_backoff_status_with_next_retry(self):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "supervisor.lock"),
                     max_iterations=1,
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(Path(td) / "control.sock"),
                 ),
                 conflict_detector=mock.Mock(conflict_active=lambda: False),
@@ -345,12 +416,14 @@ class SupervisorLoopTests(unittest.TestCase):
             process = FakeProcess(returncode=0)
             process.stdout = stdout
 
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "supervisor.lock"),
                     max_iterations=1,
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                 ),
                 conflict_detector=mock.Mock(conflict_active=lambda: False),
                 popen_factory=lambda *_args, **_kwargs: process,
@@ -372,7 +445,7 @@ class SupervisorLoopTests(unittest.TestCase):
         readiness.wait_until_ready.return_value = True
 
         supervisor = Supervisor(
-            SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "supervisor.lock"), max_iterations=1),
+            SupervisorConfig(lock_path=str(managed_temp_path(self, "supervisor.lock")), preference_path=enabled_auto_reconnect_path(self), max_iterations=1),
             conflict_detector=mock.Mock(conflict_active=lambda: False),
             readiness=readiness,
             popen_factory=lambda argv, **kwargs: started.append(argv) or FakeProcess(returncode=0),
@@ -390,7 +463,7 @@ class SupervisorLoopTests(unittest.TestCase):
         popen = mock.Mock()
 
         supervisor = Supervisor(
-            SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "supervisor.lock"), max_iterations=1),
+            SupervisorConfig(lock_path=str(managed_temp_path(self, "supervisor.lock")), preference_path=enabled_auto_reconnect_path(self), max_iterations=1),
             conflict_detector=mock.Mock(conflict_active=lambda: False),
             readiness=readiness,
             popen_factory=popen,
@@ -428,7 +501,7 @@ class SupervisorLoopTests(unittest.TestCase):
     def test_signal_stop_forwards_to_child_group_waits_then_kills_on_timeout(self):
         proc = FakeProcess(returncode=None, wait_side_effect=[subprocess.TimeoutExpired(["child"], 0.25), 0])
         sent = []
-        supervisor = Supervisor(SupervisorConfig(lock_path=str(Path(tempfile.mkdtemp()) / "supervisor.lock"), stop_timeout=0.25))
+        supervisor = Supervisor(SupervisorConfig(lock_path=str(managed_temp_path(self, "supervisor.lock")), stop_timeout=0.25))
         supervisor._child = proc
 
         with mock.patch("hyu_vpn.supervisor.os.killpg", side_effect=lambda pid, sig: sent.append((pid, sig))):
@@ -453,9 +526,12 @@ class SupervisorLoopTests(unittest.TestCase):
             script = (
                 "import sys; "
                 f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r}); "
+                "from pathlib import Path; "
+                "from hyu_vpn.control import AutoReconnectPreference; "
                 "from hyu_vpn.supervisor import Supervisor, SupervisorConfig; "
                 "detector=type('Detector', (), {'conflict_active': lambda self: True})(); "
-                f"raise SystemExit(Supervisor(SupervisorConfig(lock_path={str(Path(td) / 'lock')!r}, conflict_poll_interval=120), conflict_detector=detector).run())"
+                f"pref={str(Path(td) / 'auto.json')!r}; AutoReconnectPreference(pref).write(True); "
+                f"raise SystemExit(Supervisor(SupervisorConfig(lock_path={str(Path(td) / 'lock')!r}, preference_path=pref, conflict_poll_interval=120), conflict_detector=detector).run())"
             )
             proc = subprocess.Popen([sys.executable, "-c", script])
             try:
@@ -500,11 +576,13 @@ class SupervisorControlTests(unittest.TestCase):
                 return CommandResult(tuple(argv), 0, "", "")
 
             status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(Path(td) / "control.sock"),
                     helper_path="/helper",
                     max_iterations=1,
@@ -557,11 +635,13 @@ class SupervisorControlTests(unittest.TestCase):
                 release_helper.wait(2)
                 return CommandResult(tuple(argv), 0, "", "")
 
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
                     status_path=str(Path(td) / "status.json"),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(Path(td) / "control.sock"),
                     helper_path="/helper",
                     max_iterations=1,
@@ -601,11 +681,13 @@ class SupervisorControlTests(unittest.TestCase):
                 release_popen.wait(2)
                 return FakeProcess(returncode=0)
 
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
                     status_path=str(Path(td) / "status.json"),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(Path(td) / "control.sock"),
                     helper_path="/helper",
                     max_iterations=1,
@@ -660,11 +742,13 @@ class SupervisorControlTests(unittest.TestCase):
                 events.append("helper-stop")
                 return CommandResult(tuple(argv), 0, "", "")
 
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(Path(td) / "control.sock"),
                     helper_path="/helper",
                     max_iterations=1,
@@ -719,11 +803,13 @@ class SupervisorControlTests(unittest.TestCase):
                 release_popen.wait(2)
                 return process
 
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(socket_path),
                     helper_path="/helper",
                     max_iterations=1,
@@ -757,11 +843,13 @@ class SupervisorControlTests(unittest.TestCase):
     def test_status_updates_are_state_locked_and_preserve_nonconflicting_fields(self):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(Path(td) / "control.sock"),
                 ),
                 conflict_detector=mock.Mock(conflict_active=lambda: False),
@@ -781,6 +869,7 @@ class SupervisorControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             pref_path = Path(td) / "auto.json"
             status_path = Path(td) / "status.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
@@ -877,11 +966,13 @@ class SupervisorControlTests(unittest.TestCase):
     def test_stale_generation_events_after_disconnect_or_next_session_are_ignored(self):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(Path(td) / "control.sock"),
                     helper_path="/helper",
                 ),
@@ -929,17 +1020,35 @@ class SupervisorControlTests(unittest.TestCase):
                 ),
                 conflict_detector=mock.Mock(conflict_active=lambda: False),
             )
+            wait_entered = threading.Event()
+            original_control_event = supervisor._control_event
+
+            class ObservedControlEvent:
+                def set(self):
+                    original_control_event.set()
+
+                def wait(self, timeout=None):
+                    wait_entered.set()
+                    return original_control_event.wait(timeout)
+
+                def clear(self):
+                    original_control_event.clear()
+
+            supervisor._control_event = ObservedControlEvent()
             supervisor._start_control_server()
             try:
                 wait_thread = threading.Thread(target=lambda: supervisor._wait_for_control_or_stop(30))
                 wait_thread.start()
 
+                self.assertTrue(wait_entered.wait(2))
+                self.assertFalse(AutoReconnectPreference(pref_path).read(default=False))
                 self.assertEqual(send_control_command(socket_path, "connect"), {"schema_version": 1, "ok": True, "error_code": None})
                 wait_thread.join(timeout=2)
 
                 self.assertFalse(wait_thread.is_alive())
                 self.assertTrue(AutoReconnectPreference(pref_path).read(default=False))
             finally:
+                supervisor._control_event = original_control_event
                 supervisor._stop_control_server()
 
     def test_disconnect_during_child_exit_disables_auto_and_prevents_immediate_reconnect(self):
@@ -962,6 +1071,7 @@ class SupervisorControlTests(unittest.TestCase):
                     return 0
 
             process = BlockingProcess()
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
@@ -1002,11 +1112,13 @@ class SupervisorControlTests(unittest.TestCase):
     def test_state_transitions_clear_stale_session_fields(self):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),
                     status_path=str(status_path),
-                    preference_path=str(Path(td) / "auto.json"),
+                    preference_path=str(pref_path),
                     control_socket_path=str(Path(td) / "control.sock"),
                 ),
                 conflict_detector=mock.Mock(conflict_active=lambda: False),
@@ -1047,6 +1159,7 @@ class SupervisorControlTests(unittest.TestCase):
                     return super().wait(timeout=timeout)
 
             process = ControlClientProcess(returncode=0)
+            enable_auto_reconnect(pref_path)
             supervisor = Supervisor(
                 SupervisorConfig(
                     lock_path=str(Path(td) / "lock"),

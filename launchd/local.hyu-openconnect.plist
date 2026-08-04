@@ -2,16 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- Quarantine template: inert by default so this tracked legacy plist cannot auto-connect. -->
   <key>Label</key>
   <string>local.hyu-openconnect</string>
+  <key>Disabled</key>
+  <true/>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/shchoi/workspace/hyu-openconnect/bin/hyu-vpn-service</string>
+    <string>/usr/bin/false</string>
   </array>
   <key>RunAtLoad</key>
-  <true/>
+  <false/>
   <key>KeepAlive</key>
-  <true/>
+  <false/>
   <key>ThrottleInterval</key>
   <integer>120</integer>
   <key>ProcessType</key>

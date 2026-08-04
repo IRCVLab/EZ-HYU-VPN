@@ -11,15 +11,22 @@ FINAL_SERVICE = "/Users/shchoi/workspace/hyu-openconnect/bin/hyu-vpn-service"
 
 
 class LaunchdConfigTests(unittest.TestCase):
-    def test_launchd_plist_uses_final_service_path_and_safe_restart_settings(self):
+    def test_tracked_legacy_launchd_plist_is_inert_and_cannot_auto_run(self):
         with PLIST.open("rb") as fh:
             config = plistlib.load(fh)
 
         self.assertEqual(config["Label"], "local.hyu-openconnect")
-        self.assertEqual(config["ProgramArguments"], [FINAL_SERVICE])
-        self.assertTrue(config["RunAtLoad"])
-        self.assertTrue(config["KeepAlive"])
-        self.assertEqual(config["ThrottleInterval"], 120)
+        self.assertNotEqual(config.get("ProgramArguments"), [FINAL_SERVICE])
+        self.assertFalse(config.get("RunAtLoad", False))
+        self.assertFalse(config.get("KeepAlive", False))
+        self.assertIn("Disabled", config)
+        self.assertTrue(config["Disabled"])
+
+    def test_inert_legacy_launchd_template_documents_quarantine_intent(self):
+        text = PLIST.read_text(encoding="utf-8")
+
+        self.assertIn("quarantine", text.lower())
+        self.assertIn("inert", text.lower())
 
     def test_launchd_plist_uses_user_safe_redacted_logs_and_no_secrets_or_native_refs(self):
         text = PLIST.read_text(encoding="utf-8")

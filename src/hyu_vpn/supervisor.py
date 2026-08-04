@@ -330,7 +330,7 @@ class Supervisor:
                 self._write_current_status(state="connected", connected_at=event.timestamp)
 
     def _base_status(self, state: str) -> VpnStatus:
-        return VpnStatus(state=state, automatic_reconnect_enabled=self.preference.read(default=True), last_transition_at=self.now())
+        return VpnStatus(state=state, automatic_reconnect_enabled=self.preference.read(default=False), last_transition_at=self.now())
 
     _PRESERVE = object()
 
@@ -400,29 +400,29 @@ class Supervisor:
                     self._write_current_status(state="error", error_code="REPAIR_REQUIRED")
                     self._wait_for_control_or_stop(self.config.conflict_poll_interval)
                     continue
-                if not self.preference.read(default=True):
+                if not self.preference.read(default=False):
                     self._write_current_status(state="disabled", automatic=False)
                     self._wait_for_control_or_stop(self.config.conflict_poll_interval)
                     continue
                 while not self._stop_requested and self.conflict_detector.conflict_active():
                     self._write_current_status(state="waiting-for-network", automatic=True)
                     self._wait_for_control_or_stop(self.config.conflict_poll_interval)
-                    if not self.preference.read(default=True):
+                    if not self.preference.read(default=False):
                         break
                 if self._stop_requested:
                     break
-                if not self.preference.read(default=True):
+                if not self.preference.read(default=False):
                     continue
                 if self.readiness is not None:
                     self._write_current_status(state="waiting-for-network", automatic=True)
                     if not self.readiness.wait_until_ready(stop_requested=lambda: self._stop_requested):
                         break
-                if self._stop_requested or not self.preference.read(default=True):
+                if self._stop_requested or not self.preference.read(default=False):
                     continue
 
                 started_at = self.monotonic()
                 iterations += 1
-                self._write_current_status(state="connecting", automatic=self.preference.read(default=True))
+                self._write_current_status(state="connecting", automatic=self.preference.read(default=False))
                 try:
                     generation = self._begin_new_generation()
                     child = self.popen_factory(
@@ -472,7 +472,7 @@ class Supervisor:
                     self._state_changed.notify_all()
                 if self._stop_requested:
                     break
-                if not self.preference.read(default=True):
+                if not self.preference.read(default=False):
                     self._write_current_status(state="disabled", automatic=False)
                     if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
                         break
@@ -573,7 +573,7 @@ class Supervisor:
         with self._state_changed:
             self._starting_generation = None
             self._child = child
-            accepted = self._active_generation == generation and not self._repair_required and self.preference.read(default=True)
+            accepted = self._active_generation == generation and not self._repair_required and self.preference.read(default=False)
             self._state_changed.notify_all()
             return accepted
 
