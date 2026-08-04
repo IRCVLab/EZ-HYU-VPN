@@ -1,0 +1,21 @@
+HYU VPN internal lab written source offer
+
+For at least three years from internal distribution, the lab maintainer who provided this DMG will provide the corresponding source for copied GPL/LGPL runtime components on request, at no more than the reasonable cost of physically transferring the source.
+
+Primary upstream source locations:
+- OpenConnect / libopenconnect: https://www.openconnect-vpn.net/
+- p11-kit: https://p11-glue.github.io/p11-glue/p11-kit.html
+- stoken: https://github.com/cernekee/stoken
+- gnuTLS: https://www.gnutls.org/
+- nettle / hogweed: https://www.lysator.liu.se/~nisse/nettle/
+- GNU MP: https://gmplib.org/
+- GNU gettext: https://www.gnu.org/software/gettext/
+- GNU libidn2: https://www.gnu.org/software/libidn/
+- GNU libunistring: https://www.gnu.org/software/libunistring/
+- GNU libtasn1: https://www.gnu.org/software/libtasn1/
+- libtomcrypt: https://www.libtom.net/LibTomCrypt/
+- libtommath: https://www.libtom.net/LibTomMath/
+- oath-toolkit / liboath / oathtool: https://www.nongnu.org/oath-toolkit/
+- vpnc-script: https://gitlab.com/openconnect/vpnc-scripts
+
+The real release gate requires a package-root SOURCE-COMPLIANCE-BUNDLE.tar.gz containing retained source/license artifacts or the exact written-offer packet for the bundled closure.

@@ -1,0 +1,84 @@
+HYU VPN internal lab third-party notices
+
+This ad-hoc-signed arm64 package is only for the named internal lab. The release manifest enumerates the exact copied runtime files and their hashes; the license/source entries below cover the embedded OpenConnect/oathtool/vpnc runtime closure currently expected on the lab build host.
+
+Expected copied runtime closure components
+
+DMG-root runtime paths are under `runtime/openconnect/{bin,lib}` plus `runtime/oathtool`; Task7 staging maps OpenConnect/oathtool to `runtime/bin/*` beside `runtime/lib/*` for `@loader_path/../lib` resolution.
+- runtime/openconnect/bin/openconnect
+- runtime/openconnect/lib/libopenconnect.5.dylib
+- runtime/bin/oathtool
+- runtime/openconnect/lib/liboath.0.dylib
+- runtime/openconnect/lib/libp11-kit.0.dylib
+- runtime/openconnect/lib/libstoken.1.dylib
+- runtime/openconnect/lib/libgnutls.30.dylib
+- runtime/openconnect/lib/libhogweed.7.dylib
+- runtime/openconnect/lib/libnettle.9.dylib
+- runtime/openconnect/lib/libgmp.10.dylib
+- runtime/openconnect/lib/libintl.8.dylib
+- runtime/openconnect/lib/libidn2.0.dylib
+- runtime/openconnect/lib/libtasn1.6.dylib
+- runtime/openconnect/lib/libtomcrypt.1.dylib
+- runtime/openconnect/lib/libtommath.1.dylib
+- runtime/openconnect/lib/libunistring.5.dylib
+- runtime/vpnc/vpnc-script
+
+OpenConnect / libopenconnect
+License: LGPL-2.1-only
+Source: https://www.openconnect-vpn.net/
+
+p11-kit
+License: BSD-3-Clause
+Source: https://p11-glue.github.io/p11-glue/p11-kit.html
+
+stoken
+License: LGPL-2.1-only
+Source: https://github.com/cernekee/stoken
+
+gnuTLS
+License: LGPL-2.1-or-later
+Source: https://www.gnutls.org/
+
+nettle / hogweed
+License: LGPL-3.0-or-later or GPL-2.0-or-later depending on linked component
+Source: https://www.lysator.liu.se/~nisse/nettle/
+
+GNU MP / libgmp
+License: LGPL-3.0-or-later or GPL-2.0-or-later
+Source: https://gmplib.org/
+
+GNU gettext / libintl
+License: LGPL-2.1-or-later
+Source: https://www.gnu.org/software/gettext/
+
+GNU libidn2
+License: GPL-3.0-or-later or LGPL-3.0-or-later depending on component
+Source: https://www.gnu.org/software/libidn/
+
+GNU libunistring
+License: LGPL-3.0-or-later or GPL-2.0-or-later depending on component
+Source: https://www.gnu.org/software/libunistring/
+
+GNU libtasn1
+License: LGPL-2.1-or-later
+Source: https://www.gnu.org/software/libtasn1/
+
+libtomcrypt
+License: Unlicense or public domain style upstream terms
+Source: https://www.libtom.net/LibTomCrypt/
+
+libtommath
+License: Unlicense or public domain style upstream terms
+Source: https://www.libtom.net/LibTomMath/
+
+oath-toolkit / liboath / oathtool
+License: GPL-3.0-or-later for oathtool; LGPL-2.1-or-later for liboath
+Source: https://www.nongnu.org/oath-toolkit/
+
+vpnc-script
+License: GPL-2.0-or-later
+Source: https://gitlab.com/openconnect/vpnc-scripts
+License evidence: the local vpnc-script header states it is redistributable under GPL version 2 or, at the recipient's option, any later version.
+
+LGPL source offer: for LGPL-covered copied components, recipients may obtain corresponding source from the upstream source URLs above or from the lab maintainer who provided this internal package.
+GPL source offer: for GPL-covered copied components, recipients may obtain corresponding source from the upstream source URLs above or from the lab maintainer who provided this internal package.

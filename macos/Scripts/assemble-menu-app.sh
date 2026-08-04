@@ -5,6 +5,36 @@ exe=$1
 dest=$2
 case "$exe" in /*) ;; *) exe="$PWD/$exe" ;; esac
 case "$dest" in /*) ;; *) dest="$PWD/$dest" ;; esac
+/usr/bin/python3 - "$dest" "$(cd "$(dirname "$0")/../.." && pwd -P)" <<'PY'
+import pathlib, stat, sys
+dest = pathlib.Path(sys.argv[1])
+repo = pathlib.Path(sys.argv[2]).resolve(strict=False)
+resolved = dest.resolve(strict=False)
+forbidden = [pathlib.Path('/'), repo, pathlib.Path('/Applications'), pathlib.Path('/Library'), pathlib.Path('/System'), pathlib.Path('/usr')]
+if dest.is_symlink() or any(resolved == root or (root != pathlib.Path('/') and root in resolved.parents) for root in forbidden):
+    print(f"unsafe destination: {dest}", file=sys.stderr)
+    raise SystemExit(73)
+original = dest if dest.is_absolute() else pathlib.Path.cwd() / dest
+probe = pathlib.Path('/')
+for part in original.parts[1:-1]:
+    probe = probe / part
+    try:
+        mode = probe.lstat().st_mode
+    except FileNotFoundError:
+        continue
+    allowed = {pathlib.Path('/var'): pathlib.Path('/private/var'), pathlib.Path('/tmp'): pathlib.Path('/private/tmp')}
+    is_allowed = probe in allowed and probe.resolve(strict=False) == allowed[probe]
+    if stat.S_ISLNK(mode) and not is_allowed:
+        print(f"unsafe destination symlink ancestor: {probe}", file=sys.stderr)
+        raise SystemExit(73)
+if pathlib.Path('/private') in resolved.parents or resolved == pathlib.Path('/private'):
+    if not (resolved == pathlib.Path('/private/tmp') or pathlib.Path('/private/tmp') in resolved.parents or pathlib.Path('/private/var/folders') in resolved.parents or resolved == pathlib.Path('/private/var/folders')):
+        print(f"unsafe non-temp private destination: {dest}", file=sys.stderr)
+        raise SystemExit(73)
+if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+    print(f"unsafe destination existing non-empty directory: {dest}", file=sys.stderr)
+    raise SystemExit(73)
+PY
 app="$dest/HYU VPN.app"
 contents="$app/Contents"
 macos_dir="$contents/MacOS"
