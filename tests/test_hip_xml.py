@@ -37,14 +37,22 @@ class HipXmlTests(unittest.TestCase):
 
         root = ET.fromstring(xml_bytes)
         self.assertEqual(root.tag, "hip-report")
-        self.assertEqual(root.findtext("report-version"), "4")
+        self.assertEqual(root.attrib, {"name": "hip-report"})
         self.assertEqual(root.findtext("md5-sum"), "abcdef0123456789abcdef0123456789")
-        self.assertEqual(root.findtext("user"), "alice")
+        self.assertEqual(root.findtext("user-name"), "alice")
         self.assertEqual(root.findtext("domain"), "HYU")
-        self.assertEqual(root.findtext("computer"), "alice-mac")
-        self.assertEqual(root.findtext("client-ip"), "192.0.2.55")
-        self.assertEqual(root.findtext("client-ipv6"), "2001:db8::55")
-        self.assertEqual(root.findtext("generated-at"), "2026-08-04T01:02:03+00:00")
+        self.assertEqual(root.findtext("host-name"), "alice-mac")
+        self.assertEqual(root.find("host-id").text, None)
+        self.assertEqual(root.findtext("ip-address"), "192.0.2.55")
+        self.assertEqual(root.findtext("ipv6-address"), "2001:db8::55")
+        self.assertEqual(root.findtext("generate-time"), "2026-08-04T01:02:03+00:00")
+        self.assertEqual(root.findtext("hip-report-version"), "4")
+        self.assertIsNone(root.find("report-version"))
+        self.assertIsNone(root.find("user"))
+        self.assertIsNone(root.find("computer"))
+        self.assertIsNone(root.find("client-ip"))
+        self.assertIsNone(root.find("client-ipv6"))
+        self.assertIsNone(root.find("generated-at"))
         self.assertEqual(
             [category.attrib["name"] for category in root.findall("./categories/category")],
             [
@@ -97,6 +105,7 @@ class HipXmlTests(unittest.TestCase):
         native = ET.parse(FIXTURE).getroot()
 
         self._normalize_dynamic_values(generated)
+        self._normalize_dynamic_values(native)
         self.assertEqual(ET.tostring(generated, encoding="unicode"), ET.tostring(native, encoding="unicode"))
 
     def test_escapes_xml_text_without_changing_posture_values(self):
@@ -120,7 +129,7 @@ class HipXmlTests(unittest.TestCase):
         self.assertIn("Ampersand &amp; less &lt; greater &gt; quote", raw_xml)
         self.assertIn("HYU &amp; &lt;DOMAIN&gt;", raw_xml)
         root = ET.fromstring(xml_bytes)
-        self.assertEqual(root.findtext("user"), dangerous)
+        self.assertEqual(root.findtext("user-name"), dangerous)
         self.assertEqual(root.findtext("./categories/category[@name='host-info']/host-name"), dangerous)
         self.assertEqual(root.findtext("./categories/category[@name='anti-malware']/product/name"), dangerous)
 
@@ -146,12 +155,40 @@ class HipXmlTests(unittest.TestCase):
         self.assertNotIn("<encrypted>encrypted</encrypted>", xml_bytes.decode("utf-8"))
 
     def _normalize_dynamic_values(self, root):
-        for path, value in {
+        root.attrib.clear()
+        root.set("name", "hip-report")
+        categories = root.find("categories")
+        self.assertIsNotNone(categories, "categories")
+        existing_text = {child.tag: child.text for child in list(root) if child.tag != "categories"}
+        header_values = {
             "md5-sum": "00000000000000000000000000000000",
-            "user": "TEST-USER",
-            "computer": "TEST-HOST",
-            "client-ip": "192.0.2.10",
-            "client-ipv6": "2001:db8::10",
+            "user-name": "TEST-USER",
+            "domain": existing_text.get("domain"),
+            "host-name": "TEST-HOST",
+            "host-id": None,
+            "ip-address": "192.0.2.10",
+            "ipv6-address": "2001:db8::10",
+            "generate-time": "NORMALIZED-GENERATE-TIME",
+            "hip-report-version": "4",
+        }
+        legacy_aliases = {
+            "user-name": "user",
+            "host-name": "computer",
+            "ip-address": "client-ip",
+            "ipv6-address": "client-ipv6",
+            "hip-report-version": "report-version",
+        }
+        for tag, legacy_tag in legacy_aliases.items():
+            if header_values[tag] is None and legacy_tag in existing_text:
+                header_values[tag] = existing_text[legacy_tag]
+
+        root[:] = []
+        for tag, value in header_values.items():
+            element = ET.SubElement(root, tag)
+            element.text = value
+        root.append(categories)
+
+        for path, value in {
             "./categories/category[@name='host-info']/host-name": "TEST-HOST",
             "./categories/category[@name='host-info']/user-name": "TEST-USER",
             "./categories/category[@name='host-info']/network-interfaces/interface/ipv4": "192.0.2.10",
@@ -160,9 +197,6 @@ class HipXmlTests(unittest.TestCase):
             element = root.find(path)
             self.assertIsNotNone(element, path)
             element.text = value
-        generated_at = root.find("generated-at")
-        if generated_at is not None:
-            root.remove(generated_at)
 
 
 if __name__ == "__main__":

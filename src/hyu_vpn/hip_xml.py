@@ -18,6 +18,7 @@ class HostInfo:
     os_version: Optional[str] = None
     interface_name: Optional[str] = None
     mac_address: Optional[str] = None
+    host_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -164,15 +165,16 @@ def build_hip_xml(
     posture: MacPosture,
     generated_at: datetime,
 ) -> bytes:
-    root = ET.Element("hip-report")
-    _add_text(root, "report-version", "4")
+    root = ET.Element("hip-report", {"name": "hip-report"})
     _add_text(root, "md5-sum", invocation.md5)
-    _add_text(root, "user", identity.user)
+    _add_text(root, "user-name", identity.user)
     _add_text(root, "domain", identity.domain)
-    _add_text(root, "computer", identity.computer)
-    _add_text(root, "client-ip", invocation.client_ip)
-    _add_text(root, "client-ipv6", invocation.client_ipv6)
-    _add_text(root, "generated-at", generated_at.isoformat())
+    _add_text(root, "host-name", identity.computer)
+    _add_text(root, "host-id", posture.host_info.host_id)
+    _add_text(root, "ip-address", invocation.client_ip)
+    _add_text(root, "ipv6-address", invocation.client_ipv6)
+    _add_text(root, "generate-time", generated_at.isoformat())
+    _add_text(root, "hip-report-version", "4")
 
     categories = ET.SubElement(root, "categories")
     for name in _CATEGORY_ORDER:
