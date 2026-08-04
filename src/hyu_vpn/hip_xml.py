@@ -56,6 +56,7 @@ class Product:
 class Drive:
     drive_name: str
     enc_state: Optional[str] = None
+    product_version: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,7 @@ def _default_anti_malware() -> Tuple[Product, ...]:
 
 
 def _default_disk_backup() -> Tuple[Product, ...]:
-    return (_apple_product("Time Machine", last_backup_time="n/a"),)
+    return (_apple_product("Time Machine", version="1.3", last_backup_time="n/a"),)
 
 
 def _default_disk_encryption_drives() -> Tuple[Drive, ...]:
@@ -142,10 +143,6 @@ def _value_or_unknown(value: Optional[str]) -> str:
     return value if value is not None else "unknown"
 
 
-def _mac_for_xml(value: Optional[str]) -> Optional[str]:
-    return value.replace(":", "-") if value else value
-
-
 def _prod_attrs(product: Product) -> dict[str, str]:
     attrs = {
         "vendor": product.vendor,
@@ -177,11 +174,23 @@ def _add_list_product(category: ET.Element, product: Product) -> ET.Element:
 
 
 def _interfaces(posture: HostInfo, invocation: HipInvocation) -> Tuple[NetworkInterface, ...]:
+    def with_invocation_addresses(interface: NetworkInterface) -> NetworkInterface:
+        ipv4_addresses = interface.ipv4_addresses or ((invocation.client_ip,) if invocation.client_ip else ())
+        ipv6_addresses = interface.ipv6_addresses or ((invocation.client_ipv6,) if invocation.client_ipv6 else ())
+        return NetworkInterface(
+            name=interface.name,
+            description=interface.description,
+            mac_address=interface.mac_address,
+            ipv4_addresses=ipv4_addresses,
+            ipv6_addresses=ipv6_addresses,
+        )
+
     if posture.interfaces:
-        return posture.interfaces
+        return tuple(with_invocation_addresses(interface) for interface in posture.interfaces)
     if posture.interface_name or posture.mac_address or invocation.client_ip or invocation.client_ipv6:
         return (NetworkInterface(
             name=posture.interface_name or "unknown",
+            description=posture.interface_name,
             mac_address=posture.mac_address,
             ipv4_addresses=(invocation.client_ip,) if invocation.client_ip else (),
             ipv6_addresses=(invocation.client_ipv6,) if invocation.client_ipv6 else (),
@@ -209,7 +218,7 @@ def _add_host_info(category: ET.Element, invocation: HipInvocation, identity: Co
     for interface in _interfaces(posture, invocation):
         entry = ET.SubElement(network, "entry", {"name": interface.name})
         _add_text(entry, "description", interface.description)
-        _add_text(entry, "mac-address", _mac_for_xml(interface.mac_address))
+        _add_text(entry, "mac-address", interface.mac_address)
         _add_address_entries(entry, "ip-address", interface.ipv4_addresses)
         _add_address_entries(entry, "ipv6-address", interface.ipv6_addresses)
 
@@ -230,7 +239,8 @@ def _add_disk_backup(category: ET.Element, products: Tuple[Product, ...]) -> Non
 
 
 def _add_disk_encryption(category: ET.Element, drives: Tuple[Drive, ...]) -> None:
-    product_info = _add_list_product(category, _apple_product("FileVault", version="n/a"))
+    product_version = drives[0].product_version if drives and drives[0].product_version else "n/a"
+    product_info = _add_list_product(category, _apple_product("FileVault", version=product_version))
     drives_node = ET.SubElement(product_info, "drives")
     for drive in drives:
         entry = ET.SubElement(drives_node, "entry")

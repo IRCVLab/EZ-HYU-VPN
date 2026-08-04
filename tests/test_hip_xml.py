@@ -83,11 +83,11 @@ def sample_posture():
             Product(
                 vendor="Apple Inc.",
                 name="Gatekeeper",
-                version="TEST-GATEKEEPER",
+                version="14.0",
                 defver="",
                 engver="",
                 datemon="08",
-                dateday="01",
+                dateday="04",
                 dateyear="2026",
                 prod_type="3",
                 os_type="4",
@@ -95,11 +95,11 @@ def sample_posture():
                 last_full_scan_time="n/a",
             ),
         ),
-        disk_backup=(Product(vendor="Apple Inc.", name="Time Machine", version="TEST-TM", last_backup_time="n/a"),),
-        disk_encryption=(Drive(drive_name="All", enc_state="encrypted"),),
+        disk_backup=(Product(vendor="Apple Inc.", name="Time Machine", version="1.3", last_backup_time="n/a"),),
+        disk_encryption=(Drive(drive_name="All", enc_state="encrypted", product_version="14.0"),),
         firewall=(
-            Product(vendor="Apple Inc.", name="Mac OS X Builtin Firewall", version="TEST-FW", is_enabled="yes"),
-            Product(vendor="OpenBSD", name="Packet Filter", version="TEST-PF", is_enabled="no"),
+            Product(vendor="Apple Inc.", name="Mac OS X Builtin Firewall", version="14.0", is_enabled="yes"),
+            Product(vendor="OpenBSD", name="Packet Filter", version="14.0", is_enabled="no"),
         ),
         patch_management_product=Product(vendor="Apple Inc.", name="Software Update", version="3.0", is_enabled="yes"),
         patches=(Patch(
@@ -146,7 +146,7 @@ class HipXmlTests(unittest.TestCase):
 
         interface = root.find("./categories/entry[@name='host-info']/network-interface/entry")
         self.assertEqual(interface.attrib, {"name": "en0"})
-        self.assertEqual(interface.findtext("mac-address"), "00-00-00-00-00-00")
+        self.assertEqual(interface.findtext("mac-address"), "00:00:00:00:00:00")
         self.assertEqual(interface.find("./ip-address/entry").attrib, {"name": "192.0.2.10"})
         self.assertEqual(interface.find("./ipv6-address/entry").attrib, {"name": "2001:db8::10"})
 
@@ -169,6 +169,37 @@ class HipXmlTests(unittest.TestCase):
         self.assertEqual(root.find("./categories/entry[@name='data-loss-prevention']/list").text, None)
         self.assertEqual(root.findall("./categories/entry[@name='data-loss-prevention']/list/*"), [])
         self.assertEqual(root.findall(".//Prod[@name='Gatekeeper']"), [am_products[1].find("Prod")])
+
+    def test_merges_invocation_addresses_into_collected_interface_and_preserves_colon_mac(self):
+        root = ET.fromstring(build_hip_xml(
+            sample_invocation(),
+            sample_identity(),
+            MacPosture(host_info=HostInfo(
+                host_name="TEST-HOST",
+                host_id="aa:bb:cc:dd:ee:ff",
+                interfaces=(NetworkInterface(name="en0", description="en0", mac_address="aa:bb:cc:dd:ee:ff"),),
+            )),
+            GENERATED_AT,
+        ))
+
+        interface = root.find("./categories/entry[@name='host-info']/network-interface/entry")
+        self.assertEqual(interface.findtext("description"), "en0")
+        self.assertEqual(interface.findtext("mac-address"), "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(interface.find("./ip-address/entry").attrib, {"name": "192.0.2.10"})
+        self.assertEqual(interface.find("./ipv6-address/entry").attrib, {"name": "2001:db8::10"})
+
+    def test_filevault_product_version_is_data_not_hard_coded(self):
+        root = ET.fromstring(build_hip_xml(
+            sample_invocation(),
+            sample_identity(),
+            MacPosture(disk_encryption=(Drive(drive_name="All", enc_state="encrypted", product_version="14.5"),)),
+            GENERATED_AT,
+        ))
+
+        self.assertEqual(
+            root.find("./categories/entry[@name='disk-encryption']/list/entry/ProductInfo/Prod").attrib["version"],
+            "14.5",
+        )
 
     def test_escapes_xml_text_and_attributes_without_changing_values(self):
         dangerous = "Ampersand & less < greater > quote \" apostrophe ' 한글 $(rm -rf /)"

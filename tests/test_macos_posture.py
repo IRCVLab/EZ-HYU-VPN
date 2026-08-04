@@ -110,6 +110,37 @@ class MacPostureCollectorTests(unittest.TestCase):
         self.assertEqual(posture.anti_malware[0].version, "n/a")
         self.assertEqual(posture.anti_malware[0].real_time_protection, "n/a")
 
+    def test_live_collector_populates_native_versions_dates_and_interface_description(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            system_plist = root / "SystemVersion.plist"
+            xprotect_plist = root / "XProtectInfo.plist"
+            write_plist(system_plist, {"ProductName": "macOS", "ProductVersion": "14.5", "ProductBuildVersion": "23F79"})
+            write_plist(xprotect_plist, {"CFBundleShortVersionString": "2176", "LastModification": datetime(2026, 8, 1, tzinfo=timezone.utc)})
+            runner = FakeRunner([
+                (("/usr/sbin/networksetup", "-listallhardwareports"), result(("/usr/sbin/networksetup", "-listallhardwareports"), "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: aa:bb:cc:dd:ee:ff\n")),
+                (("/usr/sbin/spctl", "--status"), result(("/usr/sbin/spctl", "--status"), "assessments enabled\n")),
+                (("/usr/bin/fdesetup", "status"), result(("/usr/bin/fdesetup", "status"), "FileVault is On.\n")),
+                (("/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"), result(("/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"), "Firewall is enabled. (State = 1)\n")),
+                (("/sbin/pfctl", "-s", "info"), result(("/sbin/pfctl", "-s", "info"), "Status: Disabled\n")),
+                (("/usr/sbin/softwareupdate", "--list"), result(("/usr/sbin/softwareupdate", "--list"), "Software Update Tool\nFinding available software\nNo new software available.\n")),
+            ])
+
+            posture = MacPostureCollector(
+                runner=runner,
+                system_version_plist=system_plist,
+                xprotect_plist=xprotect_plist,
+                software_update_cache=root / "updates.json",
+                now=lambda: datetime(2026, 8, 4, 9, 10, 11, tzinfo=timezone.utc),
+            ).collect()
+
+        self.assertEqual(posture.host_info.interfaces[0].description, "en0")
+        self.assertEqual(posture.disk_backup[0].version, "1.3")
+        self.assertEqual(posture.anti_malware[1].version, "14.5")
+        self.assertEqual((posture.anti_malware[1].datemon, posture.anti_malware[1].dateday, posture.anti_malware[1].dateyear), ("08", "04", "2026"))
+        self.assertEqual(posture.disk_encryption[0].product_version, "14.5")
+        self.assertEqual([product.version for product in posture.firewall], ["14.5", "14.5"])
+
     def test_collects_security_states_from_enabled_outputs(self):
         runner = FakeRunner([
             (("/usr/sbin/spctl", "--status"), result(("/usr/sbin/spctl", "--status"), "assessments enabled\n")),
@@ -122,7 +153,7 @@ class MacPostureCollectorTests(unittest.TestCase):
 
         self.assertEqual(posture.anti_malware[1].name, "Gatekeeper")
         self.assertEqual(posture.anti_malware[1].real_time_protection, "yes")
-        self.assertEqual(posture.disk_encryption, (Drive(drive_name="All", enc_state="encrypted"),))
+        self.assertEqual(posture.disk_encryption[0].enc_state, "encrypted")
         self.assertEqual([p.name for p in posture.firewall], ["Mac OS X Builtin Firewall", "Packet Filter"])
         self.assertEqual([p.is_enabled for p in posture.firewall], ["yes", "yes"])
 
@@ -137,7 +168,7 @@ class MacPostureCollectorTests(unittest.TestCase):
         posture = MacPostureCollector(runner=runner).collect()
 
         self.assertEqual(posture.anti_malware[1].real_time_protection, "no")
-        self.assertEqual(posture.disk_encryption, (Drive(drive_name="All", enc_state="unencrypted"),))
+        self.assertEqual(posture.disk_encryption[0].enc_state, "unencrypted")
         self.assertEqual([p.is_enabled for p in posture.firewall], ["no", "no"])
 
     def test_security_command_missing_permission_denied_malformed_and_timeout_are_na_or_unknown(self):
@@ -159,7 +190,7 @@ class MacPostureCollectorTests(unittest.TestCase):
                 posture = MacPostureCollector(runner=runner).collect()
 
                 self.assertEqual(posture.anti_malware[1].real_time_protection, "n/a")
-                self.assertEqual(posture.disk_encryption, (Drive(drive_name="All", enc_state="unknown"),))
+                self.assertEqual(posture.disk_encryption[0].enc_state, "unknown")
                 self.assertEqual([p.is_enabled for p in posture.firewall], ["n/a", "n/a"])
 
     def test_prefers_stable_primary_hardware_mac_for_interface_and_host_id(self):

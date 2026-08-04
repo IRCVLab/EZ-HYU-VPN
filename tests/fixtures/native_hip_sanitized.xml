@@ -20,7 +20,7 @@
       <network-interface>
         <entry name="en0">
           <description>Wi-Fi</description>
-          <mac-address>00-00-00-00-00-00</mac-address>
+          <mac-address>00:00:00:00:00:00</mac-address>
           <ip-address>
             <entry name="192.0.2.10" />
           </ip-address>
@@ -41,7 +41,7 @@
         </entry>
         <entry>
           <ProductInfo>
-            <Prod vendor="Apple Inc." name="Gatekeeper" version="TEST-GATEKEEPER" defver="" engver="" datemon="08" dateday="01" dateyear="2026" prodType="3" osType="4" />
+            <Prod vendor="Apple Inc." name="Gatekeeper" version="14.0" defver="" engver="" datemon="08" dateday="04" dateyear="2026" prodType="3" osType="4" />
             <real-time-protection>yes</real-time-protection>
             <last-full-scan-time>n/a</last-full-scan-time>
           </ProductInfo>
@@ -52,7 +52,7 @@
       <list>
         <entry>
           <ProductInfo>
-            <Prod vendor="Apple Inc." name="Time Machine" version="TEST-TM" />
+            <Prod vendor="Apple Inc." name="Time Machine" version="1.3" />
             <last-backup-time>n/a</last-backup-time>
           </ProductInfo>
         </entry>
@@ -62,7 +62,7 @@
       <list>
         <entry>
           <ProductInfo>
-            <Prod vendor="Apple Inc." name="FileVault" version="n/a" />
+            <Prod vendor="Apple Inc." name="FileVault" version="14.0" />
             <drives>
               <entry>
                 <drive-name>All</drive-name>
@@ -77,13 +77,13 @@
       <list>
         <entry>
           <ProductInfo>
-            <Prod vendor="Apple Inc." name="Mac OS X Builtin Firewall" version="TEST-FW" />
+            <Prod vendor="Apple Inc." name="Mac OS X Builtin Firewall" version="14.0" />
             <is-enabled>yes</is-enabled>
           </ProductInfo>
         </entry>
         <entry>
           <ProductInfo>
-            <Prod vendor="OpenBSD" name="Packet Filter" version="TEST-PF" />
+            <Prod vendor="OpenBSD" name="Packet Filter" version="14.0" />
             <is-enabled>no</is-enabled>
           </ProductInfo>
         </entry>

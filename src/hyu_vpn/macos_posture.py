@@ -68,12 +68,12 @@ class MacPostureCollector:
     def collect(self) -> MacPosture:
         os_version = self._collect_os_version()
         interface_name, mac_address = self._collect_physical_identity()
-        interfaces = (NetworkInterface(name=interface_name, mac_address=mac_address),) if interface_name else ()
+        interfaces = (NetworkInterface(name=interface_name, description=interface_name, mac_address=mac_address),) if interface_name else ()
         xprotect = self._collect_xprotect()
-        gatekeeper = self._collect_gatekeeper()
-        filevault = self._collect_filevault()
-        app_firewall = self._collect_application_firewall()
-        pf = self._collect_packet_filter()
+        gatekeeper = self._collect_gatekeeper(os_version)
+        filevault = self._collect_filevault(os_version)
+        app_firewall = self._collect_application_firewall(os_version)
+        pf = self._collect_packet_filter(os_version)
         patches, patch_scan_state = self._collect_software_updates()
         return MacPosture(
             host_info=HostInfo(
@@ -86,6 +86,7 @@ class MacPostureCollector:
                 interfaces=interfaces,
             ),
             anti_malware=(xprotect, gatekeeper),
+            disk_backup=(Product(vendor="Apple Inc.", name="Time Machine", version="1.3", last_backup_time="n/a"),),
             disk_encryption=(filevault,),
             firewall=(app_firewall, pf),
             patch_management_product=Product(vendor="Apple Inc.", name="Software Update", version="3.0", is_enabled=patch_scan_state),
@@ -192,12 +193,13 @@ class MacPostureCollector:
                 return parsed
         return None, None
 
-    def _collect_gatekeeper(self) -> Product:
+    def _collect_gatekeeper(self, os_version: Optional[str]) -> Product:
         status = self._run_status(("/usr/sbin/spctl", "--status"), 5.0)
         rtp = _parse_yes_no_na(status.stdout, "assessments enabled", "assessments disabled") if status.returncode == 0 else "n/a"
-        return Product(vendor="Apple Inc.", name="Gatekeeper", version="n/a", defver="", engver="", datemon="", dateday="", dateyear="", prod_type="3", os_type="4", real_time_protection=rtp, last_full_scan_time="n/a")
+        datemon, dateday, dateyear = _date_parts(self.now().date().isoformat()) if rtp != "n/a" else ("", "", "")
+        return Product(vendor="Apple Inc.", name="Gatekeeper", version=os_version or "n/a", defver="", engver="", datemon=datemon, dateday=dateday, dateyear=dateyear, prod_type="3", os_type="4", real_time_protection=rtp, last_full_scan_time="n/a")
 
-    def _collect_filevault(self) -> Drive:
+    def _collect_filevault(self, os_version: Optional[str]) -> Drive:
         status = self._run_status(("/usr/bin/fdesetup", "status"), 5.0)
         enc_state = "unknown"
         if status.returncode == 0:
@@ -206,17 +208,17 @@ class MacPostureCollector:
                 enc_state = "encrypted"
             elif "filevault is off" in text:
                 enc_state = "unencrypted"
-        return Drive(drive_name="All", enc_state=enc_state)
+        return Drive(drive_name="All", enc_state=enc_state, product_version=os_version or "n/a")
 
-    def _collect_application_firewall(self) -> Product:
+    def _collect_application_firewall(self, os_version: Optional[str]) -> Product:
         status = self._run_status(("/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"), 5.0)
         enabled = _parse_yes_no_na(status.stdout, "firewall is enabled", "firewall is disabled") if status.returncode == 0 else "n/a"
-        return Product(vendor="Apple Inc.", name="Mac OS X Builtin Firewall", version="n/a", is_enabled=enabled)
+        return Product(vendor="Apple Inc.", name="Mac OS X Builtin Firewall", version=os_version or "n/a", is_enabled=enabled)
 
-    def _collect_packet_filter(self) -> Product:
+    def _collect_packet_filter(self, os_version: Optional[str]) -> Product:
         status = self._run_status(("/sbin/pfctl", "-s", "info"), 5.0)
         enabled = _parse_yes_no_na(status.stdout, "status: enabled", "status: disabled") if status.returncode == 0 else "n/a"
-        return Product(vendor="OpenBSD", name="Packet Filter", version="n/a", is_enabled=enabled)
+        return Product(vendor="OpenBSD", name="Packet Filter", version=os_version or "n/a", is_enabled=enabled)
 
     def _run_status(self, argv: Sequence[str], timeout: float) -> CommandResult:
         return self.runner.run(tuple(argv), timeout)
