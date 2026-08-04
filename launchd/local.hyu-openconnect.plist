@@ -17,8 +17,8 @@
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>/Users/shchoi/Library/Logs/hyu-openconnect/service.log</string>
+  <string>/Users/shchoi/Library/Logs/hyu-openconnect-service.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/shchoi/Library/Logs/hyu-openconnect/service.err</string>
+  <string>/Users/shchoi/Library/Logs/hyu-openconnect-service.err</string>
 </dict>
 </plist>

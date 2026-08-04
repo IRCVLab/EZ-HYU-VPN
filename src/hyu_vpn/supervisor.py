@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,7 +76,11 @@ def _run_command(argv: list[str], timeout: float) -> CommandResult:
 
 
 def _has_native_process(stdout: str) -> bool:
-    return any(name in stdout for name in _NATIVE_PROCESS_NAMES)
+    return any(
+        os.path.basename(line.strip()) in _NATIVE_PROCESS_NAMES
+        for line in stdout.splitlines()
+        if line.strip()
+    )
 
 
 def _route_uses_utun(stdout: str) -> bool:
@@ -102,7 +107,7 @@ class Supervisor:
         conflict_detector: Optional[NativeConflictDetector] = None,
         popen_factory: Callable[..., subprocess.Popen] = subprocess.Popen,
         monotonic: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Optional[Callable[[float], None]] = None,
         stderr: Optional[TextIO] = sys.stderr,
     ) -> None:
         self.config = config
@@ -113,6 +118,7 @@ class Supervisor:
         self.stderr = stderr
         self.policy = ReconnectPolicy()
         self._stop_requested = False
+        self._stop_event = threading.Event()
         self._child: Optional[subprocess.Popen] = None
 
     def run(self) -> int:
@@ -193,6 +199,7 @@ class Supervisor:
 
     def _handle_signal(self, signum: int, _frame: Optional[FrameType]) -> None:
         self._stop_requested = True
+        self._stop_event.set()
         self._stop_child(signum)
 
     def _wait_for_child(self) -> int:
@@ -220,7 +227,10 @@ class Supervisor:
     def _sleep_stop_aware(self, delay: float) -> None:
         if delay <= 0 or self._stop_requested:
             return
-        self.sleep(delay)
+        if self.sleep is not None:
+            self.sleep(delay)
+        else:
+            self._stop_event.wait(delay)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

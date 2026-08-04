@@ -21,3 +21,20 @@
 - Supervisor + launchd suites: `Ran 15 tests ... OK`.
 - Full repository suite: `Ran 70 tests ... OK`.
 - `py_compile`, `compileall`, `plutil -lint`, no-`shell=True` scan, and `git diff --check` passed.
+
+---
+
+## Review Fix Round: interruptible stop, exact native process match, launchd logs
+
+### Findings addressed
+
+1. Production waits now use a `threading.Event`, so SIGINT/SIGTERM releases conflict/backoff sleep immediately. Injectable fake sleep remains only for deterministic unit tests.
+2. Native processes are matched by exact command basename, preventing substring helpers from suppressing OpenConnect.
+3. Launchd logs now use flat files under the existing `/Users/shchoi/Library/Logs` directory, avoiding a missing parent before exec.
+
+### RED/GREEN evidence
+
+- Real subprocess SIGTERM during a 120-second conflict wait timed out after two seconds before the fix; it now exits in under 1.5 seconds.
+- A process named `notGlobalProtectButContainsGlobalProtectHelper` incorrectly triggered conflict before exact-basename parsing; it no longer does.
+- The original nested launchd log parent was absent; plist tests now assert an existing parent.
+- Supervisor/launchd suites: `Ran 16 tests ... OK`; full repository: `Ran 71 tests ... OK`; compileall, plutil, no-shell scan, and diff check passed.

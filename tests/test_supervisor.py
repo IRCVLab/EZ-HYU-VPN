@@ -4,6 +4,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -64,6 +65,7 @@ class NativeConflictDetectorTests(unittest.TestCase):
             ("/usr/sbin/syslogd\n", "interface: utun5\n"),
             ("", "interface: utun5\n"),
             ("/Applications/GlobalProtect.app/Contents/MacOS/PanGPS\n", "malformed\n"),
+            ("/tmp/notGlobalProtectButContainsGlobalProtectHelper\n", "interface: utun5\n"),
         ]
         for processes, route in cases:
             with self.subTest(processes=processes, route=route):
@@ -223,6 +225,28 @@ class SupervisorLoopTests(unittest.TestCase):
         self.assertTrue(supervisor._stop_requested)
         self.assertEqual(sent, [(4321, signal.SIGTERM), (4321, signal.SIGKILL)])
         self.assertEqual(proc.wait_calls, [0.25, 0.25])
+
+    def test_real_sigterm_interrupts_native_conflict_sleep_promptly(self):
+        with tempfile.TemporaryDirectory() as td:
+            script = (
+                "import sys; "
+                f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r}); "
+                "from hyu_vpn.supervisor import Supervisor, SupervisorConfig; "
+                "detector=type('Detector', (), {'conflict_active': lambda self: True})(); "
+                f"raise SystemExit(Supervisor(SupervisorConfig(lock_path={str(Path(td) / 'lock')!r}, conflict_poll_interval=120), conflict_detector=detector).run())"
+            )
+            proc = subprocess.Popen([sys.executable, "-c", script])
+            try:
+                time.sleep(0.2)
+                started = time.monotonic()
+                proc.send_signal(signal.SIGTERM)
+
+                self.assertEqual(proc.wait(timeout=2), 0)
+                self.assertLess(time.monotonic() - started, 1.5)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=2)
 
 if __name__ == "__main__":
     unittest.main()

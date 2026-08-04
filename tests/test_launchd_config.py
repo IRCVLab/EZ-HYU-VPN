@@ -26,8 +26,10 @@ class LaunchdConfigTests(unittest.TestCase):
         with PLIST.open("rb") as fh:
             config = plistlib.load(fh)
 
-        self.assertEqual(config["StandardOutPath"], "/Users/shchoi/Library/Logs/hyu-openconnect/service.log")
-        self.assertEqual(config["StandardErrorPath"], "/Users/shchoi/Library/Logs/hyu-openconnect/service.err")
+        self.assertEqual(config["StandardOutPath"], "/Users/shchoi/Library/Logs/hyu-openconnect-service.log")
+        self.assertEqual(config["StandardErrorPath"], "/Users/shchoi/Library/Logs/hyu-openconnect-service.err")
+        self.assertTrue(Path(config["StandardOutPath"]).parent.is_dir())
+        self.assertTrue(Path(config["StandardErrorPath"]).parent.is_dir())
         forbidden = ["secure.hanyang.ac.kr", "password", "totp", "cookie", "PanGPS", "PanGPA", "PanGpHip", "GlobalProtect", "/Applications/GlobalProtect"]
         for value in forbidden:
             with self.subTest(value=value):
