@@ -183,7 +183,8 @@ class TotpProvider:
     def _generate(self) -> str:
         try:
             completed = self.runner(
-                [self.oathtool_path, "--totp", "-b", self.secret],
+                [self.oathtool_path, "--totp", "-b", "-"],
+                input=self.secret + "\n",
                 capture_output=True,
                 text=True,
                 check=False,

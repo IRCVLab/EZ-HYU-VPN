@@ -393,7 +393,7 @@ class ConnectorTests(unittest.TestCase):
 
     def test_production_runtime_config_contract_uses_fixed_installed_paths(self):
         self.assertEqual(str(INSTALLED_CONNECTOR_CONFIG_PATH), "/Library/Application Support/HYU VPN/connector-config.json")
-        self.assertEqual(str(INSTALLED_OATHTOOL_PATH), "/Library/Application Support/HYU VPN/runtime/oathtool")
+        self.assertEqual(str(INSTALLED_OATHTOOL_PATH), "/Library/Application Support/HYU VPN/runtime/current/bin/oathtool")
 
     def test_load_runtime_config_accepts_only_exact_schema_and_verified_runtime_oathtool(self):
         with tempfile.TemporaryDirectory() as td:
@@ -737,6 +737,23 @@ class ConnectorTests(unittest.TestCase):
         self.assertNotIn("hyu-vpn", message)
 
 class TotpProviderTests(unittest.TestCase):
+    def test_oathtool_receives_seed_only_over_stdin(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((tuple(argv), kwargs))
+            return mock.Mock(returncode=0, stdout="123456\n", stderr="")
+
+        provider = TotpProvider("SEED-CANARY", runner=fake_run, environ={"PATH": "/usr/bin"})
+
+        self.assertEqual(provider.current(), "123456")
+        self.assertEqual(len(calls), 1)
+        argv, kwargs = calls[0]
+        self.assertEqual(argv, ("/opt/homebrew/bin/oathtool", "--totp", "-b", "-"))
+        self.assertEqual(kwargs["input"], "SEED-CANARY\n")
+        self.assertNotIn("SEED-CANARY", argv)
+        self.assertNotIn("SEED-CANARY", kwargs["env"].values())
+
     def test_oathtool_failure_raises_redacted_error(self):
         def fake_run(argv, **kwargs):
             return mock.Mock(returncode=8, stdout="", stderr="bad SEED-CANARY")
