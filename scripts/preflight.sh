@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+export PYTHONDONTWRITEBYTECODE=1
 
 /usr/bin/python3 - <<'PY'
 import json
@@ -29,14 +30,34 @@ def executable(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
 
-def run_quiet(argv):
-    return subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+def run_quiet(argv, *, input_text=None, env=None):
+    return subprocess.run(
+        argv,
+        input=input_text,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        check=False,
+    )
+
+
+def run_with_private_tmp(argv, *, input_text=None, output_name=None):
+    with tempfile.TemporaryDirectory(prefix="hyu-vpn-preflight-") as tmp:
+        private_tmp = Path(tmp) / "tmp"
+        private_tmp.mkdir()
+        env = os.environ.copy()
+        env["TMPDIR"] = f"{private_tmp}/"
+        command = list(argv)
+        if output_name is not None:
+            command.extend(["-o", str(private_tmp / output_name)])
+        return run_quiet(command, input_text=input_text, env=env)
 
 
 def swift_metadata():
     swift = "/usr/bin/swift"
     swiftc = "/usr/bin/swiftc"
-    result = run_quiet([swift, "--version"]) if executable(swift) else None
+    result = run_with_private_tmp([swift, "--version"]) if executable(swift) else None
     version_output = result.stdout.strip() if result and result.returncode == 0 else ""
     match = re.search(r"Apple Swift version (\d+)(?:\.(\d+))?", version_output)
     major = int(match.group(1)) if match else 0
@@ -44,10 +65,14 @@ def swift_metadata():
 
     appkit_compiles = False
     if executable(swiftc):
-        with tempfile.TemporaryDirectory(prefix="hyu-vpn-preflight-") as tmp:
-            source = Path(tmp) / "AppKitProbe.swift"
-            source.write_text("import AppKit\nlet _ = NSApplication.self\n", encoding="utf-8")
-            compile_result = run_quiet([swiftc, "-typecheck", str(source)])
+        with tempfile.TemporaryDirectory(prefix="hyu-vpn-preflight-swift-") as tmp:
+            swift_env = os.environ.copy()
+            swift_env["TMPDIR"] = f"{tmp}/"
+            compile_result = run_quiet(
+                [swiftc, "-", "-o", str(Path(tmp) / "AppKitProbe")],
+                input_text="import AppKit\nlet _ = NSApplication.self\n",
+                env=swift_env,
+            )
             appkit_compiles = compile_result.returncode == 0
 
     return {
@@ -68,7 +93,7 @@ def tool_metadata():
     }
 
 
-def discover_brew():
+def discover_brew_prefix():
     for prefix in SEARCHED_HOMEBREW_PREFIXES:
         brew = Path(prefix) / "bin" / "brew"
         if executable(str(brew)):
@@ -76,28 +101,24 @@ def discover_brew():
     return "", ""
 
 
-def dependency_metadata(brew_path: str):
+def dependency_metadata(brew_prefix: str):
     dependencies = []
     for package, binary in BREW_DEPENDENCIES:
-        prefix = ""
-        if brew_path:
-            result = run_quiet([brew_path, "--prefix", package])
-            if result.returncode == 0:
-                prefix = result.stdout.strip().splitlines()[0]
-        binary_path = str(Path(prefix) / "bin" / binary) if prefix else ""
+        package_prefix = str(Path(brew_prefix) / "opt" / package) if brew_prefix else ""
+        binary_path = str(Path(package_prefix) / "bin" / binary) if package_prefix else ""
         dependencies.append(
             {
                 "name": package,
                 "binary": binary,
-                "prefix": prefix,
-                "executable": binary_path,
-                "available": bool(prefix) and executable(binary_path),
+                "prefix": package_prefix if Path(package_prefix).is_dir() else "",
+                "executable": binary_path if executable(binary_path) else "",
+                "available": Path(package_prefix).is_dir() and executable(binary_path),
             }
         )
     return dependencies
 
 
-brew_prefix, brew_path = discover_brew()
+brew_prefix, brew_path = discover_brew_prefix()
 metadata = {
     "schema_version": 1,
     "read_only": True,
@@ -109,7 +130,7 @@ metadata = {
         "searched_prefixes": SEARCHED_HOMEBREW_PREFIXES,
         "prefix": brew_prefix,
         "brew_path": brew_path,
-        "dependencies": dependency_metadata(brew_path),
+        "dependencies": dependency_metadata(brew_prefix),
     },
 }
 
