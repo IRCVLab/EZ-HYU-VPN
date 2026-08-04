@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass
@@ -62,6 +63,9 @@ _TARGETS = (
         "/Applications/GlobalProtect.app/Contents/Resources/PanGPS",
     ),
 )
+_EXACT_AUTO_LAUNCH_TARGETS = {
+    (target.label, target.kind, target.plist_path) for target in _TARGETS
+}
 _KNOWN_GLOBALPROTECT_IDS = {target.label for target in _TARGETS} | {"com.paloaltonetworks.GlobalProtect.client"}
 _RECORD_KEYS = {"schema_version", "console_uid", "mechanisms"}
 _MECHANISM_KEYS = {"identifier", "kind", "enabled", "exact_target"}
@@ -292,12 +296,10 @@ class NativeAutoLaunchManager:
 def _valid_mechanism(mechanism: AutoLaunchMechanism) -> bool:
     return (
         isinstance(mechanism.identifier, str)
-        and mechanism.identifier in _KNOWN_GLOBALPROTECT_IDS
         and isinstance(mechanism.kind, str)
-        and mechanism.kind in {"launchd-system", "launchd-gui", "launchd", "login-item"}
         and isinstance(mechanism.enabled, bool)
         and isinstance(mechanism.exact_target, str)
-        and mechanism.exact_target.startswith("/")
+        and (mechanism.identifier, mechanism.kind, mechanism.exact_target) in _EXACT_AUTO_LAUNCH_TARGETS
     )
 
 
@@ -451,6 +453,77 @@ class GlobalProtectStatusReader:
 
 def production_status_reader() -> GlobalProtectStatusReader:
     return GlobalProtectStatusReader(path=Path.home() / "Library" / "Logs" / "PaloAltoNetworks" / "GlobalProtect" / "PanGPA.log")
+
+
+NATIVE_SUPPRESSION_RECORD_PATH = Path("/private/var/db/hyu-vpn/native-suppression.json")
+_NATIVE_CLIENT_CLI_COMMANDS = {"suppress-auto-launch", "restore-auto-launch"}
+
+
+def _active_console_uid_from_dev_console() -> int:
+    try:
+        return int(os.stat("/dev/console").st_uid)
+    except (OSError, TypeError, ValueError):
+        raise NativeClientConflict("could not determine active console uid") from None
+
+
+def _native_cli_emit(sink, payload: dict) -> None:
+    sink(json.dumps(payload, sort_keys=True))
+
+
+def _print_stderr(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def native_client_cli_main(
+    argv: Optional[list[str]] = None,
+    *,
+    env: Optional[dict[str, str]] = None,
+    geteuid=os.geteuid,
+    active_console_uid=_active_console_uid_from_dev_console,
+    suppress=suppress_globalprotect_auto_launch,
+    restore=restore_globalprotect_auto_launch,
+    stdout=print,
+    stderr=_print_stderr,
+) -> int:
+    args = list(argv if argv is not None else [])
+    if len(args) != 1 or args[0] not in _NATIVE_CLIENT_CLI_COMMANDS:
+        _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "BAD_REQUEST"})
+        return 2
+    operation = args[0]
+    if geteuid() != 0:
+        _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "ROOT_REQUIRED"})
+        return 77
+    environ = os.environ if env is None else env
+    raw_sudo_uid = environ.get("SUDO_UID")
+    try:
+        sudo_uid = int(raw_sudo_uid) if raw_sudo_uid is not None else 0
+    except (TypeError, ValueError):
+        _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "SUDO_UID_REQUIRED"})
+        return 77
+    if sudo_uid <= 0:
+        _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "SUDO_UID_REQUIRED"})
+        return 77
+    try:
+        console_uid = int(active_console_uid())
+    except Exception:
+        _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "CONSOLE_UID_MISMATCH"})
+        return 77
+    if console_uid != sudo_uid:
+        _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "CONSOLE_UID_MISMATCH"})
+        return 77
+    try:
+        if operation == "suppress-auto-launch":
+            suppress(NATIVE_SUPPRESSION_RECORD_PATH, console_uid=console_uid)
+        else:
+            restore(NATIVE_SUPPRESSION_RECORD_PATH, console_uid=console_uid)
+    except NativeClientConflict:
+        _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "NATIVE_CLIENT_CONFLICT"})
+        return 1
+    except Exception:
+        _native_cli_emit(stderr, {"schema_version": 1, "ok": False, "error_code": "NATIVE_CLIENT_FAILED"})
+        return 1
+    _native_cli_emit(stdout, {"schema_version": 1, "ok": True, "operation": operation})
+    return 0
 
 
 @dataclass(frozen=True)

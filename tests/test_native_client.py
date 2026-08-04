@@ -32,7 +32,7 @@ class FakeAutoLaunchStore:
 class NativeClientTests(unittest.TestCase):
     def test_suppresses_only_exact_globalprotect_auto_launch_and_records_prior_state(self):
         store = FakeAutoLaunchStore([
-            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangps.plist"),
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"),
             AutoLaunchMechanism("com.example.unrelated", "launchd", True, "/Library/LaunchDaemons/com.example.unrelated.plist"),
         ])
         with tempfile.TemporaryDirectory() as td:
@@ -45,22 +45,22 @@ class NativeClientTests(unittest.TestCase):
         self.assertEqual(store.set_calls, [("com.paloaltonetworks.gp.pangps", False)])
         self.assertEqual(record["mechanisms"], [{
             "identifier": "com.paloaltonetworks.gp.pangps",
-            "kind": "launchd",
+            "kind": "launchd-gui",
             "enabled": True,
-            "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangps.plist",
+            "exact_target": "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist",
         }])
         self.assertNotIn("com.example.unrelated", json.dumps(record))
 
     def test_restore_only_unchanged_recorded_targets_and_refuses_user_modified_state(self):
         store = FakeAutoLaunchStore([
-            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd", False, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangps.plist"),
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", False, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"),
         ])
         with tempfile.TemporaryDirectory() as td:
             record_path = Path(td) / "native-suppression.json"
             manager = NativeAutoLaunchManager(store=store)
             manager.suppress_auto_launch(record_path)
             store.mechanisms["com.paloaltonetworks.gp.pangps"] = AutoLaunchMechanism(
-                "com.paloaltonetworks.gp.pangps", "launchd", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangps.plist"
+                "com.paloaltonetworks.gp.pangps", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"
             )
 
             with self.assertRaises(NativeClientConflict):
@@ -70,7 +70,7 @@ class NativeClientTests(unittest.TestCase):
 
     def test_restore_reenables_exact_recorded_disabled_target(self):
         store = FakeAutoLaunchStore([
-            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangps.plist"),
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"),
         ])
         with tempfile.TemporaryDirectory() as td:
             record_path = Path(td) / "native-suppression.json"
@@ -96,6 +96,21 @@ class NativeClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(NativeClientConflict):
                 NativeAutoLaunchManager(store=store).suppress_auto_launch(Path(td) / "record.json")
+
+        self.assertEqual(store.set_calls, [])
+
+    def test_known_globalprotect_identifier_with_wrong_absolute_target_is_rejected_before_mutation(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism(
+                "com.paloaltonetworks.gp.pangpsd",
+                "launchd-system",
+                True,
+                "/tmp/com.paloaltonetworks.gp.pangpsd.plist",
+            ),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).suppress_auto_launch(Path(td) / "record.json")
 
         self.assertEqual(store.set_calls, [])
 
