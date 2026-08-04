@@ -1,0 +1,198 @@
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from hyu_vpn.connector import ConnectorConfig, PromptSession, build_openconnect_argv, main
+from hyu_vpn.otp import Keychain, TotpError, TotpProvider
+
+ROOT = Path(__file__).resolve().parents[1]
+FAKE_OPENCONNECT = ROOT / "tests" / "helpers" / "fake_openconnect.py"
+FAKE_OATHTOOL = ROOT / "tests" / "helpers" / "fake_oathtool.py"
+
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+class ConnectorTests(unittest.TestCase):
+    def test_uses_distinct_totp_for_portal_and_gateway(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "openconnect.json"
+            oathtool_state = Path(td) / "oathtool.json"
+            oathtool_state.write_text(json.dumps({"values": ["111111", "111111", "222222"]}), encoding="utf-8")
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OATHTOOL_STATE": str(oathtool_state)}
+            sleeps = []
+            provider = TotpProvider("BASE32-SEED", oathtool_path=str(FAKE_OATHTOOL), environ=env, sleep=sleeps.append, clock=lambda: 1)
+            session = PromptSession(
+                [sys.executable, str(FAKE_OPENCONNECT)],
+                password="PASSWORD-CANARY",
+                totp_provider=provider,
+                environ=env,
+                stdout=None,
+            )
+
+            rc = session.run()
+            responses = read_json(marker)["responses"]
+            oathtool_calls = read_json(oathtool_state)["calls"]
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(responses, ["PASSWORD-CANARY", "111111", "222222"])
+        self.assertEqual(oathtool_calls, 3)
+        self.assertEqual(sleeps, [29])
+
+    def test_totp_failure_returns_error_without_secret_material(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "openconnect.json"
+            oathtool_state = Path(td) / "oathtool.json"
+            oathtool_state.write_text(json.dumps({"values": ["__FAIL__"]}), encoding="utf-8")
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OATHTOOL_STATE": str(oathtool_state)}
+            stderr = mock.Mock()
+            session = PromptSession(
+                [sys.executable, str(FAKE_OPENCONNECT)],
+                password="PASSWORD-CANARY",
+                totp_provider=TotpProvider("SEED-CANARY", oathtool_path=str(FAKE_OATHTOOL), environ=env, sleep=lambda _s: None),
+                environ=env,
+                stdout=None,
+                stderr=stderr,
+                terminate_timeout=0.2,
+            )
+
+            rc = session.run()
+
+        self.assertEqual(rc, 1)
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("TOTP generation failed", written)
+        self.assertNotIn("SEED-CANARY", written)
+        self.assertNotIn("PASSWORD-CANARY", written)
+
+    def test_duplicate_prompt_tail_gets_single_response(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "openconnect.json"
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "duplicate_prompts"}
+            provider = mock.Mock()
+            provider.current.return_value = "123456"
+            session = PromptSession([sys.executable, str(FAKE_OPENCONNECT)], password="pw", totp_provider=provider, environ=env, stdout=None)
+
+            rc = session.run()
+            responses = read_json(marker)["responses"]
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(responses, ["pw", "123456"])
+        provider.current.assert_called_once_with()
+
+    def test_eof_after_prompt_returns_child_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "openconnect.json"
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "eof_after_password"}
+            session = PromptSession([sys.executable, str(FAKE_OPENCONNECT)], password="pw", totp_provider=mock.Mock(), environ=env, stdout=None)
+
+            self.assertEqual(session.run(), 4)
+
+    def test_child_error_status_is_returned(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "openconnect.json"
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "error"}
+            session = PromptSession([sys.executable, str(FAKE_OPENCONNECT)], password="pw", totp_provider=mock.Mock(), environ=env, stdout=None)
+
+            self.assertEqual(session.run(), 5)
+
+    def test_forwards_sigterm_to_child_process_group_without_orphan(self):
+        self._assert_forwards_signal(signal.SIGTERM)
+
+    def test_forwards_sigint_to_child_process_group_without_orphan(self):
+        self._assert_forwards_signal(signal.SIGINT)
+
+    def _assert_forwards_signal(self, signum):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "openconnect.json"
+            env = os.environ.copy()
+            env.update({"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "sleep"})
+            proc = subprocess.Popen([
+                sys.executable,
+                "-c",
+                (
+                    "import os, signal, sys; "
+                    f"sys.path.insert(0, {str(ROOT / 'src')!r}); "
+                    "from hyu_vpn.connector import PromptSession; "
+                    "rc=PromptSession([sys.executable, sys.argv[1]], password='pw', totp_provider=None, environ=os.environ, stdout=None, terminate_timeout=1.0).run(); "
+                    "raise SystemExit(rc)"
+                ),
+                str(FAKE_OPENCONNECT),
+            ], env=env)
+            deadline = time.time() + 3
+            while time.time() < deadline and not marker.exists():
+                time.sleep(0.02)
+            self.assertTrue(marker.exists())
+
+            proc.send_signal(signum)
+            self.assertEqual(proc.wait(timeout=3), 0)
+            data = read_json(marker)
+            self.assertEqual(data.get("signal"), signum)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(data["pid"], 0)
+
+    def test_build_openconnect_argv_uses_gp_hip_wrapper_and_no_native_globalprotect(self):
+        argv = build_openconnect_argv("alice", config=ConnectorConfig(hip_wrapper="/repo/bin/gp-hip-report"))
+
+        self.assertIn("--protocol=gp", argv)
+        self.assertIn("--csd-wrapper=/repo/bin/gp-hip-report", argv)
+        self.assertIn("--script=/opt/homebrew/etc/vpnc/vpnc-script", argv)
+        self.assertIn("secure.hanyang.ac.kr", argv)
+        self.assertIn("/opt/homebrew/bin/openconnect", argv)
+        self.assertFalse(any("PanGP" in part or "GlobalProtect" in part for part in argv))
+
+    def test_main_reads_keychain_services_by_absolute_security_argv(self):
+        calls = []
+        def fake_run(argv, **kwargs):
+            calls.append(tuple(argv))
+            service = argv[argv.index("-s") + 1]
+            return mock.Mock(returncode=0, stdout={
+                "gp-vpn-username": "alice\n",
+                "gp-vpn-password": "pw\n",
+                "gp-vpn-totp": "seed\n",
+            }[service], stderr="")
+
+        with mock.patch("hyu_vpn.otp.subprocess.run", side_effect=fake_run), \
+             mock.patch("hyu_vpn.connector.PromptSession") as session_cls:
+            session_cls.return_value.run.return_value = 0
+            rc = main(config=ConnectorConfig(openconnect_path="/bin/echo", hip_wrapper="/repo/bin/gp-hip-report"))
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [
+            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-username", "-w"),
+            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-password", "-w"),
+            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-totp", "-w"),
+        ])
+
+
+class TotpProviderTests(unittest.TestCase):
+    def test_oathtool_failure_raises_redacted_error(self):
+        def fake_run(argv, **kwargs):
+            return mock.Mock(returncode=8, stdout="", stderr="bad SEED-CANARY")
+
+        provider = TotpProvider("SEED-CANARY", runner=fake_run)
+
+        with self.assertRaises(TotpError) as cm:
+            provider.current()
+        self.assertNotIn("SEED-CANARY", str(cm.exception))
+
+    def test_keychain_missing_item_raises_redacted_error(self):
+        def fake_run(argv, **kwargs):
+            return mock.Mock(returncode=44, stdout="", stderr="no PASSWORD-CANARY")
+
+        with self.assertRaisesRegex(RuntimeError, "gp-vpn-password") as cm:
+            Keychain(runner=fake_run).read("gp-vpn-password")
+        self.assertNotIn("PASSWORD-CANARY", str(cm.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()
