@@ -1,73 +1,120 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<hip-report>
-  <report-version>4</report-version>
+<hip-report name="hip-report">
   <md5-sum>00000000000000000000000000000000</md5-sum>
-  <user>TEST-USER</user>
+  <user-name>TEST-USER</user-name>
   <domain />
-  <computer>TEST-HOST</computer>
-  <client-ip>192.0.2.10</client-ip>
-  <client-ipv6>2001:db8::10</client-ipv6>
+  <host-name>TEST-HOST</host-name>
+  <host-id>TEST-HOST-ID</host-id>
+  <ip-address>192.0.2.10</ip-address>
+  <ipv6-address>2001:db8::10</ipv6-address>
+  <generate-time>08/04/2026 01:02:03</generate-time>
+  <hip-report-version>4</hip-report-version>
   <categories>
-    <category name="host-info">
+    <entry name="host-info">
+      <client-version>OpenConnect TEST</client-version>
+      <os>Apple Mac OS X 14.0</os>
+      <os-vendor>Apple</os-vendor>
+      <domain />
       <host-name>TEST-HOST</host-name>
-      <user-name>TEST-USER</user-name>
-      <os>macOS TEST</os>
-      <os-version>14.0</os-version>
-      <network-interfaces>
-        <interface>
-          <name>en0</name>
-          <mac-address>00:00:00:00:00:00</mac-address>
-          <ipv4>192.0.2.10</ipv4>
-          <ipv6>2001:db8::10</ipv6>
-        </interface>
-      </network-interfaces>
-    </category>
-    <category name="anti-malware">
-      <product>
-        <name>XProtect</name>
-        <version>TEST-XPROTECT</version>
-        <definition-date>2000-01-01</definition-date>
-        <real-time-protection>unknown</real-time-protection>
-      </product>
-    </category>
-    <category name="disk-backup">
-      <product>
-        <name>Time Machine</name>
-        <state>unknown</state>
-      </product>
-    </category>
-    <category name="disk-encryption">
-      <product>
-        <name>FileVault</name>
-        <encrypted>unknown</encrypted>
-      </product>
-    </category>
-    <category name="firewall">
-      <product>
-        <name>Application Firewall</name>
-        <enabled>unknown</enabled>
-      </product>
-      <product>
-        <name>Packet Filter</name>
-        <enabled>unknown</enabled>
-      </product>
-    </category>
-    <category name="patch-management">
-      <product>
-        <name>Apple Software Update</name>
-        <missing-patches>
-          <patch>
-            <id>TEST-UPDATE-001</id>
-            <severity>unknown</severity>
-          </patch>
-        </missing-patches>
-      </product>
-    </category>
-    <category name="data-loss-prevention">
-      <product>
-        <name>Gatekeeper</name>
-        <enabled>unknown</enabled>
-      </product>
-    </category>
+      <host-id>TEST-HOST-ID</host-id>
+      <network-interface>
+        <entry name="en0">
+          <description>Wi-Fi</description>
+          <mac-address>00-00-00-00-00-00</mac-address>
+          <ip-address>
+            <entry name="192.0.2.10" />
+          </ip-address>
+          <ipv6-address>
+            <entry name="2001:db8::10" />
+          </ipv6-address>
+        </entry>
+      </network-interface>
+    </entry>
+    <entry name="anti-malware">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Apple Inc." name="Xprotect" version="TEST-XPROTECT" defver="TEST-DEFVER" engver="" datemon="08" dateday="01" dateyear="2026" prodType="3" osType="4" />
+            <real-time-protection>yes</real-time-protection>
+            <last-full-scan-time>n/a</last-full-scan-time>
+          </ProductInfo>
+        </entry>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Apple Inc." name="Gatekeeper" version="TEST-GATEKEEPER" defver="" engver="" datemon="08" dateday="01" dateyear="2026" prodType="3" osType="4" />
+            <real-time-protection>yes</real-time-protection>
+            <last-full-scan-time>n/a</last-full-scan-time>
+          </ProductInfo>
+        </entry>
+      </list>
+    </entry>
+    <entry name="disk-backup">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Apple Inc." name="Time Machine" version="TEST-TM" />
+            <last-backup-time>n/a</last-backup-time>
+          </ProductInfo>
+        </entry>
+      </list>
+    </entry>
+    <entry name="disk-encryption">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Apple Inc." name="FileVault" version="n/a" />
+            <drives>
+              <entry>
+                <drive-name>All</drive-name>
+                <enc-state>encrypted</enc-state>
+              </entry>
+            </drives>
+          </ProductInfo>
+        </entry>
+      </list>
+    </entry>
+    <entry name="firewall">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Apple Inc." name="Mac OS X Builtin Firewall" version="TEST-FW" />
+            <is-enabled>yes</is-enabled>
+          </ProductInfo>
+        </entry>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="OpenBSD" name="Packet Filter" version="TEST-PF" />
+            <is-enabled>no</is-enabled>
+          </ProductInfo>
+        </entry>
+      </list>
+    </entry>
+    <entry name="patch-management">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Apple Inc." name="Software Update" version="3.0" />
+            <is-enabled>yes</is-enabled>
+          </ProductInfo>
+        </entry>
+      </list>
+      <missing-patches>
+        <entry>
+          <title>TEST-UPDATE-001</title>
+          <description>TEST-UPDATE-001</description>
+          <product>macOS</product>
+          <vendor>Apple Inc.</vendor>
+          <info-url />
+          <kb-article-id />
+          <security-bulletin-id />
+          <severity>2</severity>
+          <category>update</category>
+          <is-installed>no</is-installed>
+        </entry>
+      </missing-patches>
+    </entry>
+    <entry name="data-loss-prevention">
+      <list />
+    </entry>
   </categories>
 </hip-report>

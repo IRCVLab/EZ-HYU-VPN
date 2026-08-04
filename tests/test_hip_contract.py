@@ -75,7 +75,7 @@ class NativeHipFixtureTests(unittest.TestCase):
         fixture = Path(__file__).resolve().parent / "fixtures" / "native_hip_sanitized.xml"
         root = ET.parse(fixture).getroot()
 
-        categories = [category.attrib["name"] for category in root.findall("./categories/category")]
+        categories = [category.attrib["name"] for category in root.findall("./categories/entry")]
         self.assertEqual(categories, [
             "host-info",
             "anti-malware",
@@ -89,7 +89,7 @@ class NativeHipFixtureTests(unittest.TestCase):
         xml_text = fixture.read_text(encoding="utf-8")
         self.assertIn("TEST-USER", xml_text)
         self.assertIn("TEST-HOST", xml_text)
-        self.assertIn("00:00:00:00:00:00", xml_text)
+        self.assertIn("00-00-00-00-00-00", xml_text)
         self.assertIn("192.0.2.10", xml_text)
         self.assertIn("2001:db8::10", xml_text)
 

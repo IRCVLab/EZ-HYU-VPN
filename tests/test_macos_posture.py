@@ -42,6 +42,9 @@ def write_plist(path, values):
         plistlib.dump(values, fh)
 
 
+def subprocess_completed(stdout="", stderr="", returncode=0):
+    return mock.Mock(stdout=stdout, stderr=stderr, returncode=returncode)
+
 
 class CommandRunnerTests(unittest.TestCase):
     def test_run_forces_deterministic_c_locale_for_child_process(self):
@@ -57,12 +60,8 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ["/usr/bin/true"])
 
 
-def subprocess_completed(stdout="", stderr="", returncode=0):
-    return mock.Mock(stdout=stdout, stderr=stderr, returncode=returncode)
-
-
 class MacPostureCollectorTests(unittest.TestCase):
-    def test_collects_os_and_xprotect(self):
+    def test_collects_os_and_xprotect_without_build_in_product_version(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             system_plist = root / "SystemVersion.plist"
@@ -77,11 +76,16 @@ class MacPostureCollectorTests(unittest.TestCase):
                 software_update_cache=root / "updates.json",
             ).collect()
 
-        self.assertEqual(posture.host_info.os, "macOS")
-        self.assertEqual(posture.host_info.os_version, "14.5 (23F79)")
-        self.assertEqual(posture.anti_malware, (Product(name="XProtect", version="2176", definition_date="2026-08-01", real_time_protection="unknown"),))
+        self.assertEqual(posture.host_info.os, "Apple Mac OS X 14.5")
+        self.assertEqual(posture.host_info.os_version, "14.5")
+        self.assertEqual(posture.host_info.os_vendor, "Apple")
+        self.assertEqual(posture.anti_malware[0], Product(
+            vendor="Apple Inc.", name="Xprotect", version="2176", defver="2176", engver="",
+            datemon="08", dateday="01", dateyear="2026", prod_type="3", os_type="4",
+            real_time_protection="yes", last_full_scan_time="n/a",
+        ))
 
-    def test_xprotect_definition_date_falls_back_to_plist_mtime(self):
+    def test_xprotect_date_falls_back_to_plist_mtime_and_unknown_install_is_na(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             xprotect_plist = root / "XProtectInfo.plist"
@@ -95,8 +99,16 @@ class MacPostureCollectorTests(unittest.TestCase):
                 software_update_cache=root / "updates.json",
             ).collect()
 
-        self.assertEqual(posture.anti_malware, (Product(name="XProtect", version="2177", definition_date="2026-07-29", real_time_protection="unknown"),))
+        self.assertEqual(posture.anti_malware[0].datemon, "07")
+        self.assertEqual(posture.anti_malware[0].dateday, "29")
+        self.assertEqual(posture.anti_malware[0].dateyear, "2026")
+        self.assertEqual(posture.anti_malware[0].real_time_protection, "yes")
 
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            posture = MacPostureCollector(runner=FakeRunner([]), xprotect_plist=root / "missing.plist", software_update_cache=root / "updates.json").collect()
+        self.assertEqual(posture.anti_malware[0].version, "n/a")
+        self.assertEqual(posture.anti_malware[0].real_time_protection, "n/a")
 
     def test_collects_security_states_from_enabled_outputs(self):
         runner = FakeRunner([
@@ -108,9 +120,11 @@ class MacPostureCollectorTests(unittest.TestCase):
 
         posture = MacPostureCollector(runner=runner).collect()
 
-        self.assertEqual(posture.data_loss_prevention, (Product(name="Gatekeeper", enabled="yes"),))
-        self.assertEqual(posture.disk_encryption, (Drive(name="FileVault", encrypted="yes"),))
-        self.assertEqual(posture.firewall, (Product(name="Application Firewall", enabled="yes"), Product(name="Packet Filter", enabled="yes")))
+        self.assertEqual(posture.anti_malware[1].name, "Gatekeeper")
+        self.assertEqual(posture.anti_malware[1].real_time_protection, "yes")
+        self.assertEqual(posture.disk_encryption, (Drive(drive_name="All", enc_state="encrypted"),))
+        self.assertEqual([p.name for p in posture.firewall], ["Mac OS X Builtin Firewall", "Packet Filter"])
+        self.assertEqual([p.is_enabled for p in posture.firewall], ["yes", "yes"])
 
     def test_collects_security_states_from_disabled_outputs(self):
         runner = FakeRunner([
@@ -122,11 +136,11 @@ class MacPostureCollectorTests(unittest.TestCase):
 
         posture = MacPostureCollector(runner=runner).collect()
 
-        self.assertEqual(posture.data_loss_prevention, (Product(name="Gatekeeper", enabled="no"),))
-        self.assertEqual(posture.disk_encryption, (Drive(name="FileVault", encrypted="no"),))
-        self.assertEqual(posture.firewall, (Product(name="Application Firewall", enabled="no"), Product(name="Packet Filter", enabled="no")))
+        self.assertEqual(posture.anti_malware[1].real_time_protection, "no")
+        self.assertEqual(posture.disk_encryption, (Drive(drive_name="All", enc_state="unencrypted"),))
+        self.assertEqual([p.is_enabled for p in posture.firewall], ["no", "no"])
 
-    def test_security_command_missing_permission_denied_malformed_and_timeout_are_unknown(self):
+    def test_security_command_missing_permission_denied_malformed_and_timeout_are_na_or_unknown(self):
         cases = [
             ("command-missing", 127, "", "not found"),
             ("permission-denied", 1, "", "Operation not permitted"),
@@ -144,11 +158,9 @@ class MacPostureCollectorTests(unittest.TestCase):
 
                 posture = MacPostureCollector(runner=runner).collect()
 
-                self.assertEqual(posture.data_loss_prevention, (Product(name="Gatekeeper", enabled="unknown"),))
-                self.assertEqual(posture.disk_encryption, (Drive(name="FileVault", encrypted="unknown"),))
-                self.assertEqual(posture.firewall, (Product(name="Application Firewall", enabled="unknown"), Product(name="Packet Filter", enabled="unknown")))
-
-
+                self.assertEqual(posture.anti_malware[1].real_time_protection, "n/a")
+                self.assertEqual(posture.disk_encryption, (Drive(drive_name="All", enc_state="unknown"),))
+                self.assertEqual([p.is_enabled for p in posture.firewall], ["n/a", "n/a"])
 
     def test_prefers_stable_primary_hardware_mac_for_interface_and_host_id(self):
         networksetup_output = (FIXTURES / "networksetup-listallhardwareports.txt").read_text(encoding="utf-8")
@@ -162,6 +174,8 @@ class MacPostureCollectorTests(unittest.TestCase):
         self.assertEqual(posture.host_info.interface_name, "en0")
         self.assertEqual(posture.host_info.mac_address, "aa:bb:cc:dd:ee:ff")
         self.assertEqual(posture.host_info.host_id, "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(posture.host_info.interfaces[0].name, "en0")
+        self.assertEqual(posture.host_info.interfaces[0].mac_address, "aa:bb:cc:dd:ee:ff")
 
     def test_physical_interface_falls_back_to_ifconfig_and_excludes_loopback_tunnels_and_invalid_macs(self):
         runner = FakeRunner([
@@ -186,10 +200,9 @@ class MacPostureCollectorTests(unittest.TestCase):
         self.assertIsNone(posture.host_info.interface_name)
         self.assertIsNone(posture.host_info.mac_address)
         self.assertIsNone(posture.host_info.host_id)
+        self.assertEqual(posture.host_info.interfaces, ())
 
-
-
-    def test_software_update_no_updates_produces_no_missing_patches_and_uses_bounded_timeout(self):
+    def test_software_update_no_updates_produces_known_empty_patches_and_uses_bounded_timeout(self):
         with tempfile.TemporaryDirectory() as td:
             cache = Path(td) / "updates.json"
             argv = ("/usr/sbin/softwareupdate", "--list")
@@ -198,11 +211,12 @@ class MacPostureCollectorTests(unittest.TestCase):
             posture = MacPostureCollector(runner=runner, software_update_cache=cache, software_update_timeout=12.5).collect()
 
             self.assertEqual(posture.patches, ())
+            self.assertEqual(posture.patch_management_product.is_enabled, "yes")
             self.assertIn((argv, 12.5), runner.calls)
             self.assertTrue(cache.exists())
             self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
 
-    def test_software_update_multiple_updates_and_restart_required_are_missing_patches(self):
+    def test_software_update_multiple_updates_and_restart_required_are_rich_missing_patches(self):
         with tempfile.TemporaryDirectory() as td:
             cache = Path(td) / "updates.json"
             argv = ("/usr/sbin/softwareupdate", "--list")
@@ -210,10 +224,14 @@ class MacPostureCollectorTests(unittest.TestCase):
 
             posture = MacPostureCollector(runner=runner, software_update_cache=cache).collect()
 
-            self.assertEqual(posture.patches, (Patch(id="macOS Sonoma 14.6-23G80", severity="restart-required"), Patch(id="Safari17.6-19618.3.11.11.5", severity="unknown")))
+            self.assertEqual(posture.patches, (
+                Patch(title="macOS Sonoma 14.6-23G80", description="macOS Sonoma 14.6-23G80", product="macOS", vendor="Apple Inc.", severity="2", category="update", is_installed="no"),
+                Patch(title="Safari17.6-19618.3.11.11.5", description="Safari17.6-19618.3.11.11.5", product="macOS", vendor="Apple Inc.", severity="1", category="update", is_installed="no"),
+            ))
+            self.assertEqual(posture.patch_management_product.is_enabled, "yes")
             self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
 
-    def test_software_update_localized_or_malformed_output_is_unknown_not_positive(self):
+    def test_software_update_localized_or_malformed_output_is_unknown_not_cached(self):
         with tempfile.TemporaryDirectory() as td:
             cache = Path(td) / "updates.json"
             argv = ("/usr/sbin/softwareupdate", "--list")
@@ -222,20 +240,22 @@ class MacPostureCollectorTests(unittest.TestCase):
             posture = MacPostureCollector(runner=runner, software_update_cache=cache).collect()
 
             self.assertEqual(posture.patches, ())
+            self.assertEqual(posture.patch_management_product.is_enabled, "n/a")
             self.assertFalse(cache.exists())
 
     def test_software_update_timeout_uses_fresh_six_hour_cache_when_available(self):
         with tempfile.TemporaryDirectory() as td:
             cache = Path(td) / "updates.json"
             now = datetime(2026, 8, 4, 6, 0, tzinfo=timezone.utc)
-            cache.write_text('{"created_at":"2026-08-04T02:00:00+00:00","patches":[{"id":"CachedUpdate-1","severity":"unknown"}]}', encoding="utf-8")
+            cache.write_text('{"created_at":"2026-08-04T02:00:00+00:00","patches":[{"title":"CachedUpdate-1","severity":"1"}]}', encoding="utf-8")
             os.chmod(cache, 0o600)
             argv = ("/usr/sbin/softwareupdate", "--list")
             runner = FakeRunner([(argv, result(argv, "", "timed out", -1))])
 
             posture = MacPostureCollector(runner=runner, software_update_cache=cache, now=lambda: now).collect()
 
-        self.assertEqual(posture.patches, (Patch(id="CachedUpdate-1", severity="unknown"),))
+        self.assertEqual(posture.patches, (Patch(title="CachedUpdate-1", description="CachedUpdate-1", product="macOS", vendor="Apple Inc.", severity="1", category="update", is_installed="no"),))
+        self.assertEqual(posture.patch_management_product.is_enabled, "yes")
         self.assertNotIn((argv, 45.0), runner.calls)
 
     def test_software_update_timeout_without_fresh_cache_is_unknown_empty_not_positive(self):
@@ -247,6 +267,7 @@ class MacPostureCollectorTests(unittest.TestCase):
             posture = MacPostureCollector(runner=runner, software_update_cache=cache).collect()
 
         self.assertEqual(posture.patches, ())
+        self.assertEqual(posture.patch_management_product.is_enabled, "n/a")
 
     def test_software_update_cache_corruption_is_ignored_and_replaced_atomically(self):
         with tempfile.TemporaryDirectory() as td:
@@ -257,7 +278,8 @@ class MacPostureCollectorTests(unittest.TestCase):
 
             posture = MacPostureCollector(runner=runner, software_update_cache=cache).collect()
 
-            self.assertEqual(posture.patches, (Patch(id="Replacement-1", severity="unknown"),))
+            self.assertEqual(posture.patches, (Patch(title="Replacement-1", description="Replacement-1", product="macOS", vendor="Apple Inc.", severity="1", category="update", is_installed="no"),))
+            self.assertEqual(posture.patch_management_product.is_enabled, "yes")
             self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
             self.assertNotEqual(cache.read_text(encoding="utf-8"), "not json")
 

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Tuple
 
-from .hip_xml import Drive, HostInfo, MacPosture, Patch, Product
+from .hip_xml import Drive, HostInfo, MacPosture, NetworkInterface, Patch, Product
 
 
 @dataclass(frozen=True)
@@ -66,31 +66,35 @@ class MacPostureCollector:
         self.software_update_timeout = software_update_timeout
 
     def collect(self) -> MacPosture:
-        os_name, os_version = self._collect_os()
+        os_version = self._collect_os_version()
         interface_name, mac_address = self._collect_physical_identity()
+        interfaces = (NetworkInterface(name=interface_name, mac_address=mac_address),) if interface_name else ()
         xprotect = self._collect_xprotect()
         gatekeeper = self._collect_gatekeeper()
         filevault = self._collect_filevault()
         app_firewall = self._collect_application_firewall()
         pf = self._collect_packet_filter()
-        patches = self._collect_software_updates()
+        patches, patch_scan_state = self._collect_software_updates()
         return MacPosture(
-            host_info=HostInfo(os=os_name, os_version=os_version, interface_name=interface_name, mac_address=mac_address, host_id=mac_address),
-            anti_malware=(xprotect,),
+            host_info=HostInfo(
+                os=f"Apple Mac OS X {os_version}" if os_version else "Apple Mac OS X",
+                os_version=os_version,
+                os_vendor="Apple",
+                interface_name=interface_name,
+                mac_address=mac_address,
+                host_id=mac_address,
+                interfaces=interfaces,
+            ),
+            anti_malware=(xprotect, gatekeeper),
             disk_encryption=(filevault,),
             firewall=(app_firewall, pf),
+            patch_management_product=Product(vendor="Apple Inc.", name="Software Update", version="3.0", is_enabled=patch_scan_state),
             patches=patches,
-            data_loss_prevention=(gatekeeper,),
         )
 
-    def _collect_os(self) -> tuple[Optional[str], Optional[str]]:
+    def _collect_os_version(self) -> Optional[str]:
         data = _read_plist(self.system_version_plist)
-        name = _string_value(data.get("ProductName")) or "macOS"
-        version = _string_value(data.get("ProductVersion"))
-        build = _string_value(data.get("ProductBuildVersion"))
-        if version and build:
-            version = f"{version} ({build})"
-        return name, version
+        return _string_value(data.get("ProductVersion"))
 
     def _collect_xprotect(self) -> Product:
         data = _read_plist(self.xprotect_plist)
@@ -98,20 +102,34 @@ class MacPostureCollector:
         definition_date = _date_value(data.get("LastModification") or data.get("BuildDate"))
         if definition_date is None:
             definition_date = _file_mtime_date(self.xprotect_plist)
-        return Product(name="XProtect", version=version, definition_date=definition_date, real_time_protection="unknown")
+        date_parts = _date_parts(definition_date)
+        return Product(
+            vendor="Apple Inc.",
+            name="Xprotect",
+            version=version or "n/a",
+            defver=version or "",
+            engver="",
+            datemon=date_parts[0],
+            dateday=date_parts[1],
+            dateyear=date_parts[2],
+            prod_type="3",
+            os_type="4",
+            real_time_protection="yes" if version else "n/a",
+            last_full_scan_time="n/a",
+        )
 
-    def _collect_software_updates(self) -> Tuple[Patch, ...]:
+    def _collect_software_updates(self) -> tuple[Tuple[Patch, ...], str]:
         cached = self._read_update_cache()
         if cached is not None:
-            return cached
+            return cached, "yes"
         status = self._run_status(("/usr/sbin/softwareupdate", "--list"), self.software_update_timeout)
         if status.returncode != 0:
-            return ()
+            return (), "n/a"
         patches = _parse_softwareupdate_list(status.stdout)
         if patches is None:
-            return ()
+            return (), "n/a"
         self._write_update_cache(patches)
-        return patches
+        return patches, "yes"
 
     def _read_update_cache(self) -> Optional[Tuple[Patch, ...]]:
         try:
@@ -128,11 +146,10 @@ class MacPostureCollector:
             for item in patches:
                 if not isinstance(item, dict):
                     return None
-                patch_id = _string_value(item.get("id"))
-                if patch_id is None:
+                title = _string_value(item.get("title") or item.get("id"))
+                if title is None:
                     return None
-                severity = _string_value(item.get("severity")) or "unknown"
-                parsed.append(Patch(id=patch_id, severity=severity))
+                parsed.append(_patch_from_title(title, _string_value(item.get("severity")) or "1"))
             return tuple(parsed)
         except (FileNotFoundError, OSError, ValueError, TypeError):
             return None
@@ -140,7 +157,7 @@ class MacPostureCollector:
     def _write_update_cache(self, patches: Tuple[Patch, ...]) -> None:
         payload = {
             "created_at": self.now().isoformat(),
-            "patches": [{"id": patch.id, "severity": patch.severity or "unknown"} for patch in patches],
+            "patches": [{"title": patch.title, "severity": patch.severity or "1"} for patch in patches],
         }
         self.software_update_cache.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
@@ -177,28 +194,29 @@ class MacPostureCollector:
 
     def _collect_gatekeeper(self) -> Product:
         status = self._run_status(("/usr/sbin/spctl", "--status"), 5.0)
-        return Product(name="Gatekeeper", enabled=_parse_enabled_disabled(status.stdout, "assessments enabled", "assessments disabled") if status.returncode == 0 else "unknown")
+        rtp = _parse_yes_no_na(status.stdout, "assessments enabled", "assessments disabled") if status.returncode == 0 else "n/a"
+        return Product(vendor="Apple Inc.", name="Gatekeeper", version="n/a", defver="", engver="", datemon="", dateday="", dateyear="", prod_type="3", os_type="4", real_time_protection=rtp, last_full_scan_time="n/a")
 
     def _collect_filevault(self) -> Drive:
         status = self._run_status(("/usr/bin/fdesetup", "status"), 5.0)
-        encrypted = "unknown"
+        enc_state = "unknown"
         if status.returncode == 0:
             text = status.stdout.lower()
             if "filevault is on" in text:
-                encrypted = "yes"
+                enc_state = "encrypted"
             elif "filevault is off" in text:
-                encrypted = "no"
-        return Drive(name="FileVault", encrypted=encrypted)
+                enc_state = "unencrypted"
+        return Drive(drive_name="All", enc_state=enc_state)
 
     def _collect_application_firewall(self) -> Product:
         status = self._run_status(("/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"), 5.0)
-        enabled = _parse_enabled_disabled(status.stdout, "firewall is enabled", "firewall is disabled") if status.returncode == 0 else "unknown"
-        return Product(name="Application Firewall", enabled=enabled)
+        enabled = _parse_yes_no_na(status.stdout, "firewall is enabled", "firewall is disabled") if status.returncode == 0 else "n/a"
+        return Product(vendor="Apple Inc.", name="Mac OS X Builtin Firewall", version="n/a", is_enabled=enabled)
 
     def _collect_packet_filter(self) -> Product:
         status = self._run_status(("/sbin/pfctl", "-s", "info"), 5.0)
-        enabled = _parse_enabled_disabled(status.stdout, "status: enabled", "status: disabled") if status.returncode == 0 else "unknown"
-        return Product(name="Packet Filter", enabled=enabled)
+        enabled = _parse_yes_no_na(status.stdout, "status: enabled", "status: disabled") if status.returncode == 0 else "n/a"
+        return Product(vendor="OpenBSD", name="Packet Filter", version="n/a", is_enabled=enabled)
 
     def _run_status(self, argv: Sequence[str], timeout: float) -> CommandResult:
         return self.runner.run(tuple(argv), timeout)
@@ -234,13 +252,22 @@ def _file_mtime_date(path: Path) -> Optional[str]:
         return None
 
 
-def _parse_enabled_disabled(stdout: str, enabled_phrase: str, disabled_phrase: str) -> str:
+def _date_parts(value: Optional[str]) -> tuple[str, str, str]:
+    if not value:
+        return "", "", ""
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", value)
+    if not match:
+        return "", "", ""
+    return match.group(2), match.group(3), match.group(1)
+
+
+def _parse_yes_no_na(stdout: str, enabled_phrase: str, disabled_phrase: str) -> str:
     text = stdout.lower()
     if enabled_phrase in text:
         return "yes"
     if disabled_phrase in text:
         return "no"
-    return "unknown"
+    return "n/a"
 
 
 _MAC_RE = re.compile(r"(?i)\b([0-9a-f]{2}(?::[0-9a-f]{2}){5})\b")
@@ -309,6 +336,21 @@ def _parse_ifconfig_interfaces(stdout: str) -> Optional[tuple[str, str]]:
 _LABEL_RE = re.compile(r"^\s*\*\s+Label:\s*(.+?)\s*$")
 
 
+def _patch_from_title(title: str, severity: str) -> Patch:
+    return Patch(
+        title=title,
+        description=title,
+        product="macOS",
+        vendor="Apple Inc.",
+        info_url=None,
+        kb_article_id=None,
+        security_bulletin_id=None,
+        severity=severity,
+        category="update",
+        is_installed="no",
+    )
+
+
 def _parse_softwareupdate_list(stdout: str) -> Optional[Tuple[Patch, ...]]:
     lowered = stdout.lower()
     if "no new software available" in lowered:
@@ -321,7 +363,7 @@ def _parse_softwareupdate_list(stdout: str) -> Optional[Tuple[Patch, ...]]:
     def flush() -> None:
         nonlocal current_label, current_restart
         if current_label:
-            patches.append(Patch(id=current_label, severity="restart-required" if current_restart else "unknown"))
+            patches.append(_patch_from_title(current_label, "2" if current_restart else "1"))
         current_label = None
         current_restart = False
 
