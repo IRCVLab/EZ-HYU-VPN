@@ -154,12 +154,17 @@ class ControlServer:
 
     def _serve(self, *, once: bool, stop_event: Optional[threading.Event] = None) -> None:
         self._prepare_socket_path()
+        bound_identity: Optional[tuple[int, int]] = None
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(str(self.socket_path))
+                bound_stat = self.socket_path.lstat()
+                if not stat.S_ISSOCK(bound_stat.st_mode):
+                    raise ControlProtocolError("unsafe bound control socket")
+                bound_identity = (bound_stat.st_dev, bound_stat.st_ino)
                 os.chmod(self.socket_path, 0o600)
                 os.chown(self.socket_path, self.owner_uid, -1)
-                self._validate_bound_socket()
+                self._validate_bound_socket(bound_identity)
                 server.listen(1)
                 server.settimeout(0.2)
                 self._ready.set()
@@ -178,7 +183,7 @@ class ControlServer:
                     if once:
                         return
         finally:
-            self._unlink_owned_socket()
+            self._unlink_owned_socket(bound_identity)
 
     def _handle_connection(self, conn: socket.socket) -> tuple[bool, Optional[str]]:
         try:
@@ -206,9 +211,14 @@ class ControlServer:
                 raise ControlProtocolError("unsafe existing control socket")
             self.socket_path.unlink()
 
-    def _validate_bound_socket(self) -> None:
+    def _validate_bound_socket(self, expected_identity: tuple[int, int]) -> None:
         st = self.socket_path.lstat()
-        if not stat.S_ISSOCK(st.st_mode) or st.st_uid != self.owner_uid or stat.S_IMODE(st.st_mode) != 0o600:
+        if (
+            not stat.S_ISSOCK(st.st_mode)
+            or st.st_uid != self.owner_uid
+            or stat.S_IMODE(st.st_mode) != 0o600
+            or (st.st_dev, st.st_ino) != expected_identity
+        ):
             raise ControlProtocolError("unsafe bound control socket")
 
     def _validate_peer(self, conn: socket.socket) -> None:
@@ -218,12 +228,14 @@ class ControlServer:
             if uid != self.owner_uid:
                 raise ControlProtocolError("wrong peer uid")
 
-    def _unlink_owned_socket(self) -> None:
+    def _unlink_owned_socket(self, expected_identity: Optional[tuple[int, int]]) -> None:
+        if expected_identity is None:
+            return
         try:
             st = self.socket_path.lstat()
         except FileNotFoundError:
             return
-        if stat.S_ISSOCK(st.st_mode) and st.st_uid == self.owner_uid:
+        if stat.S_ISSOCK(st.st_mode) and st.st_uid == self.owner_uid and (st.st_dev, st.st_ino) == expected_identity:
             self.socket_path.unlink()
 
 

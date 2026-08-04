@@ -141,6 +141,34 @@ class ControlProtocolTests(unittest.TestCase):
             thread.join(timeout=2)
             self.assertEqual(seen, ["connect"])
 
+    def test_stopping_replaced_server_does_not_unlink_new_control_socket(self):
+        with tempfile.TemporaryDirectory() as td:
+            socket_path = Path(td) / "hyu-control.sock"
+            first_stop = threading.Event()
+            first = ControlServer(socket_path, lambda command: (True, None))
+            first_thread = threading.Thread(target=first.serve_forever, args=(first_stop,), daemon=True)
+            first_thread.start()
+            first.wait_until_ready(timeout=2)
+
+            second_stop = threading.Event()
+            second = ControlServer(socket_path, lambda command: (command == "automatic-off", None))
+            second_thread = threading.Thread(target=second.serve_forever, args=(second_stop,), daemon=True)
+            second_thread.start()
+            second.wait_until_ready(timeout=2)
+
+            first_stop.set()
+            first_thread.join(timeout=2)
+            self.assertFalse(first_thread.is_alive())
+            self.assertEqual(
+                send_control_command(socket_path, "automatic-off"),
+                {"schema_version": 1, "ok": True, "error_code": None},
+            )
+
+            second_stop.set()
+            second_thread.join(timeout=2)
+            self.assertFalse(second_thread.is_alive())
+            self.assertFalse(socket_path.exists())
+
     def test_cli_uses_socket_without_shelling_out(self):
         with tempfile.TemporaryDirectory() as td:
             socket_path = Path(td) / "hyu-control.sock"
