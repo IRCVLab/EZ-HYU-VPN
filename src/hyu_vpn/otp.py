@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import subprocess
 import time
+import re
 from typing import Callable, Mapping, Optional, Sequence
 
 
 SECURITY = "/usr/bin/security"
 OATHTOOL = "/opt/homebrew/bin/oathtool"
+SUBPROCESS_TIMEOUT = 5.0
 
 
 class TotpError(RuntimeError):
@@ -22,7 +24,16 @@ class Keychain:
 
     def read(self, service: str) -> str:
         argv = [self.security_path, "find-generic-password", "-s", service, "-w"]
-        completed = self.runner(argv, capture_output=True, text=True, check=False)
+        try:
+            completed = self.runner(
+                argv,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=SUBPROCESS_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise RuntimeError(f"missing keychain item: {service}") from None
         value = (completed.stdout or "").strip()
         if completed.returncode != 0 or not value:
             raise RuntimeError(f"missing keychain item: {service}")
@@ -62,15 +73,19 @@ class TotpProvider:
         return value
 
     def _generate(self) -> str:
-        completed = self.runner(
-            [self.oathtool_path, "--totp", "-b", self.secret],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=self.environ,
-        )
+        try:
+            completed = self.runner(
+                [self.oathtool_path, "--totp", "-b", self.secret],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self.environ,
+                timeout=SUBPROCESS_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise TotpError("TOTP generation failed") from None
         value = (completed.stdout or "").strip()
-        if completed.returncode != 0 or not value:
+        if completed.returncode != 0 or re.fullmatch(r"[0-9]{6}", value) is None:
             raise TotpError("TOTP generation failed")
         return value
 

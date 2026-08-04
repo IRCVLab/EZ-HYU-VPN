@@ -34,7 +34,7 @@ class ConnectorConfig:
     authgroup: str = AUTHGROUP
     vpnc_script: str = VPNC_SCRIPT
     hip_wrapper: Optional[str] = None
-    sudo_path: Optional[str] = "sudo"
+    sudo_path: Optional[str] = "/usr/bin/sudo"
 
 
 def default_hip_wrapper() -> str:
@@ -79,34 +79,43 @@ class PromptSession:
         self.terminate_timeout = terminate_timeout
         self._proc: Optional[subprocess.Popen[bytes]] = None
         self._received_signal: Optional[int] = None
-        self._last_prompt_key: Optional[bytes] = None
 
     def run(self) -> int:
         master, slave = pty.openpty()
         old_handlers: dict[int, object] = {}
         try:
-            self._proc = subprocess.Popen(
-                self.argv,
-                stdin=subprocess.PIPE,
-                stdout=slave,
-                stderr=slave,
-                bufsize=0,
-                close_fds=True,
-                start_new_session=True,
-                env=self.environ,
-            )
+            try:
+                self._proc = subprocess.Popen(
+                    self.argv,
+                    stdin=subprocess.PIPE,
+                    stdout=slave,
+                    stderr=slave,
+                    bufsize=0,
+                    close_fds=True,
+                    start_new_session=True,
+                    env=self.environ,
+                )
+            except (OSError, subprocess.SubprocessError):
+                self._write_error("OpenConnect launch failed\n")
+                return 1
             os.close(slave)
             slave = -1
             self._install_signal_handlers(old_handlers)
-            self._send_line(self.password)
-            return self._pump_until_exit(master)
+            try:
+                self._send_line(self.password)
+                return self._pump_until_exit(master)
+            except (BrokenPipeError, OSError):
+                self._write_error("OpenConnect child input failed\n")
+                self._stop_child()
+                return 1
         except TotpError:
             self._write_error("TOTP generation failed\n")
-            self._terminate_child(signal.SIGTERM)
-            self._wait_for_child()
+            self._stop_child()
             return 1
         finally:
             self._restore_signal_handlers(old_handlers)
+            if self._proc is not None and self._proc.poll() is None:
+                self._stop_child()
             if slave != -1:
                 os.close(slave)
             try:
@@ -171,16 +180,15 @@ class PromptSession:
         return None
 
     def _respond_to_prompt(self, prompt_key: bytes) -> bool:
-        if prompt_key == self._last_prompt_key:
-            return False
-        self._last_prompt_key = prompt_key
         lower = prompt_key.lower()
         if lower.endswith(b"password"):
-            # --passwd-on-stdin receives the password at startup; repeated Password: echoes are ignored.
+            # The portal consumes the startup password through --passwd-on-stdin.
+            # Hanyang's gateway then presents a separate Password: prompt.
+            self._send_line(self.password)
             return True
         if lower.endswith(b"challenge"):
             if self.totp_provider is None:
-                return True
+                raise TotpError("TOTP generation failed")
             self._send_line(self.totp_provider.current())
             return True
         return False
@@ -215,6 +223,16 @@ class PromptSession:
         try:
             os.killpg(proc.pid, signum)
         except ProcessLookupError:
+            return
+
+    def _stop_child(self) -> None:
+        proc = self._proc
+        if proc is None:
+            return
+        self._terminate_child(signal.SIGTERM)
+        try:
+            self._wait_for_child()
+        except (OSError, subprocess.SubprocessError):
             return
 
     def _wait_for_child(self) -> int:

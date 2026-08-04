@@ -45,7 +45,7 @@ class ConnectorTests(unittest.TestCase):
             oathtool_calls = read_json(oathtool_state)["calls"]
 
         self.assertEqual(rc, 0)
-        self.assertEqual(responses, ["PASSWORD-CANARY", "111111", "222222"])
+        self.assertEqual(responses, ["PASSWORD-CANARY", "111111", "PASSWORD-CANARY", "222222"])
         self.assertEqual(oathtool_calls, 3)
         self.assertEqual(sleeps, [29])
 
@@ -74,20 +74,65 @@ class ConnectorTests(unittest.TestCase):
         self.assertNotIn("SEED-CANARY", written)
         self.assertNotIn("PASSWORD-CANARY", written)
 
-    def test_duplicate_prompt_tail_gets_single_response(self):
+    def test_later_identical_bare_challenge_is_a_new_prompt(self):
         with tempfile.TemporaryDirectory() as td:
             marker = Path(td) / "openconnect.json"
             env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "duplicate_prompts"}
             provider = mock.Mock()
-            provider.current.return_value = "123456"
+            provider.current.side_effect = ["123456", "654321"]
             session = PromptSession([sys.executable, str(FAKE_OPENCONNECT)], password="pw", totp_provider=provider, environ=env, stdout=None)
 
             rc = session.run()
             responses = read_json(marker)["responses"]
 
         self.assertEqual(rc, 0)
-        self.assertEqual(responses, ["pw", "123456"])
-        provider.current.assert_called_once_with()
+        self.assertEqual(responses, ["pw", "123456", "654321"])
+        self.assertEqual(provider.current.call_count, 2)
+
+    def test_missing_executable_returns_redacted_error(self):
+        stderr = mock.Mock()
+        session = PromptSession(
+            ["/definitely/not/openconnect"],
+            password="PASSWORD-CANARY",
+            totp_provider=mock.Mock(),
+            stdout=None,
+            stderr=stderr,
+        )
+
+        rc = session.run()
+
+        self.assertNotEqual(rc, 0)
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("launch failed", written.lower())
+        self.assertNotIn("PASSWORD-CANARY", written)
+        self.assertNotIn("/definitely/not/openconnect", written)
+
+    def test_broken_child_stdin_returns_redacted_error_and_reaps_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "openconnect.json"
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "close_stdin_on_challenge"}
+            stderr = mock.Mock()
+            provider = mock.Mock()
+            provider.current.return_value = "123456"
+            session = PromptSession(
+                [sys.executable, str(FAKE_OPENCONNECT)],
+                password="PASSWORD-CANARY",
+                totp_provider=provider,
+                environ=env,
+                stdout=None,
+                stderr=stderr,
+                terminate_timeout=0.5,
+            )
+
+            rc = session.run()
+            child_pid = read_json(marker)["pid"]
+
+        self.assertNotEqual(rc, 0)
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("child input failed", written.lower())
+        self.assertNotIn("PASSWORD-CANARY", written)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child_pid, 0)
 
     def test_eof_after_prompt_returns_child_status(self):
         with tempfile.TemporaryDirectory() as td:
@@ -148,6 +193,7 @@ class ConnectorTests(unittest.TestCase):
         self.assertIn("--script=/opt/homebrew/etc/vpnc/vpnc-script", argv)
         self.assertIn("secure.hanyang.ac.kr", argv)
         self.assertIn("/opt/homebrew/bin/openconnect", argv)
+        self.assertEqual(argv[:2], ["/usr/bin/sudo", "-n"])
         self.assertFalse(any("PanGP" in part or "GlobalProtect" in part for part in argv))
 
     def test_main_reads_keychain_services_by_absolute_security_argv(self):
@@ -184,6 +230,28 @@ class TotpProviderTests(unittest.TestCase):
         with self.assertRaises(TotpError) as cm:
             provider.current()
         self.assertNotIn("SEED-CANARY", str(cm.exception))
+
+    def test_rejects_non_digit_or_wrong_length_oathtool_output(self):
+        for value in ("warning", "12345", "1234567", "123456\nwarning"):
+            with self.subTest(value=value):
+                provider = TotpProvider(
+                    "SEED-CANARY",
+                    runner=lambda *_args, **_kwargs: mock.Mock(returncode=0, stdout=value, stderr=""),
+                )
+                with self.assertRaises(TotpError):
+                    provider.current()
+
+    def test_keychain_and_oathtool_timeouts_are_redacted(self):
+        def timeout(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired(cmd=["SECRET-CANARY"], timeout=5)
+
+        with self.assertRaisesRegex(RuntimeError, "gp-vpn-password") as keychain_error:
+            Keychain(runner=timeout).read("gp-vpn-password")
+        self.assertNotIn("SECRET-CANARY", str(keychain_error.exception))
+
+        with self.assertRaises(TotpError) as totp_error:
+            TotpProvider("SEED-CANARY", runner=timeout).current()
+        self.assertNotIn("SEED-CANARY", str(totp_error.exception))
 
     def test_keychain_missing_item_raises_redacted_error(self):
         def fake_run(argv, **kwargs):

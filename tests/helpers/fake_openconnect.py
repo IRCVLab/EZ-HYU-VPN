@@ -37,31 +37,36 @@ elif mode == "error":
     write("fatal authentication error\n")
     raise SystemExit(5)
 elif mode == "eof_after_password":
-    write("Pass")
-    time.sleep(0.02)
-    write("word:")
     read_line()
     raise SystemExit(4)
-elif mode == "duplicate_prompts":
-    write("Pass")
+elif mode == "close_stdin_on_challenge":
+    read_line()
+    os.close(sys.stdin.fileno())
+    write("Chal")
     time.sleep(0.02)
-    write("word:")
+    write("lenge:")
+    time.sleep(0.2)
+    raise SystemExit(6)
+elif mode == "duplicate_prompts":
     read_line()
     write("Challenge:")
     read_line()
     write("Challenge:")
-    # Exit without reading a duplicate response; parent must not send twice for unchanged prompt tail.
+    read_line()
     raise SystemExit(0)
 else:
-    write("Pass")
-    time.sleep(0.02)
-    write("word:")
+    # --passwd-on-stdin consumes the initial portal password without a prompt.
     read_line()
     write("Chal")
     time.sleep(0.02)
     write("lenge:")
     read_line()
-    write("Gateway Chal")
+    # The gateway asks for the password again, then presents another bare Challenge:.
+    write("Pass")
+    time.sleep(0.02)
+    write("word:")
+    read_line()
+    write("Chal")
     time.sleep(0.02)
     write("lenge:")
     read_line()
