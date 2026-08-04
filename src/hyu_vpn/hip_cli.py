@@ -47,13 +47,16 @@ def main(
     env = dict(environ) if environ is not None else dict(os.environ)
     try:
         _validate_exact_options(args)
-        invocation = _clean_invocation(HipInvocation.from_argv(args, env))
+        invocation = HipInvocation.from_argv(args, env)
+        _validate_authoritative_invocation(invocation)
+        invocation = _clean_invocation(invocation)
     except HipInvocationError as exc:
         _write_stderr(_stderr, f"HIP invocation error: {_safe_invocation_message(str(exc))}\n")
         return 2
 
     try:
-        identity = _clean_identity(CookieIdentity.from_encoded(invocation.cookie))
+        identity = CookieIdentity.from_encoded(invocation.cookie)
+        _validate_authoritative_identity(identity)
     except HipInvocationError:
         _write_stderr(_stderr, "HIP cookie error\n")
         return 2
@@ -71,7 +74,7 @@ def main(
         return 4
 
     try:
-        _stdout.buffer.write(xml)
+        _write_all(_stdout.buffer, xml)
         _stdout.buffer.flush()
     except (BrokenPipeError, OSError):
         _write_stderr(_stderr, "HIP output error\n")
@@ -121,6 +124,43 @@ def _write_stderr(stderr: TextIO, message: str) -> None:
         pass
 
 
+def _write_all(stream: BinaryIO, data: bytes) -> None:
+    view = memoryview(data)
+    offset = 0
+    while offset < len(view):
+        written = stream.write(view[offset:])
+        if not isinstance(written, int) or written <= 0 or written > len(view) - offset:
+            raise OSError("short HIP output write")
+        offset += written
+
+
+def _validate_authoritative_text(value: Optional[str]) -> None:
+    if value is None:
+        return
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError:
+        raise HipInvocationError("invalid authoritative text") from None
+    if "\ufffd" in value:
+        raise HipInvocationError("invalid authoritative text")
+
+
+def _validate_authoritative_invocation(invocation: HipInvocation) -> None:
+    for value in (
+        invocation.cookie,
+        invocation.client_ip,
+        invocation.client_ipv6,
+        invocation.md5,
+        invocation.client_os,
+    ):
+        _validate_authoritative_text(value)
+
+
+def _validate_authoritative_identity(identity: CookieIdentity) -> None:
+    for value in (identity.user, identity.domain, identity.computer):
+        _validate_authoritative_text(value)
+
+
 def _clean_text(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -134,21 +174,7 @@ def _clean_tuple(values: Sequence[str]) -> tuple[str, ...]:
 def _clean_invocation(invocation: HipInvocation) -> HipInvocation:
     return replace(
         invocation,
-        cookie=_clean_text(invocation.cookie) or "",
-        client_ip=_clean_text(invocation.client_ip),
-        client_ipv6=_clean_text(invocation.client_ipv6),
-        md5=_clean_text(invocation.md5) or "",
-        client_os=_clean_text(invocation.client_os),
         app_version=_clean_text(invocation.app_version),
-    )
-
-
-def _clean_identity(identity: CookieIdentity) -> CookieIdentity:
-    return replace(
-        identity,
-        user=_clean_text(identity.user) or "",
-        domain=_clean_text(identity.domain),
-        computer=_clean_text(identity.computer),
     )
 
 

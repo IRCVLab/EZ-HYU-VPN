@@ -27,3 +27,24 @@
 - Password, TOTP seed, OTP, full cookie, and `authcookie` canaries are absent from stdout, stderr, and logs.
 - User, host-name, host-id, and MAC appear only in HIP XML stdout where protocol fields require them, never in stderr or diagnostic logs.
 - No raw XML logging is performed.
+
+---
+
+## Review Fix Round: authoritative text and complete output writes
+
+### Findings addressed
+
+1. XML output now loops until every byte is written. A zero, `None`, invalid, or over-reported write is a redacted output failure and returns nonzero; flush occurs only after complete output.
+2. Cookie, MD5, client addresses, client OS, and parsed user/domain/computer are strict authoritative fields. Surrogates and replacement characters are rejected with redacted nonzero output instead of being silently changed. Replacement cleaning remains limited to non-authoritative posture text and optional APP_VERSION environment text.
+
+### RED evidence
+
+- Short writer returning 7 bytes produced truncated XML while `main()` returned zero.
+- A partial write followed by zero progress returned zero.
+- Surrogates in cookie user, MD5, or client IP were replaced and emitted with success.
+
+### GREEN evidence
+
+- Five focused output/encoding regressions: `Ran 5 tests ... OK`.
+- HIP CLI + privacy suites: `Ran 12 tests ... OK`.
+- `py_compile` and `git diff --check` passed.

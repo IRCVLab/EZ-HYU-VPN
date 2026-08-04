@@ -42,6 +42,26 @@ class FailingStdout:
     buffer = Buffer()
 
 
+class ShortStdout:
+    class Buffer:
+        def __init__(self, writes):
+            self.writes = list(writes)
+            self.data = bytearray()
+            self.flushed = False
+
+        def write(self, data):
+            requested = self.writes.pop(0) if self.writes else len(data)
+            count = min(requested, len(data))
+            self.data.extend(bytes(data[:count]))
+            return count
+
+        def flush(self):
+            self.flushed = True
+
+    def __init__(self, writes):
+        self.buffer = self.Buffer(writes)
+
+
 class HipCliTests(unittest.TestCase):
     def posture(self):
         return MacPosture(host_info=HostInfo(
@@ -143,6 +163,50 @@ class HipCliTests(unittest.TestCase):
         self.assertNotIn("PIPE-CANARY", stderr.getvalue())
         self.assertNotIn("CLI-USER", stderr.getvalue())
         self.assertNotIn("HOST-ID-CANARY", stderr.getvalue())
+
+    def test_short_writes_are_retried_until_the_complete_xml_is_written(self):
+        from hyu_vpn import hip_cli
+        stderr = io.StringIO()
+        collector = mock.Mock()
+        collector.collect.return_value = self.posture()
+        stdout = ShortStdout([7, 11, 19])
+
+        rc = hip_cli.main(ARGV, _collector_factory=lambda: collector, _stdout=stdout, _stderr=stderr)
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        ET.fromstring(bytes(stdout.buffer.data))
+        self.assertTrue(stdout.buffer.flushed)
+
+    def test_zero_progress_after_partial_write_returns_redacted_error(self):
+        from hyu_vpn import hip_cli
+        stderr = io.StringIO()
+        collector = mock.Mock()
+        collector.collect.return_value = self.posture()
+        stdout = ShortStdout([7, 0])
+
+        rc = hip_cli.main(ARGV, _collector_factory=lambda: collector, _stdout=stdout, _stderr=stderr)
+
+        self.assertNotEqual(rc, 0)
+        self.assertIn("HIP output error", stderr.getvalue())
+        self.assertNotIn("CLI-USER", stderr.getvalue())
+        self.assertFalse(stdout.buffer.flushed)
+
+    def test_surrogates_in_authoritative_openconnect_identifiers_are_rejected(self):
+        from hyu_vpn import hip_cli
+        cases = [
+            ["--cookie", "user=USER\udcff&domain=D&computer=H", "--md5", "a" * 32, "--client-ip", "192.0.2.1"],
+            ["--cookie", "user=U&domain=D&computer=H", "--md5", "a\udcff", "--client-ip", "192.0.2.1"],
+            ["--cookie", "user=U&domain=D&computer=H", "--md5", "a" * 32, "--client-ip", "192.0.2.1\udcff"],
+        ]
+        for argv in cases:
+            with self.subTest(argv_index=cases.index(argv)):
+                stdout = BytesWriter()
+                stderr = io.StringIO()
+                rc = hip_cli.main(argv, _stdout=stdout, _stderr=stderr)
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(stdout.buffer.getvalue(), b"")
+                self.assertNotIn("USER", stderr.getvalue())
+                self.assertNotIn("192.0.2.1", stderr.getvalue())
 
 
     def test_non_utf8_surrogate_collected_posture_does_not_crash_or_leak(self):
