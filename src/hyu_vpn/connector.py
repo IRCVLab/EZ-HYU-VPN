@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import pty
 import re
 import select
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -27,6 +29,10 @@ AUTHGROUP = "HYU-ExternalGW-General"
 OPENCONNECT = "/opt/homebrew/bin/openconnect"
 VPNC_SCRIPT = "/opt/homebrew/etc/vpnc/vpnc-script"
 PRIVILEGED_HELPER = "/Library/PrivilegedHelperTools/com.hyu.vpn.helper"
+INSTALLED_CONNECTOR_CONFIG_PATH = Path("/Library/Application Support/HYU VPN/connector-config.json")
+INSTALLED_OATHTOOL_PATH = Path("/Library/Application Support/HYU VPN/runtime/oathtool")
+INSTALLED_TRUSTED_PARENT = Path("/Library/Application Support/HYU VPN")
+CONNECTOR_CONFIG_MAX_BYTES = 4096
 TOTP_STATE_PATH = Path.home() / "Library" / "Application Support" / "hyu-openconnect" / "totp-counter.json"
 
 _PROMPT_RE = re.compile(rb"(?:Password|Challenge):\s*$", re.IGNORECASE)
@@ -36,6 +42,16 @@ _EVENT_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 class ConnectorProtocolError(RuntimeError):
     """Raised for a local bounded control/event protocol failure."""
+
+
+class ConnectorRuntimeConfigError(RuntimeError):
+    """Raised when the installed connector runtime config is not trusted."""
+
+
+@dataclass(frozen=True)
+class ConnectorRuntimeConfig:
+    oathtool_path: str
+    oathtool_sha256: str
 
 
 @dataclass(frozen=True)
@@ -140,6 +156,161 @@ class ConnectorEventParser:
                 self._connected_emitted = True
                 events.append(ConnectorEvent("connected", self.now()))
         return events
+
+
+def load_connector_runtime_config(
+    *,
+    config_path: os.PathLike[str] | str = INSTALLED_CONNECTOR_CONFIG_PATH,
+    expected_oathtool_path: os.PathLike[str] | str = INSTALLED_OATHTOOL_PATH,
+    trusted_parent: os.PathLike[str] | str = INSTALLED_TRUSTED_PARENT,
+    required_uid: int = 0,
+) -> ConnectorRuntimeConfig:
+    """Load and verify the fixed installed oathtool artifact before TOTP use.
+
+    Production intentionally has no Homebrew fallback: the connector may use only the
+    installer-copied, root-owned runtime oathtool whose hash is pinned in the fixed
+    root-owned config file. Tests can inject an isolated config/path/uid.
+    """
+    config = _trusted_path(config_path)
+    expected_oathtool = _trusted_path(expected_oathtool_path)
+    parent = _trusted_path(trusted_parent)
+    _validate_owned_parent_chain(parent, config.parent, required_uid=required_uid)
+    _validate_owned_parent_chain(parent, expected_oathtool.parent, required_uid=required_uid)
+    try:
+        document = json.loads(
+            _read_bounded_regular_file(
+                config,
+                required_uid=required_uid,
+                exact_mode=0o644,
+                max_bytes=CONNECTOR_CONFIG_MAX_BYTES,
+            ).decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ConnectorRuntimeConfigError) as exc:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration") from exc
+    if not isinstance(document, dict) or set(document) != {"schema_version", "oathtool_path", "oathtool_sha256"}:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    schema_version = document.get("schema_version")
+    oathtool_path = document.get("oathtool_path")
+    oathtool_sha256 = document.get("oathtool_sha256")
+    if isinstance(schema_version, bool) or schema_version != 1:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    if not isinstance(oathtool_path, str) or oathtool_path != str(expected_oathtool):
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    if not isinstance(oathtool_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", oathtool_sha256) is None:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    actual_hash = _sha256_regular_file(expected_oathtool, required_uid=required_uid, exact_mode=0o755)
+    if actual_hash != oathtool_sha256:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    return ConnectorRuntimeConfig(oathtool_path=str(expected_oathtool), oathtool_sha256=oathtool_sha256)
+
+
+def _validate_owned_parent_chain(trusted_parent: Path, target_parent: Path, *, required_uid: int) -> None:
+    try:
+        relative_parts = target_parent.relative_to(trusted_parent).parts
+    except ValueError:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration") from None
+    current = trusted_parent
+    _validate_secure_directory(current, required_uid=required_uid)
+    for part in relative_parts:
+        current = current / part
+        _validate_secure_directory(current, required_uid=required_uid)
+
+
+def _trusted_path(value: os.PathLike[str] | str) -> Path:
+    raw = os.fspath(value)
+    if not raw or any(part in {".", ".."} for part in raw.split(os.sep) if part):
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    return path
+
+
+def _validate_secure_directory(path: Path, *, required_uid: int) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    _validate_owner_and_mode(info, required_uid=required_uid)
+
+
+def _validate_owner_and_mode(info: os.stat_result, *, required_uid: int) -> None:
+    if info.st_uid != required_uid:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    if info.st_mode & 0o022:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+
+
+def _validate_regular_file_info(info: os.stat_result, *, required_uid: int, exact_mode: int) -> None:
+    if not stat.S_ISREG(info.st_mode):
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    if info.st_uid != required_uid:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+    if stat.S_IMODE(info.st_mode) != exact_mode:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+
+
+def _open_verified_regular_file(path: Path, *, required_uid: int, exact_mode: int) -> int:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration") from exc
+    try:
+        _validate_regular_file_info(os.fstat(fd), required_uid=required_uid, exact_mode=exact_mode)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _read_bounded_regular_file(path: Path, *, required_uid: int, exact_mode: int, max_bytes: int) -> bytes:
+    fd = _open_verified_regular_file(path, required_uid=required_uid, exact_mode=exact_mode)
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            chunk = os.read(fd, min(4096, max_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+        if total == 0:
+            raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration") from exc
+    finally:
+        os.close(fd)
+
+
+def _sha256_regular_file(path: Path, *, required_uid: int, exact_mode: int) -> str:
+    fd = _open_verified_regular_file(path, required_uid=required_uid, exact_mode=exact_mode)
+    digest = hashlib.sha256()
+    try:
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    except OSError as exc:
+        raise ConnectorRuntimeConfigError("invalid connector runtime configuration") from exc
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    document: dict[str, object] = {}
+    for key, value in pairs:
+        if key in document:
+            raise ConnectorRuntimeConfigError("invalid connector runtime configuration")
+        document[key] = value
+    return document
 
 
 def default_hip_wrapper() -> str:
@@ -399,10 +570,28 @@ class PromptSession:
             self.stderr.flush()
 
 
-def main(argv: Optional[Sequence[str]] = None, *, config: ConnectorConfig = ConnectorConfig()) -> int:
+def main(
+    argv: Optional[Sequence[str]] = None,
+    *,
+    config: ConnectorConfig = ConnectorConfig(),
+    runtime_config_path: os.PathLike[str] | str = INSTALLED_CONNECTOR_CONFIG_PATH,
+    runtime_expected_oathtool_path: os.PathLike[str] | str = INSTALLED_OATHTOOL_PATH,
+    runtime_trusted_parent: os.PathLike[str] | str = INSTALLED_TRUSTED_PARENT,
+    runtime_required_uid: int = 0,
+) -> int:
     if argv:
         print("hyu-vpn-connect does not accept arguments", file=sys.stderr)
         return 2
+    try:
+        runtime_config = load_connector_runtime_config(
+            config_path=runtime_config_path,
+            expected_oathtool_path=runtime_expected_oathtool_path,
+            trusted_parent=runtime_trusted_parent,
+            required_uid=runtime_required_uid,
+        )
+    except ConnectorRuntimeConfigError:
+        print("invalid connector runtime configuration", file=sys.stderr)
+        return 1
     try:
         keychain = Keychain()
         username = keychain.read("gp-vpn-username")
@@ -411,7 +600,7 @@ def main(argv: Optional[Sequence[str]] = None, *, config: ConnectorConfig = Conn
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    provider = TotpProvider(totp_seed, state_path=TOTP_STATE_PATH)
+    provider = TotpProvider(totp_seed, oathtool_path=runtime_config.oathtool_path, state_path=TOTP_STATE_PATH)
     return PromptSession(
         build_helper_argv(config=config),
         password=password,

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import signal
@@ -15,9 +16,13 @@ from hyu_vpn.connector import (
     ConnectorConfig,
     ConnectorEvent,
     ConnectorEventParser,
+    ConnectorRuntimeConfigError,
+    INSTALLED_CONNECTOR_CONFIG_PATH,
+    INSTALLED_OATHTOOL_PATH,
     PromptSession,
     build_helper_argv,
     build_openconnect_argv,
+    load_connector_runtime_config,
     main,
     parse_connector_event_line,
 )
@@ -26,6 +31,31 @@ from hyu_vpn.otp import Keychain, TotpError, TotpProvider
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENCONNECT = ROOT / "tests" / "helpers" / "fake_openconnect.py"
 FAKE_OATHTOOL = ROOT / "tests" / "helpers" / "fake_oathtool.py"
+
+
+def _sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _write_fake_executable(path, body="#!/bin/sh\necho 123456\n"):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _write_runtime_config(config_path, oathtool_path, *, sha256=None):
+    config_path = Path(config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "oathtool_path": str(oathtool_path),
+        "oathtool_sha256": sha256 if sha256 is not None else _sha256(oathtool_path),
+    }
+    config_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    config_path.chmod(0o644)
+    return payload
 
 
 def read_json(path):
@@ -361,6 +391,282 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(argv[:2], ["/usr/bin/sudo", "-n"])
         self.assertFalse(any("PanGP" in part or "GlobalProtect" in part for part in argv))
 
+    def test_production_runtime_config_contract_uses_fixed_installed_paths(self):
+        self.assertEqual(str(INSTALLED_CONNECTOR_CONFIG_PATH), "/Library/Application Support/HYU VPN/connector-config.json")
+        self.assertEqual(str(INSTALLED_OATHTOOL_PATH), "/Library/Application Support/HYU VPN/runtime/oathtool")
+
+    def test_load_runtime_config_accepts_only_exact_schema_and_verified_runtime_oathtool(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            config_path = root / "connector-config.json"
+            payload = _write_runtime_config(config_path, oathtool)
+
+            expected_hash = _sha256(oathtool)
+            runtime = load_connector_runtime_config(
+                config_path=config_path,
+                expected_oathtool_path=oathtool,
+                trusted_parent=root,
+                required_uid=os.getuid(),
+            )
+
+            self.assertEqual(runtime.oathtool_path, str(oathtool))
+            self.assertEqual(payload, {
+                "schema_version": 1,
+                "oathtool_path": str(oathtool),
+                "oathtool_sha256": expected_hash,
+            })
+        self.assertRegex(payload["oathtool_sha256"], r"^[0-9a-f]{64}$")
+
+
+
+    def test_load_runtime_config_requires_user_readable_0644_config_and_0755_artifact_modes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            config_path = root / "connector-config.json"
+            _write_runtime_config(config_path, oathtool)
+            config_path.chmod(0o644)
+
+            runtime = load_connector_runtime_config(
+                config_path=config_path,
+                expected_oathtool_path=oathtool,
+                trusted_parent=root,
+                required_uid=os.getuid(),
+            )
+            self.assertEqual(runtime.oathtool_path, str(oathtool))
+
+            config_path.chmod(0o600)
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=config_path,
+                    expected_oathtool_path=oathtool,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+            config_path.chmod(0o644)
+            oathtool.chmod(0o755)
+            load_connector_runtime_config(
+                config_path=config_path,
+                expected_oathtool_path=oathtool,
+                trusted_parent=root,
+                required_uid=os.getuid(),
+            )
+            oathtool.chmod(0o700)
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=config_path,
+                    expected_oathtool_path=oathtool,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+    def test_load_runtime_config_rejects_duplicate_json_keys_for_each_contract_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            config_path = root / "connector-config.json"
+            digest = _sha256(oathtool)
+            duplicated = {
+                "schema_version": '{"schema_version":1,"schema_version":1,"oathtool_path":"%s","oathtool_sha256":"%s"}' % (oathtool, digest),
+                "oathtool_path": '{"schema_version":1,"oathtool_path":"%s","oathtool_path":"%s","oathtool_sha256":"%s"}' % (oathtool, oathtool, digest),
+                "oathtool_sha256": '{"schema_version":1,"oathtool_path":"%s","oathtool_sha256":"%s","oathtool_sha256":"%s"}' % (oathtool, digest, digest),
+            }
+            for key, raw in duplicated.items():
+                with self.subTest(key=key):
+                    config_path.write_text(raw, encoding="utf-8")
+                    config_path.chmod(0o644)
+                    with self.assertRaises(ConnectorRuntimeConfigError):
+                        load_connector_runtime_config(
+                            config_path=config_path,
+                            expected_oathtool_path=oathtool,
+                            trusted_parent=root,
+                            required_uid=os.getuid(),
+                        )
+
+    def test_load_runtime_config_rejects_traversal_and_oversize_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            config_path = root / "connector-config.json"
+            _write_runtime_config(config_path, oathtool)
+            config_path.chmod(0o644)
+
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=f"{root}/./connector-config.json",
+                    expected_oathtool_path=oathtool,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=root / "runtime" / ".." / "connector-config.json",
+                    expected_oathtool_path=oathtool,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+            config_path.write_text(" " * 4097, encoding="utf-8")
+            config_path.chmod(0o644)
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=config_path,
+                    expected_oathtool_path=oathtool,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+    def test_load_runtime_config_rejects_symlink_config_before_reading_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            target = root / "real-config.json"
+            _write_runtime_config(target, oathtool)
+            target.chmod(0o644)
+            config_path = root / "connector-config.json"
+            config_path.symlink_to(target)
+
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=config_path,
+                    expected_oathtool_path=oathtool,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+    def test_load_runtime_config_rejects_extra_keys_and_non_lowercase_hash(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            config_path = root / "connector-config.json"
+            valid = _write_runtime_config(config_path, oathtool)
+
+            for payload in (
+                {**valid, "unexpected": "value"},
+                {**valid, "oathtool_sha256": valid["oathtool_sha256"].upper()},
+            ):
+                with self.subTest(payload=payload):
+                    config_path.write_text(json.dumps(payload), encoding="utf-8")
+                    config_path.chmod(0o644)
+                    with self.assertRaises(ConnectorRuntimeConfigError):
+                        load_connector_runtime_config(
+                            config_path=config_path,
+                            expected_oathtool_path=oathtool,
+                            trusted_parent=root,
+                            required_uid=os.getuid(),
+                        )
+
+    def test_load_runtime_config_rejects_untrusted_or_mutated_oathtool(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            config_path = root / "connector-config.json"
+            _write_runtime_config(config_path, oathtool)
+            oathtool.write_text("#!/bin/sh\necho 654321\n", encoding="utf-8")
+
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=config_path,
+                    expected_oathtool_path=oathtool,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+    def test_load_runtime_config_rejects_symlink_and_writable_runtime_artifact(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            real = _write_fake_executable(root / "runtime" / "real-oathtool")
+            linked = root / "runtime" / "oathtool"
+            linked.symlink_to(real)
+            config_path = root / "connector-config.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps({
+                "schema_version": 1,
+                "oathtool_path": str(linked),
+                "oathtool_sha256": _sha256(real),
+            }), encoding="utf-8")
+            config_path.chmod(0o644)
+
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=config_path,
+                    expected_oathtool_path=linked,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+            linked.unlink()
+            _write_fake_executable(linked)
+            _write_runtime_config(config_path, linked)
+            linked.chmod(0o777)
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=config_path,
+                    expected_oathtool_path=linked,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+
+    def test_load_runtime_config_rejects_symlink_runtime_parent_even_when_target_stays_under_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            real_runtime = root / "real-runtime"
+            oathtool = _write_fake_executable(real_runtime / "oathtool")
+            runtime_link = root / "runtime"
+            runtime_link.symlink_to(real_runtime, target_is_directory=True)
+            linked_oathtool = runtime_link / "oathtool"
+            config_path = root / "connector-config.json"
+            _write_runtime_config(config_path, linked_oathtool, sha256=_sha256(oathtool))
+
+            with self.assertRaises(ConnectorRuntimeConfigError):
+                load_connector_runtime_config(
+                    config_path=config_path,
+                    expected_oathtool_path=linked_oathtool,
+                    trusted_parent=root,
+                    required_uid=os.getuid(),
+                )
+
+    def test_main_fails_closed_before_keychain_when_runtime_config_missing(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch("hyu_vpn.connector.Keychain") as keychain:
+            rc = main(runtime_config_path=Path(td) / "missing.json", runtime_required_uid=os.getuid())
+
+        self.assertEqual(rc, 1)
+        keychain.assert_not_called()
+
+    def test_main_uses_verified_installed_oathtool_instead_of_homebrew_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            config_path = root / "connector-config.json"
+            _write_runtime_config(config_path, oathtool)
+            with mock.patch("hyu_vpn.otp.subprocess.run") as security_run, \
+                 mock.patch("hyu_vpn.connector.PromptSession") as session_cls:
+                def fake_security(argv, **kwargs):
+                    service = argv[argv.index("-s") + 1]
+                    return mock.Mock(returncode=0, stdout={
+                        "gp-vpn-username": "alice\n",
+                        "gp-vpn-password": "pw\n",
+                        "gp-vpn-totp": "seed\n",
+                    }[service], stderr="")
+                security_run.side_effect = fake_security
+                session_cls.return_value.run.return_value = 0
+
+                rc = main(
+                    config=ConnectorConfig(helper_path="/bin/echo"),
+                    runtime_config_path=config_path,
+                    runtime_expected_oathtool_path=oathtool,
+                    runtime_trusted_parent=root,
+                    runtime_required_uid=os.getuid(),
+                )
+
+        self.assertEqual(rc, 0)
+        provider = session_cls.call_args.kwargs["totp_provider"]
+        self.assertEqual(provider.oathtool_path, str(oathtool))
+        self.assertNotEqual(provider.oathtool_path, "/opt/homebrew/bin/oathtool")
+
     def test_main_reads_keychain_services_by_absolute_security_argv(self):
         calls = []
         def fake_run(argv, **kwargs):
@@ -372,10 +678,21 @@ class ConnectorTests(unittest.TestCase):
                 "gp-vpn-totp": "seed\n",
             }[service], stderr="")
 
-        with mock.patch("hyu_vpn.otp.subprocess.run", side_effect=fake_run), \
-             mock.patch("hyu_vpn.connector.PromptSession") as session_cls:
-            session_cls.return_value.run.return_value = 0
-            rc = main(config=ConnectorConfig(helper_path="/bin/echo"))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "HYU VPN"
+            oathtool = _write_fake_executable(root / "runtime" / "oathtool")
+            config_path = root / "connector-config.json"
+            _write_runtime_config(config_path, oathtool)
+            with mock.patch("hyu_vpn.otp.subprocess.run", side_effect=fake_run), \
+                 mock.patch("hyu_vpn.connector.PromptSession") as session_cls:
+                session_cls.return_value.run.return_value = 0
+                rc = main(
+                    config=ConnectorConfig(helper_path="/bin/echo"),
+                    runtime_config_path=config_path,
+                    runtime_expected_oathtool_path=oathtool,
+                    runtime_trusted_parent=root,
+                    runtime_required_uid=os.getuid(),
+                )
 
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [
