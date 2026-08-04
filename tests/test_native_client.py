@@ -233,6 +233,101 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
                 manager.restore_auto_launch(record_path)
 
 
+
+    def test_restore_recovers_interrupted_disabling_journal_using_applied_targets_only(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", False, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({
+                "schema_version": 1,
+                "console_uid": 501,
+                "phase": "disabling",
+                "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"],
+                "mechanisms": [
+                    {"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"},
+                    {"identifier": "com.paloaltonetworks.gp.pangps", "kind": "launchd-gui", "enabled": True, "exact_target": "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"},
+                ],
+            }), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [("com.paloaltonetworks.gp.pangpsd", True)])
+
+    def test_restore_recovers_interrupted_rolling_back_journal_in_reverse_and_advances_phase(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", False, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", False, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            mechanisms = [
+                {"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"},
+                {"identifier": "com.paloaltonetworks.gp.pangps", "kind": "launchd-gui", "enabled": True, "exact_target": "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"},
+            ]
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "rolling-back", "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd", "com.paloaltonetworks.gp.pangps"], "mechanisms": mechanisms}), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [
+            ("com.paloaltonetworks.gp.pangps", True),
+            ("com.paloaltonetworks.gp.pangpsd", True),
+        ])
+
+    def test_restore_removes_preparing_empty_journal_as_safe_noop(self):
+        store = FakeAutoLaunchStore([])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "preparing", "applied_identifiers": [], "mechanisms": []}), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [])
+
+    def test_restore_removes_completed_rolling_back_journal_as_safe_noop(self):
+        store = FakeAutoLaunchStore([])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "rolling-back", "applied_identifiers": [], "mechanisms": []}), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [])
+
+    def test_restore_rejects_impossible_interrupted_journal_combinations(self):
+        store = FakeAutoLaunchStore([])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "preparing", "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"], "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}]}), encoding="utf-8")
+
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+    def test_restore_retains_rollback_required_when_interrupted_journal_recovery_fails(self):
+        class FailingRestoreStore(FakeAutoLaunchStore):
+            def set_enabled(self, identifier, enabled):
+                raise NativeClientConflict("restore failed")
+
+        store = FailingRestoreStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", False, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "disabling", "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"], "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}]}), encoding="utf-8")
+
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+            journal = json.loads(record_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(journal["phase"], "rollback-required")
+        self.assertEqual(journal["applied_identifiers"], ["com.paloaltonetworks.gp.pangpsd"])
+
     def test_restore_rejects_cross_user_record_console_uid(self):
         store = FakeAutoLaunchStore([])
         with tempfile.TemporaryDirectory() as td:

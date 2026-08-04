@@ -127,8 +127,8 @@ class NativeAutoLaunchManager:
     def restore_auto_launch(self, record_path: os.PathLike[str] | str) -> None:
         path = Path(record_path)
         data = self._read_record(path)
-        if data.get("phase") == "rollback-required":
-            self._restore_rollback_required(path, data)
+        if data.get("phase") is not None:
+            self._restore_interrupted_journal(path, data)
             return
         recorded = [AutoLaunchMechanism(**item) for item in data["mechanisms"]]
         current = {m.identifier: m for m in self.store.list_mechanisms()}
@@ -145,21 +145,34 @@ class NativeAutoLaunchManager:
         for identifier, enabled in changes:
             self.store.set_enabled(identifier, enabled)
 
-    def _restore_rollback_required(self, path: Path, data: dict) -> None:
+    def _restore_interrupted_journal(self, path: Path, data: dict) -> None:
         recorded = [AutoLaunchMechanism(**item) for item in data["mechanisms"]]
-        by_id = {m.identifier: m for m in recorded}
         applied = list(data["applied_identifiers"])
+        if data["phase"] in {"preparing", "rolling-back"} and not applied:
+            self._remove_record(path)
+            return
+        by_id = {m.identifier: m for m in recorded}
         current = {m.identifier: m for m in self.store.list_mechanisms()}
-        changes: list[str] = []
+        remaining = list(applied)
         for identifier in applied:
             mechanism = by_id[identifier]
             now = current.get(identifier)
             if now is None or now.kind != mechanism.kind or now.exact_target != mechanism.exact_target:
                 raise NativeClientConflict("recorded native auto-launch target changed")
-            if not now.enabled:
-                changes.append(identifier)
-        for identifier in reversed(changes):
-            self.store.set_enabled(identifier, True)
+        self._write_journal(path, recorded, phase="rolling-back", applied_identifiers=remaining)
+        try:
+            for identifier in reversed(applied):
+                now = current[identifier]
+                if not now.enabled:
+                    self.store.set_enabled(identifier, True)
+                if identifier in remaining:
+                    remaining.remove(identifier)
+                self._write_journal(path, recorded, phase="rolling-back", applied_identifiers=remaining)
+        except Exception as exc:
+            self._write_journal(path, recorded, phase="rollback-required", applied_identifiers=remaining)
+            if isinstance(exc, NativeClientConflict):
+                raise exc
+            raise NativeClientConflict("native auto-launch rollback failed") from None
         self._remove_record(path)
 
     def _write_journal(self, path: Path, mechanisms: list[AutoLaunchMechanism], *, phase: str, applied_identifiers: list[str]) -> None:
@@ -190,7 +203,7 @@ class NativeAutoLaunchManager:
         if phase is None:
             if set(data) != _RECORD_KEYS:
                 raise NativeClientConflict("invalid native suppression record schema")
-        elif phase == "rollback-required":
+        elif phase in {"preparing", "disabling", "rolling-back", "rollback-required"}:
             if set(data) != {"schema_version", "console_uid", "phase", "mechanisms", "applied_identifiers"}:
                 raise NativeClientConflict("invalid native rollback journal schema")
         else:
@@ -216,10 +229,16 @@ class NativeAutoLaunchManager:
             if not _valid_mechanism(mechanism):
                 raise NativeClientConflict("invalid native suppression record mechanism")
             parsed.append(mechanism)
-        if phase == "rollback-required":
+        if phase is not None:
             applied = data.get("applied_identifiers")
             ids = {m.identifier for m in parsed}
             if not isinstance(applied, list) or any(not isinstance(i, str) or i not in ids for i in applied):
+                raise NativeClientConflict("invalid native rollback journal applied targets")
+            if len(applied) != len(set(applied)):
+                raise NativeClientConflict("invalid native rollback journal applied targets")
+            if phase == "preparing" and applied:
+                raise NativeClientConflict("invalid native preparing journal applied targets")
+            if phase in {"disabling", "rollback-required"} and not applied:
                 raise NativeClientConflict("invalid native rollback journal applied targets")
         return data
 
