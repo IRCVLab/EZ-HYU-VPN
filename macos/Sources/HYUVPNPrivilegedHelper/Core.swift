@@ -198,7 +198,11 @@ public struct HelperConfiguration: Equatable {
             bytes.append(contentsOf: buffer.prefix(Int(count)))
             guard bytes.count <= maxBytes else { throw HelperError.insecurePath(path.path) }
         }
-        let data = Data(bytes)
+        return try decode(data: Data(bytes), metadata: metadata, validateRuntime: validateRuntime)
+    }
+
+    public static func decode(data: Data, metadata: FileMetadataProviding, validateRuntime: Bool = true) throws -> HelperConfiguration {
+        guard !data.isEmpty, data.count <= 4096 else { throw HelperError.badConfiguration }
         let allowedKeys: Set<String> = ["openConnectExecutable", "vpncScript", "hipWrapper", "stateDirectory", "ledgerDirectory", "openConnectExecutableSHA256", "vpncScriptSHA256", "hipWrapperSHA256"]
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], Set(object.keys) == allowedKeys else { throw HelperError.badConfiguration }
         struct Raw: Decodable { let openConnectExecutable: String; let vpncScript: String; let hipWrapper: String; let stateDirectory: String; let ledgerDirectory: String; let openConnectExecutableSHA256: String; let vpncScriptSHA256: String; let hipWrapperSHA256: String }

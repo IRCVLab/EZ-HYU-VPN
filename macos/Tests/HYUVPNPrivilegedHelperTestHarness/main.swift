@@ -10,6 +10,11 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
 
 @main struct Harness {
     static func main() {
+        let argv = normalizedHarnessArguments(CommandLine.arguments)
+        if argv.count != 1 {
+            runHelperConfigFixtureMode(arguments: argv)
+            return
+        }
         do {
             if ProcessInfo.processInfo.environment["HYU_HELPER_HARNESS_FORCE_FAILURE"] == "1" {
                 throw HarnessFailure(description: "deliberate failure requested")
@@ -21,6 +26,8 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("config-rejects-homebrew-front-door", testConfigRejectsHomebrewFrontDoor),
                 ("config-accepts-root-runtime-shape", testConfigAcceptsRuntimeShape),
                 ("installed-guard-secure-path-and-wrapperd-manifest", testInstalledGuardSecurePathAndManifest),
+                ("helper-config-fixture-mode-arguments", testHelperConfigFixtureModeArguments),
+                ("helper-config-fixture-mode-decodes-temp-file", testHelperConfigFixtureModeDecodesTempFile),
                 ("record-rejects-invalid-identity-bounds", testRecordValidation),
                 ("argv-env-and-normal-exit-cleanup", testArgvEnvAndCleanup),
                 ("start-refuses-existing-session", testStartRefusesExistingSession),
@@ -58,8 +65,53 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         }
     }
 
-    static func testHeaderReader() throws {
-        let input = CountingByteInput(Array("HYU-Username: alice@hanyang.ac.kr\n\nOTP".utf8))
+
+    static func normalizedHarnessArguments(_ arguments: [String]) -> [String] {
+        guard arguments.count > 1, arguments[1] == "--" else { return arguments }
+        return [arguments[0]] + arguments.dropFirst(2)
+    }
+
+    static func runHelperConfigFixtureMode(arguments: [String]) {
+        guard arguments.count == 3, arguments[1] == "--validate-helper-config-fixture" else {
+            print("FAIL invalid-arguments")
+            exit(64)
+        }
+        do {
+            try validateHelperConfigFixture(path: arguments[2])
+            print("PASS helper-config-fixture")
+        } catch {
+            print("FAIL helper-config-fixture")
+            exit(1)
+        }
+    }
+
+    static func validateHelperConfigFixture(path: String) throws {
+        guard isAllowedHelperConfigFixturePath(path) else { throw HarnessFailure(description: "invalid fixture path") }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        let data = try Data(contentsOf: url)
+        guard !data.isEmpty, data.count <= 4096 else { throw HarnessFailure(description: "invalid fixture size") }
+        let metadata = FakeMetadata.secure(paths: helperConfigArtifactPaths())
+        _ = try HelperConfiguration.decode(data: data, metadata: metadata, validateRuntime: false)
+    }
+
+    static func isAllowedHelperConfigFixturePath(_ path: String) -> Bool {
+        guard !path.contains("\n"), path.utf8.count <= 1024 else { return false }
+        let fixture = URL(fileURLWithPath: path).standardizedFileURL.path
+        let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        return fixture == tmp || fixture.hasPrefix(tmp.hasSuffix("/") ? tmp : tmp + "/")
+    }
+
+    static func helperConfigArtifactPaths() -> [String] {
+        [
+            "/",
+            "/Library", "/Library/Application Support", "/Library/Application Support/HYU VPN", "/Library/Application Support/HYU VPN/runtime", "/Library/Application Support/HYU VPN/runtime/openconnect", "/Library/Application Support/HYU VPN/runtime/openconnect/9.12", "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin", "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect",
+            "/Library/Application Support/HYU VPN/runtime/vpnc", "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper",
+            "/Library/Application Support/HYU VPN/runtime/gp-hip-report",
+            "/private", "/private/var", "/private/var/db", "/private/var/db/hyu-vpn", "/private/var/db/hyu-vpn/ledger"
+        ]
+    }
+
+    static func testHeaderReader() throws {        let input = CountingByteInput(Array("HYU-Username: alice@hanyang.ac.kr\n\nOTP".utf8))
         let request = try BoundedStartHeaderReader.read(from: input)
         try expect(request.username == "alice@hanyang.ac.kr", "username parsed")
         try expect(input.remaining == Array("OTP".utf8), "OTP bytes remain unread")
@@ -89,6 +141,20 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try config.validateStaticShape()
     }
 
+
+    static func testHelperConfigFixtureModeArguments() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("helper-config.json").path
+        try expect(Harness.isAllowedHelperConfigFixturePath(tmp), "temp fixture path allowed")
+        try expect(!Harness.isAllowedHelperConfigFixturePath("/Library/Application Support/HYU VPN/helper-config.json"), "installed path rejected")
+        try expect(!Harness.isAllowedHelperConfigFixturePath(tmp + "\nspoof"), "newline path rejected")
+    }
+
+    static func testHelperConfigFixtureModeDecodesTempFile() throws {
+        let url = try writeHelperConfigFixture(extra: nil)
+        try validateHelperConfigFixture(path: url.path)
+        let bad = try writeHelperConfigFixture(extra: "unexpected")
+        try expectThrows("unknown key rejected") { try validateHelperConfigFixture(path: bad.path) }
+    }
 
     static func testInstalledGuardSecurePathAndManifest() throws {
         var metadata = FakeMetadata.secure(paths: ["/", "/Library", "/Library/Application Support", "/Library/Application Support/HYU VPN", "/Library/Application Support/HYU VPN/runtime", "/Library/Application Support/HYU VPN/runtime/vpnc", InstalledExecutionGuard.wrapperDaemonPath, InstalledExecutionGuard.wrapperDaemonHashManifestPath])
@@ -460,3 +526,22 @@ struct HarnessNetworkFixture {
     func validEnv() -> [String: String] { ["HYU_SESSION_LEDGER": ledger.path, "TUNDEV": "utun7", "INTERNAL_IP4_ADDRESS": "10.10.0.1", "VPNGATEWAY": "198.51.100.9", "CISCO_SPLIT_INC": "1", "CISCO_SPLIT_INC_0_ADDR": "10.0.0.0", "CISCO_SPLIT_INC_0_MASK": "255.0.0.0", "CISCO_SPLIT_EXC": "0", "CISCO_IPV6_SPLIT_INC": "0", "CISCO_IPV6_SPLIT_EXC": "0"] }
 }
 func harnessTempDir() throws -> URL { let url = FileManager.default.temporaryDirectory.appendingPathComponent("hyu-helper-harness-\(UUID().uuidString)"); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url }
+
+
+func writeHelperConfigFixture(extra: String?) throws -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("hyu-helper-config-fixture-\(UUID().uuidString).json")
+    var object: [String: String] = [
+        "openConnectExecutable": "/Library/Application Support/HYU VPN/runtime/openconnect/9.12/bin/openconnect",
+        "vpncScript": "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper",
+        "hipWrapper": "/Library/Application Support/HYU VPN/runtime/gp-hip-report",
+        "stateDirectory": "/private/var/db/hyu-vpn",
+        "ledgerDirectory": "/private/var/db/hyu-vpn/ledger",
+        "openConnectExecutableSHA256": String(repeating: "a", count: 64),
+        "vpncScriptSHA256": String(repeating: "b", count: 64),
+        "hipWrapperSHA256": String(repeating: "c", count: 64)
+    ]
+    if let extra { object[extra] = "bad" }
+    try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: url)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    return url
+}
