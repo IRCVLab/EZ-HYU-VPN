@@ -67,6 +67,34 @@ class LiveAcceptanceScriptTests(unittest.TestCase):
             self.assertIn("usage:", result.stderr.lower())
             self.assertFalse(audit.exists())
 
+    def test_log_privacy_check_allows_prompts_and_explicit_empty_auth_cookies(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "openconnect.log"
+            log.write_text(
+                "Password: \nChallenge: \n"
+                "GlobalProtect login returned portal-userauthcookie=empty\n"
+                "GlobalProtect login returned portal-prelogonuserauthcookie=empty\n",
+                encoding="utf-8",
+            )
+
+            result = self.run_script("--check-log", str(log))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "log_privacy=passed")
+
+    def test_log_privacy_check_rejects_nonempty_secret_assignments_without_echoing_value(self):
+        canary = "SECRET-CANARY-DO-NOT-PRINT"
+        for field in ("authcookie", "cookie", "password", "totp", "host-id", "interface-mac"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as td:
+                log = Path(td) / "openconnect.log"
+                log.write_text(f"{field}={canary}\n", encoding="utf-8")
+
+                result = self.run_script("--check-log", str(log))
+
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout.strip(), "log_privacy=failed")
+                self.assertNotIn(canary, result.stdout + result.stderr)
+
     def test_script_declares_reversible_execute_safety_contract(self):
         text = SCRIPT.read_text(encoding="utf-8")
 

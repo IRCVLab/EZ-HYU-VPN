@@ -20,7 +20,7 @@ NATIVE_STOPPED=0
 CLEANUP_RUNNING=0
 
 usage() {
-    echo "usage: $0 [--dry-run|--execute]" >&2
+    echo "usage: $0 [--dry-run|--execute|--check-log FILE]" >&2
 }
 
 record_mutation() {
@@ -344,9 +344,32 @@ dns_usable() {
 }
 
 log_is_secret_safe() {
+    inspected_log=${1:-"$STATE_DIR/openconnect.log"}
     # Prompt labels such as "Password:" are expected and contain no secret.
-    # Reject only assignment/dump markers that could carry secret values.
-    ! /usr/bin/grep -Eiq '(authcookie|cookie=|password=|totp=|host-id=|interface[- ]mac=)' "$STATE_DIR/openconnect.log"
+    # The server also reports explicit `*-authcookie=empty` status fields.
+    # Reject only non-empty assignments and never print their values.
+    /usr/bin/python3 - "$inspected_log" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+try:
+    text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+except OSError:
+    raise SystemExit(1)
+
+assignment = re.compile(
+    r"(?i)(?:^|[^A-Za-z0-9_-])"
+    r"(?P<key>[A-Za-z0-9_-]*(?:authcookie|cookie)|password|totp|host-id|interface[- ]mac)"
+    r"\s*=\s*(?P<value>[^\s&<]*)"
+)
+empty_values = {"", "empty", "none", "null", "(null)", "<empty>"}
+for match in assignment.finditer(text):
+    value = match.group("value").strip().lower()
+    if value not in empty_values:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
 }
 
 wait_for_live_acceptance() {
@@ -505,6 +528,18 @@ run_execute() {
 case ${1:-} in
     ""|--dry-run) MODE=dry-run ;;
     --execute) MODE=execute ;;
+    --check-log)
+        if [ "$#" -ne 2 ]; then
+            usage
+            exit 2
+        fi
+        if log_is_secret_safe "$2"; then
+            echo "log_privacy=passed"
+            exit 0
+        fi
+        echo "log_privacy=failed"
+        exit 1
+        ;;
     *) usage; exit 2 ;;
 esac
 if [ "$#" -gt 1 ]; then
