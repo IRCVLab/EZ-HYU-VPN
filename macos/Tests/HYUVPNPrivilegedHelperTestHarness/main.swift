@@ -46,6 +46,8 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("status-repair-required-on-mismatch", testStatusRepairRequired),
                 ("repair-invokes-ledger-and-cleans-session", testRepairInvokesLedgerAndCleansSession),
                 ("repair-foreign-mismatch-preserves-evidence", testRepairForeignMismatchPreservesEvidence),
+                ("network-preinit-without-splits-records-baseline", testPreInitWithoutSplitsRecordsBaseline),
+                ("network-connect-expands-preinit-route-intent", testConnectExpandsPreInitRouteIntent),
                 ("network-preinit-ledger-drift-blocks-upstream", testPreInitLedgerDriftBlocksUpstream),
                 ("network-strict-ipv4-split-inputs", testStrictIPv4SplitInputs),
                 ("ledger-schema-route-records-and-resolver-order", testLedgerSchemaRouteRecordsAndResolverOrder),
@@ -355,9 +357,37 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: env, suppliedLedgerPath: fixture.ledger)
         fixture.tools.defaultGateway = "192.0.2.254"
         try expectThrows("drift blocks connect") { try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: env, suppliedLedgerPath: fixture.ledger) }
-        try expect(fixture.upstream.calls == 0, "upstream not called after drift")
+        try expect(fixture.upstream.reasons == ["pre-init"], "connect upstream not called after drift")
         let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
         try expect(saved.status == "repair-required", "ledger marked repair-required")
+    }
+
+    static func testPreInitWithoutSplitsRecordsBaseline() throws {
+        let fixture = try HarnessNetworkFixture()
+        let env = ["HYU_SESSION_LEDGER": fixture.ledger.path, "TUNDEV": "utun7"]
+        try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: env, suppliedLedgerPath: fixture.ledger)
+        try expect(fixture.upstream.reasons == ["pre-init"], "pre-init upstream called once")
+        let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+        try expect(saved.status == "recorded", "pre-init baseline recorded")
+        try expect(saved.routeRecords.isEmpty, "pre-init baseline has no route intent")
+    }
+
+    static func testConnectExpandsPreInitRouteIntent() throws {
+        let fixture = try HarnessNetworkFixture()
+        let preInitEnv = ["HYU_SESSION_LEDGER": fixture.ledger.path, "TUNDEV": "utun7"]
+        try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: preInitEnv, suppliedLedgerPath: fixture.ledger)
+        fixture.upstream.onRun = { reason, _ in
+            guard reason == "connect" else { return }
+            let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+            fixture.upstream.sawRouteIntent = saved.routeRecords.contains { $0.applied.destination == "10.0.0.0" && $0.applied.gateway == "10.10.0.1" && $0.applied.interface == "utun7" }
+            fixture.tools.routes = saved.routeRecords.map { RouteSnapshot(destination: $0.applied.destination, gateway: $0.applied.gateway, interface: $0.applied.interface, netmask: $0.applied.netmask, protocol: $0.applied.protocol) }
+        }
+        try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: fixture.validEnv(), suppliedLedgerPath: fixture.ledger)
+        try expect(fixture.upstream.reasons == ["pre-init", "connect"], "pre-init and connect upstream called")
+        try expect(fixture.upstream.sawRouteIntent, "route intent persisted before connect upstream")
+        let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+        try expect(saved.routeRecords.count == 2, "connect expanded protected and gateway routes")
+        try expect(saved.tunnelInterface == "utun7", "connect recorded tunnel interface")
     }
 
     static func testStrictIPv4SplitInputs() throws {
@@ -370,7 +400,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
             let fixture = try HarnessNetworkFixture()
             var env = fixture.validEnv()
             mutate(&env)
-            try expectThrows("bad split input") { try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: env, suppliedLedgerPath: fixture.ledger) }
+            try expectThrows("bad split input") { try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: env, suppliedLedgerPath: fixture.ledger) }
         }
     }
 
@@ -509,17 +539,24 @@ final class FakeProcessController: ProcessControlling {
 
 final class HarnessNetworkTools: NetworkTooling {
     var defaultGateway = "192.0.2.1"
+    var routes: [RouteSnapshot] = []
     func rebootIdentity() throws -> UInt64 { 4242 }
     func primaryServiceID() throws -> String { "service-wifi" }
     func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: defaultGateway, interface: "en0", netmask: "0.0.0.0", protocol: "ipv4") }
-    func route(destination: String, netmask: String?) throws -> RouteSnapshot? { nil }
+    func route(destination: String, netmask: String?) throws -> RouteSnapshot? { routes.first { $0.destination == destination && (netmask == nil || $0.netmask == netmask) } }
     func resolver(serviceID: String, baselineInterface: String, tunnelInterface: String?) throws -> ResolverSnapshot { ResolverSnapshot(serviceID: serviceID, servers: ["9.9.9.9"], searchDomains: ["home.example"], activeInterface: baselineInterface) }
     func serviceName(for serviceID: String) throws -> String { "Wi-Fi" }
     func deleteRoute(_ delta: RouteDelta) throws {}
     func restoreRoute(_ route: RouteSnapshot) throws {}
     func restoreResolver(serviceID: String, snapshot: ResolverSnapshot) throws {}
 }
-final class HarnessCountingUpstream: VpncUpstreamRunning { var calls = 0; func run(reason: String, environment: [String: String]) throws -> Int32 { calls += 1; return 0 } }
+final class HarnessCountingUpstream: VpncUpstreamRunning {
+    var calls = 0
+    var reasons: [String] = []
+    var sawRouteIntent = false
+    var onRun: ((String, [String: String]) throws -> Void)?
+    func run(reason: String, environment: [String: String]) throws -> Int32 { calls += 1; reasons.append(reason); try onRun?(reason, environment); return 0 }
+}
 struct HarnessNetworkFixture {
     let nonce = "nonceabc123"
     let root: URL

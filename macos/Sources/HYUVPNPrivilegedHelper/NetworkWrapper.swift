@@ -435,10 +435,50 @@ public struct NetworkWrapperRunner {
 
     private func connectLike(reason: String, nonce: String, ledgerPath: URL, environment: [String: String]) throws {
         let store = NetworkLedgerStore(path: ledgerPath, expectedOwnerUID: expectedOwnerUID)
+        if reason == "pre-init" {
+            let baseline: NetworkLedger
+            if FileManager.default.fileExists(atPath: ledgerPath.path) {
+                baseline = try store.load(expectedNonce: nonce)
+                if baseline.status == "repair-required" { throw HelperError.teardownIncomplete("existing repair-required ledger") }
+                guard baseline.routeRecords.isEmpty else { throw HelperError.processMismatch }
+            } else {
+                baseline = try makeBaseline(nonce: nonce, destinations: [])
+                try store.save(baseline)
+            }
+            let before = try snapshot(destinations: [], environment: [:])
+            guard preflightSafe(ledger: baseline, current: before) else { try store.save(baseline.withStatus("repair-required")); throw HelperError.processMismatch }
+            let code: Int32
+            do {
+                code = try upstream.run(reason: reason, environment: Self.sanitizedEnvironment(environment))
+            } catch {
+                try? store.save(baseline.withStatus("repair-required"))
+                throw error
+            }
+            let after: NetworkSnapshotData
+            do {
+                after = try snapshot(destinations: [], environment: [:])
+            } catch {
+                try? store.save(baseline.withStatus("repair-required"))
+                throw error
+            }
+            guard code == 0, baselineRestored(ledger: baseline, current: after) else { try store.save(baseline.withStatus("repair-required")); throw HelperError.processMismatch }
+            return
+        }
         let destinations = try splitDestinations(environment)
-        let baseline: NetworkLedger
-        if FileManager.default.fileExists(atPath: ledgerPath.path) { baseline = try store.load(expectedNonce: nonce); if baseline.status == "repair-required" { throw HelperError.teardownIncomplete("existing repair-required ledger") } } else { baseline = try makeBaseline(nonce: nonce, destinations: destinations); try store.save(baseline) }
-        if reason == "pre-init" { return }
+        var baseline: NetworkLedger
+        if FileManager.default.fileExists(atPath: ledgerPath.path) {
+            baseline = try store.load(expectedNonce: nonce)
+            if baseline.status == "repair-required" { throw HelperError.teardownIncomplete("existing repair-required ledger") }
+            if baseline.routeRecords.isEmpty {
+                let current = try snapshot(destinations: [], environment: [:])
+                guard preflightSafe(ledger: baseline, current: current) else { try store.save(baseline.withStatus("repair-required")); throw HelperError.processMismatch }
+                baseline = try makeBaseline(nonce: nonce, destinations: destinations)
+                try store.save(baseline)
+            }
+        } else {
+            baseline = try makeBaseline(nonce: nonce, destinations: destinations)
+            try store.save(baseline)
+        }
         let preflight = try snapshot(destinations: baseline.routeRecords.map { ($0.applied.destination, $0.applied.netmask ?? "") }, environment: [:])
         guard preflightSafe(ledger: baseline, current: preflight) else { try store.save(baseline.withStatus("repair-required")); throw HelperError.processMismatch }
         let intentLedger = try ledgerWithPersistedIntent(baseline: baseline, destinations: destinations, environment: environment)

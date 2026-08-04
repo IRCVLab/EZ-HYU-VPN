@@ -253,7 +253,7 @@ esac
         try runner.run(reason: "pre-init", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger)
         tools.defaultGateway = "192.0.2.254"
         #expect(throws: (any Error).self) { try runner.run(reason: "connect", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger) }
-        #expect(upstream.calls == 0)
+        #expect(upstream.calls == 1)
         let saved = try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: "nonceabc123")
         #expect(saved.status == "repair-required")
     }
@@ -271,7 +271,7 @@ esac
         ] {
             var env = round10ValidEnv(ledger: ledger)
             mutation(&env)
-            #expect(throws: (any Error).self) { try runner.run(reason: "pre-init", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger) }
+            #expect(throws: (any Error).self) { try runner.run(reason: "connect", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger) }
             try? FileManager.default.removeItem(at: ledger)
         }
     }
