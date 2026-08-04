@@ -63,6 +63,8 @@ Commit: `test: lock HIP invocation contract`
 
 ### Task 2: Generate deterministic HIP v4 XML
 
+> **Reverse-engineering correction:** The original simplified `category/product` model was a false-positive contract. Implementation must use the OpenConnect/PanGPS top-level header and the native Hanyang `categories/entry/list/entry/ProductInfo/Prod` category structure documented in `schema-reverse-report.md`. Tests must compare exact path signatures without legacy alias normalization.
+
 **Files:**
 - Create: `src/hyu_vpn/hip_xml.py`
 - Create: `tests/test_hip_xml.py`

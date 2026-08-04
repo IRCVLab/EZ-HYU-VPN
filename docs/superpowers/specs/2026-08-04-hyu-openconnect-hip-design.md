@@ -46,6 +46,10 @@ The accepted native report contains these categories, in order:
 6. `patch-management`
 7. `data-loss-prevention`
 
+Reverse engineering parsed 38 native reports and found the same category order in every one. The accepted macOS category schema is not a simplified `<category><product>` tree: categories are `<categories><entry name="...">`, products are represented as `<list><entry><ProductInfo><Prod .../>`, FileVault state is under `drives/entry/enc-state`, firewall state is under `is-enabled`, and missing patches are sibling `missing-patches/entry` records. A path-signature comparison proved that the first simplified prototype omitted 63 native paths and added 45 non-native paths despite its tests passing; the sanitized fixture must therefore preserve the real tag/attribute shape without alias normalization.
+
+The native HIP generator log contains `generate-time` plus the category subtree, while PanGPS logs the check header containing `md5-sum`, `user-name`, `domain`, `host-name`, `host-id`, `ip-address`, and `ipv6-address`. OpenConnect submits wrapper stdout verbatim and its official wrapper includes those header fields plus `generate-time` and `hip-report-version`. The replacement wrapper therefore combines the OpenConnect/PanGPS header contract with the native macOS category structure.
+
 Observed truthful values include the current macOS release, XProtect version and definition date, Gatekeeper state, FileVault state, application firewall state, Packet Filter state, physical network interfaces, stable host identifier, and available Apple software updates. The server accepted a report even though the application firewall and Packet Filter were disabled and recommended updates were available. The implementation must report those states truthfully rather than fabricating a compliant posture.
 
 ## Architecture
@@ -86,7 +90,7 @@ All command execution goes through an injectable `CommandRunner` with explicit a
 
 Sources:
 
-- OS: `/usr/bin/sw_vers`
+- OS: `/System/Library/CoreServices/SystemVersion.plist` (or `/usr/bin/sw_vers` as a bounded fallback)
 - hardware interfaces: `/usr/sbin/networksetup` plus `/sbin/ifconfig`
 - XProtect: Apple XProtect bundle Info.plist and metadata modification time
 - Gatekeeper: `/usr/sbin/spctl --status`
@@ -148,6 +152,7 @@ Offline coverage includes:
 - XML well-formedness, escaping, deterministic category order, and golden normalized schema;
 - each posture collector for enabled, disabled, unavailable, malformed, and timeout cases;
 - proof that unknown states never become fabricated compliant states;
+- a native path-signature regression proving that simplified `category/product` aliases cannot pass;
 - stdout containing XML only;
 - logs containing none of the credential, cookie, OTP, host-ID, or MAC canaries;
 - TOTP non-reuse across split pty prompt chunks;
