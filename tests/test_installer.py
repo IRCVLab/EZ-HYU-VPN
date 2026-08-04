@@ -647,8 +647,11 @@ class LauncherAndTemplateTests(InstallerTestCase):
         security.write_text('#!/bin/sh\nlog="$FAKE_INSTALL_LOG"\nprintf \'security\' >> "$log"\nfor arg in "$@"; do printf \' [%s]\' "$arg" >> "$log"; done\nprintf \'\n\' >> "$log"\nif [ "$1" = "find-generic-password" ]; then\n  want_password=0\n  while [ $# -gt 0 ]; do [ "$1" = "-w" ] && want_password=1; shift; done\n  [ "$want_password" = 1 ] && { printf \'secret-from-temp\n\'; exit 0; }\n  exit 1\nfi\nif [ "$1" = "add-generic-password" ]; then\n  service=""\n  while [ $# -gt 0 ]; do [ "$1" = "-s" ] && { shift; service="$1"; }; shift; done\n  [ "$service" = "gp-vpn-totp" ] && exit 44\n  exit 0\nfi\nif [ "$1" = "delete-generic-password" ]; then exit 0; fi\nexit 0\n', encoding="utf-8")
         security.chmod(0o755)
         sudo = tools / "sudo"
-        sudo.write_text('#!/bin/sh\nlog="$FAKE_INSTALL_LOG"\nprintf \'sudo\' >> "$log"\nfor arg in "$@"; do printf \' [%s]\' "$arg" >> "$log"; done\nprintf \'\n\' >> "$log"\ncase " $* " in\n  *" --administrator-phase install "*) exit 0 ;;\n  *" --administrator-phase uninstall "*) exit "${FAKE_UNINSTALL_STATUS:-0}" ;;\nesac\nexit 99\n', encoding="utf-8")
+        sudo.write_text('#!/bin/sh\nlog="$FAKE_INSTALL_LOG"\nprintf \'sudo\' >> "$log"\nfor arg in "$@"; do printf \' [%s]\' "$arg" >> "$log"; done\nprintf \'\n\' >> "$log"\n[ "$1" = "-v" ] && exit 0\ncase " $* " in\n  *" --administrator-phase install "*) exit 0 ;;\n  *" --administrator-phase uninstall "*) exit "${FAKE_UNINSTALL_STATUS:-0}" ;;\nesac\nexit 99\n', encoding="utf-8")
         sudo.chmod(0o755)
+        date = tools / "date"
+        date.write_text('#!/bin/sh\nlog="$FAKE_INSTALL_LOG"\nprintf \'date\' >> "$log"\nfor arg in "$@"; do printf \' [%s]\' "$arg" >> "$log"; done\nprintf \'\n\' >> "$log"\nprintf \'%s\\n\' "${FAKE_DATE_EPOCH:-1785881401}"\n', encoding="utf-8")
+        date.chmod(0o755)
         return tools
 
     def _patched_install_script_for_fake_tools(self, tools: Path) -> Path:
@@ -656,6 +659,18 @@ class LauncherAndTemplateTests(InstallerTestCase):
         text = (REPO / "installer/install.sh").read_text(encoding="utf-8")
         text = text.replace("/usr/bin/security", str(tools / "security"))
         text = text.replace("/usr/bin/sudo", str(tools / "sudo"))
+        text = text.replace("/bin/date", str(tools / "date"))
+        script.write_text(text, encoding="utf-8")
+        script.chmod(0o755)
+        self.manifest_path = PayloadManifest.write_for_tree(self.payload, self.payload / "manifest.json")
+        return script
+
+    def _patched_uninstall_script_for_fake_tools(self, tools: Path) -> Path:
+        script = self.payload / "installer/uninstall.fake-tools.sh"
+        text = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
+        text = text.replace("/usr/bin/security", str(tools / "security"))
+        text = text.replace("/usr/bin/sudo", str(tools / "sudo"))
+        text = text.replace("/bin/date", str(tools / "date"))
         script.write_text(text, encoding="utf-8")
         script.chmod(0o755)
         self.manifest_path = PayloadManifest.write_for_tree(self.payload, self.payload / "manifest.json")
@@ -668,7 +683,7 @@ class LauncherAndTemplateTests(InstallerTestCase):
         proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="tester\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "FAKE_UNINSTALL_STATUS": "0", "HOME": str(self.root / "home")})
         self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
         logged = log.read_text(encoding="utf-8")
-        self.assertIn("sudo [/bin/zsh]", logged)
+        self.assertIn("sudo [-n] [/bin/zsh]", logged)
         self.assertIn("--administrator-phase] [install]", logged)
         self.assertIn("--administrator-phase] [uninstall]", logged)
         self.assertNotIn("rollback incomplete", proc.stderr.lower())
@@ -683,6 +698,34 @@ class LauncherAndTemplateTests(InstallerTestCase):
         logged = log.read_text(encoding="utf-8")
         self.assertIn("--administrator-phase] [uninstall]", logged)
 
+    def test_live_nonce_is_generated_after_admin_auth_and_used_noninteractively(self):
+        tools = self._write_fake_install_tools(self.root)
+        script = self._patched_install_script_for_fake_tools(tools)
+        log = self.root / "fake-install-nonce.log"
+        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="tester\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
+        self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
+        logged = log.read_text(encoding="utf-8")
+        auth = logged.index("sudo [-v]")
+        nonce = logged.index("date [+%s]", auth)
+        root_admin = logged.index("sudo [-n] [/bin/zsh]", nonce)
+        self.assertLess(auth, nonce)
+        self.assertLess(nonce, root_admin)
+        self.assertIn("[--live-install] [hyu-install-mutation-1785881401]", logged[root_admin:])
+
+    def test_uninstall_live_nonce_is_generated_after_admin_auth_and_used_noninteractively(self):
+        tools = self._write_fake_install_tools(self.root)
+        script = self._patched_uninstall_script_for_fake_tools(tools)
+        log = self.root / "fake-uninstall-nonce.log"
+        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        logged = log.read_text(encoding="utf-8")
+        auth = logged.index("sudo [-v]")
+        nonce = logged.index("date [+%s]", auth)
+        root_admin = logged.index("sudo [-n] [/bin/zsh]", nonce)
+        self.assertLess(auth, nonce)
+        self.assertLess(nonce, root_admin)
+        self.assertIn("[--live-install] [hyu-install-mutation-1785881401]", logged[root_admin:])
+
     def test_install_uninstall_default_to_audit_and_single_sudo_after_credentials(self):
         install = (REPO / "installer/install.sh").read_text(encoding="utf-8")
         uninstall = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
@@ -690,6 +733,12 @@ class LauncherAndTemplateTests(InstallerTestCase):
         self.assertIn("--live-install", install)
         self.assertIn("hyu-install-mutation-$(/bin/date +%s)", install)
         self.assertNotIn("HYU_VPN_INSTALL_NONCE", install)
+        nonce_assignment = 'LIVE_NONCE="hyu-install-mutation-$(/bin/date +%s)"'
+        self.assertEqual(install.count(nonce_assignment), 1)
+        self.assertIn("/usr/bin/sudo -v", install)
+        self.assertIn("/usr/bin/sudo -n /bin/zsh", install)
+        self.assertGreater(install.index(nonce_assignment), install.index("/usr/bin/sudo -v"))
+        self.assertLess(install.index(nonce_assignment), install.index('/usr/bin/sudo -n /bin/zsh'))
         self.assertIn("-w \"$HYU_VPN_USERNAME\"", install)
         self.assertIn("hyu-vpn-install-password-", install)
         self.assertIn("HYU VPN password (not the Mac administrator password)", install)
@@ -718,7 +767,8 @@ class LauncherAndTemplateTests(InstallerTestCase):
         self.assertLess(install.index("--verify-manifest"), install.index("/usr/bin/sudo"))
         self.assertGreater(install.index("record_keychain_created gp-vpn-username"), install.index("--administrator-phase install"))
         self.assertIn("--package-audit", uninstall)
-        self.assertEqual(uninstall.count("/usr/bin/sudo"), 1)
+        self.assertEqual(uninstall.count("/usr/bin/sudo -v"), 1)
+        self.assertEqual(uninstall.count("/usr/bin/sudo -n /bin/zsh"), 1)
 
     def test_launchd_templates_are_valid_safe_defaults(self):
         for rel in ["launchd/com.hyu.vpn.service.plist.in", "launchd/com.hyu.vpn.menubar.plist.in"]:

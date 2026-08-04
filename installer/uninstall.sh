@@ -20,11 +20,15 @@ if [[ "$MODE" == "--package-audit" ]]; then
   print "Package uninstall audit complete. No files were removed."
   exit 0
 fi
-LIVE_NONCE="hyu-install-mutation-$(/bin/date +%s)"
+run_root_admin_live() {
+  /usr/bin/sudo -v || return $?
+  local LIVE_NONCE="hyu-install-mutation-$(/bin/date +%s)"
+  /usr/bin/sudo -n /bin/zsh "$SCRIPT_DIR/root-admin.sh" "$@" --live-install "$LIVE_NONCE"
+}
 printf "Remove HYU VPN Keychain credentials? Type REMOVE to delete, anything else to retain: "
 IFS= read -r KEYCHAIN_CHOICE
 set +e
-/usr/bin/sudo /bin/zsh "$SCRIPT_DIR/root-admin.sh" --payload "$PAYLOAD_DIR" --manifest "$PAYLOAD_DIR/manifest.json" --administrator-phase uninstall --live-install "$LIVE_NONCE"
+run_root_admin_live --payload "$PAYLOAD_DIR" --manifest "$PAYLOAD_DIR/manifest.json" --administrator-phase uninstall
 STATUS=$?
 set -e
 if [[ $STATUS -eq 0 && "$KEYCHAIN_CHOICE" == "REMOVE" ]]; then

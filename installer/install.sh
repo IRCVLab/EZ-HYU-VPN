@@ -21,7 +21,6 @@ if [[ "$MODE" == "--package-audit" ]]; then
   print "Package audit complete. No files were installed. Re-run with --live-install for a real install."
   exit 0
 fi
-LIVE_NONCE="hyu-install-mutation-$(/bin/date +%s)"
 STAGE_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/hyu-vpn-stage.XXXXXX")"
 KEYCHAIN_CREATED_FILE="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/hyu-vpn-keychain.XXXXXX")"
 KEYCHAIN_TMP_SUFFIX="$(/usr/bin/uuidgen | /usr/bin/tr 'A-Z' 'a-z')"
@@ -36,6 +35,11 @@ rollback_keychain() {
   while IFS= read -r item; do
     [[ -n "$item" ]] && /usr/bin/security delete-generic-password -s "$item" -a hyu-vpn >/dev/null 2>&1 || true
   done < "$KEYCHAIN_CREATED_FILE"
+}
+run_root_admin_live() {
+  /usr/bin/sudo -v || return $?
+  local LIVE_NONCE="hyu-install-mutation-$(/bin/date +%s)"
+  /usr/bin/sudo -n /bin/zsh "$SCRIPT_DIR/root-admin.sh" "$@" --live-install "$LIVE_NONCE"
 }
 trap cleanup EXIT
 trap 'rollback_keychain; cleanup; exit 130' INT TERM
@@ -65,7 +69,7 @@ fi
 # Exactly one administrator-authentication phase begins after manifest verification, staging, and credentials.
 print "Mac administrator authorization: the next Password prompt is your Mac login password."
 set +e
-/usr/bin/sudo /bin/zsh "$SCRIPT_DIR/root-admin.sh" --payload "$PAYLOAD_DIR" --manifest "$PAYLOAD_DIR/manifest.json" --stage "$STAGE_DIR" --administrator-phase install --stage-manifest-sha256 "$STAGE_MANIFEST_SHA256" --package-manifest-sha256 "$PACKAGE_MANIFEST_SHA256" --live-install "$LIVE_NONCE"
+run_root_admin_live --payload "$PAYLOAD_DIR" --manifest "$PAYLOAD_DIR/manifest.json" --stage "$STAGE_DIR" --administrator-phase install --stage-manifest-sha256 "$STAGE_MANIFEST_SHA256" --package-manifest-sha256 "$PACKAGE_MANIFEST_SHA256"
 STATUS=$?
 set -e
 if [[ $STATUS -ne 0 ]]; then cleanup; exit $STATUS; fi
@@ -82,7 +86,7 @@ fi
 if [[ $promote_failed -ne 0 ]]; then
   rollback_keychain
   set +e
-  /usr/bin/sudo /bin/zsh "$SCRIPT_DIR/root-admin.sh" --payload "$PAYLOAD_DIR" --manifest "$PAYLOAD_DIR/manifest.json" --administrator-phase uninstall --live-install "hyu-install-mutation-$(/bin/date +%s)"
+  run_root_admin_live --payload "$PAYLOAD_DIR" --manifest "$PAYLOAD_DIR/manifest.json" --administrator-phase uninstall
   CLEANUP_STATUS=$?
   set -e
   if [[ $CLEANUP_STATUS -ne 0 ]]; then
