@@ -12,6 +12,8 @@ import sys
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
+import release_packaging as packaging_module
+
 from release_packaging import (
     PackagingError,
     ReleaseBuilder,
@@ -325,6 +327,8 @@ class NoticeTests(PackagingTestCase):
         self.assertIn("RunAtLoad=true", text)
         self.assertIn("auto-reconnect=false", text)
         self.assertIn("starts idle", text)
+        self.assertIn("FINAL-RUNTIME-BINDING.json", text)
+        self.assertIn("canonical pre-rewrite/pre-sign", text)
 
     def test_repository_notices_are_distribution_ready_not_placeholders(self):
         validate_third_party_notices(REPO / "packaging" / "THIRD_PARTY_NOTICES.txt", ["OpenConnect", "oath-toolkit", "vpnc-script"])
@@ -341,6 +345,37 @@ class NoticeTests(PackagingTestCase):
 
 
 class ReleaseBuilderTests(PackagingTestCase):
+    def test_final_runtime_binding_bridges_canonical_bundle_to_mutated_shipped_runtime(self):
+        src = self.make_payload_source()
+        runtime_files = {
+            rel: src / rel for rel in [
+                "runtime/openconnect/bin/openconnect",
+                "runtime/oathtool",
+                "runtime/openconnect/lib/libopenconnect.5.dylib",
+                "runtime/vpnc/vpnc-script",
+            ]
+        }
+        bundle = self.make_source_bundle(runtime_files=runtime_files)
+        packaged_bundle = src / "SOURCE-COMPLIANCE-BUNDLE.tar.gz"
+        packaged_bundle.write_bytes(bundle.read_bytes())
+        packaging_module.validate_source_bundle_matches_payload(packaged_bundle, src)
+
+        openconnect = src / "runtime/openconnect/bin/openconnect"
+        openconnect.write_bytes(openconnect.read_bytes() + b"-rewritten-and-signed")
+        with self.assertRaisesRegex(PackagingError, "runtime closure mismatch"):
+            packaging_module.validate_source_bundle_matches_payload(packaged_bundle, src)
+
+        binding = packaging_module.write_final_runtime_binding(packaged_bundle, src)
+        packaging_module.validate_final_runtime_binding(binding, packaged_bundle, src)
+        data = json.loads(binding.read_text(encoding="utf-8"))
+        self.assertEqual(data["source_compliance_bundle"]["semantics"], "canonical-pre-rewrite-pre-sign")
+        final_entry = next(item for item in data["files"] if item["path"] == "runtime/openconnect/bin/openconnect")
+        self.assertNotEqual(final_entry["canonical_sha256"], final_entry["final_sha256"])
+
+        openconnect.write_bytes(openconnect.read_bytes() + b"-post-binding-tamper")
+        with self.assertRaisesRegex(PackagingError, "final runtime binding mismatch"):
+            packaging_module.validate_final_runtime_binding(binding, packaged_bundle, src)
+
     def test_build_creates_a_missing_explicit_output_root(self):
         src = self.make_payload_source()
         missing_output = self.root / "new-output-root"
@@ -653,12 +688,22 @@ class ReleaseCliTests(PackagingTestCase):
 
     def test_metadata_has_no_release_blockers_when_source_bundle_present(self):
         src = self.make_payload_source()
-        bundle = self.make_source_bundle()
+        runtime_files = {
+            rel: src / rel for rel in [
+                "runtime/openconnect/bin/openconnect",
+                "runtime/oathtool",
+                "runtime/openconnect/lib/libopenconnect.5.dylib",
+                "runtime/vpnc/vpnc-script",
+            ]
+        }
+        bundle = self.make_source_bundle(runtime_files=runtime_files)
         (src / "SOURCE-COMPLIANCE-BUNDLE.tar.gz").write_bytes(bundle.read_bytes())
         result = ReleaseBuilder(ReleaseToolchain(fake=True)).build(
             source_payload=src, build_root=self.build_root, output_root=self.output_root, version="0.1.0-test", arch="arm64"
         )
         self.assertEqual(result.metadata["release_blockers"], [])
+        self.assertEqual(result.metadata["final_runtime_binding"], "FINAL-RUNTIME-BINDING.json")
+        self.assertIn("FINAL-RUNTIME-BINDING.json", result.manifest["files"])
         self.assertNotIn("task7_followups", result.metadata)
 
     def test_cli_without_fake_tools_fails_closed_before_claiming_dmg(self):
@@ -715,7 +760,11 @@ class ReleaseCliTests(PackagingTestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(path.name, encoding="utf-8")
             path.chmod(0o755)
-        bundle = self.make_source_bundle()
+        bundle = self.make_source_bundle(runtime_files={
+            "runtime/openconnect/bin/openconnect": oc,
+            "runtime/oathtool": oath,
+            "runtime/vpnc/vpnc-script": vpnc,
+        })
         proc = subprocess.run([
             str(PACKAGE_RELEASE),
             "--fake-tools",

@@ -48,6 +48,7 @@ REQUIRED_SOURCE_MODULES = {
     "src/hyu_vpn/supervisor.py",
 }
 SOURCE_COMPLIANCE_BUNDLE = "SOURCE-COMPLIANCE-BUNDLE.tar.gz"
+FINAL_RUNTIME_BINDING = "FINAL-RUNTIME-BINDING.json"
 
 REQUIRED_PAYLOAD_FILES = {
     "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
@@ -398,17 +399,70 @@ def _source_payload_runtime_files(payload: Path) -> Dict[str, Dict[str, Any]]:
     return result
 
 
-def validate_source_bundle_matches_payload(bundle: Path, payload: Path) -> None:
+def _source_bundle_runtime_files(bundle: Path) -> Dict[str, Dict[str, Any]]:
     validate_source_compliance_bundle(bundle)
     with tarfile.open(bundle, "r:gz") as tf:
         regular = {m.name.rstrip("/"): tf.extractfile(m).read() for m in tf.getmembers() if m.isfile()}
     inventory = _json_no_duplicate_keys(regular["inventory.json"], "inventory.json")
     runtime_entry = next(entry for entry in inventory["runtime"] if isinstance(entry, dict) and "runtime_closure" in entry)
     closure = _json_no_duplicate_keys(regular[runtime_entry["runtime_closure"]], "runtime-closure.json")
-    closure_files = {item["path"]: {"sha256": item["sha256"], "size": item["size"]} for item in closure["files"]}
+    return {item["path"]: {"sha256": item["sha256"], "size": item["size"]} for item in closure["files"]}
+
+
+def validate_source_bundle_matches_payload(bundle: Path, payload: Path) -> None:
+    closure_files = _source_bundle_runtime_files(bundle)
     actual = _source_payload_runtime_files(payload)
     if closure_files != actual:
         raise PackagingError(f"runtime closure mismatch: extras={sorted(set(closure_files)-set(actual))} missing={sorted(set(actual)-set(closure_files))}")
+
+
+def _final_runtime_binding_data(bundle: Path, payload: Path) -> Dict[str, Any]:
+    canonical = _source_bundle_runtime_files(bundle)
+    final = _source_payload_runtime_files(payload)
+    if set(canonical) != set(final):
+        raise PackagingError(
+            "final runtime binding path mismatch: "
+            f"extras={sorted(set(canonical)-set(final))} missing={sorted(set(final)-set(canonical))}"
+        )
+    files = []
+    for rel in sorted(canonical):
+        files.append({
+            "path": rel,
+            "canonical_sha256": canonical[rel]["sha256"],
+            "canonical_size": canonical[rel]["size"],
+            "final_sha256": final[rel]["sha256"],
+            "final_size": final[rel]["size"],
+        })
+    return {
+        "schema": 1,
+        "source_compliance_bundle": {
+            "path": SOURCE_COMPLIANCE_BUNDLE,
+            "sha256": _sha256(bundle),
+            "semantics": "canonical-pre-rewrite-pre-sign",
+        },
+        "files": files,
+    }
+
+
+def write_final_runtime_binding(bundle: Path, payload: Path) -> Path:
+    binding = Path(payload) / FINAL_RUNTIME_BINDING
+    if binding.exists() or binding.is_symlink():
+        raise PackagingError(f"refusing to overwrite final runtime binding: {binding}")
+    data = _final_runtime_binding_data(bundle, payload)
+    binding.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    binding.chmod(0o644)
+    validate_final_runtime_binding(binding, bundle, payload)
+    return binding
+
+
+def validate_final_runtime_binding(binding: Path, bundle: Path, payload: Path) -> None:
+    binding = _require_regular_file(Path(binding))
+    if binding.name != FINAL_RUNTIME_BINDING or binding.stat().st_size > 2 * 1024 * 1024:
+        raise PackagingError("final runtime binding file mismatch")
+    actual = _json_no_duplicate_keys(binding.read_bytes(), FINAL_RUNTIME_BINDING)
+    expected = _final_runtime_binding_data(bundle, payload)
+    if actual != expected:
+        raise PackagingError("final runtime binding mismatch")
 
 
 def _validate_helper_config(path: Path) -> None:
@@ -847,11 +901,13 @@ class ReleaseBuilder:
         stage_dir.mkdir(parents=True)
         _copy_payload(Path(source_payload), stage_dir)
         has_source_bundle = (stage_dir / SOURCE_COMPLIANCE_BUNDLE).is_file()
-        if has_source_bundle:
-            validate_source_compliance_bundle(stage_dir / SOURCE_COMPLIANCE_BUNDLE)
         if not self.toolchain.fake and not has_source_bundle:
             raise PackagingError("real release requires manifested SOURCE-COMPLIANCE-BUNDLE.tar.gz")
-        if not self.toolchain.fake:
+        if has_source_bundle:
+            validate_source_compliance_bundle(stage_dir / SOURCE_COMPLIANCE_BUNDLE)
+            # The source bundle records the canonical runtime before install-name
+            # rewriting and ad-hoc signing.  A separate binding written below
+            # ties those canonical files to the final shipped runtime.
             validate_source_bundle_matches_payload(stage_dir / SOURCE_COMPLIANCE_BUNDLE, stage_dir)
 
         metadata = {
@@ -868,6 +924,8 @@ class ReleaseBuilder:
             "prerequisites": {"python3": PYTHON_PREREQUISITE},
             "task7_pre_sudo_requirements": ["verify /usr/bin/python3 exists and is executable", "never use PATH or Homebrew python fallback"],
             "release_blockers": [] if has_source_bundle else ["bundle exact GPL/LGPL source archives or retained written-offer packet before real lab distribution"],
+            "source_compliance_bundle_semantics": "canonical-pre-rewrite-pre-sign" if has_source_bundle else None,
+            "final_runtime_binding": FINAL_RUNTIME_BINDING if has_source_bundle else None,
             "bit_reproducible_dmg": False,
             "deterministic_manifest": True,
         }
@@ -885,6 +943,8 @@ class ReleaseBuilder:
         self.toolchain.sign(stage_dir, APP_BUNDLE_REL)
         self.toolchain.verify_signature(stage_dir, APP_BUNDLE_REL)
         self.toolchain.verify_signature(stage_dir, APP_BUNDLE_REL + ":deep-strict")
+        if has_source_bundle:
+            write_final_runtime_binding(stage_dir / SOURCE_COMPLIANCE_BUNDLE, stage_dir)
 
         manifest = build_manifest(stage_dir)
         manifest_path = stage_dir / MANIFEST_NAME
@@ -937,3 +997,6 @@ class ReleaseBuilder:
         metadata = json.loads((mountpoint / "release-metadata.json").read_text(encoding="utf-8"))
         if metadata.get("architecture") != "arm64" or metadata.get("notarized") is not False:
             raise PackagingError("mounted metadata does not match internal arm64 lab release")
+        source_bundle = mountpoint / SOURCE_COMPLIANCE_BUNDLE
+        if source_bundle.exists():
+            validate_final_runtime_binding(mountpoint / FINAL_RUNTIME_BINDING, source_bundle, mountpoint)
