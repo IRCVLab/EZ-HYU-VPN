@@ -40,6 +40,8 @@ During a real foreground attempt, confirm OpenConnect reports successful HIP sub
 
 ## Service disabled by default
 
+Keep the service disabled by default; install or enable it only after live acceptance and offline checks have passed.
+
 The tracked legacy plist at `launchd/local.hyu-openconnect.plist` is a quarantine-only inert template: it is disabled, does not run the VPN service, and must not be copied into `~/Library/LaunchAgents` as an install target. A reviewed release/install path must generate or install an explicit service plist only after offline checks and live acceptance have passed.
 
 Live acceptance is mutation-gated. Dry-run/read-only checks remain the default; a real mutation run requires all of these in the same invocation before any live reads or mutations happen:

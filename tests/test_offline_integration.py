@@ -18,6 +18,7 @@ from hyu_vpn.hip_cli import main as hip_main
 from hyu_vpn.hip_contract import CookieIdentity, HipInvocation
 from hyu_vpn.hip_xml import HostInfo, MacPosture, NetworkInterface, Product, build_hip_xml
 from hyu_vpn.macos_posture import CommandResult, MacPostureCollector
+from hyu_vpn.control import AutoReconnectPreference
 from hyu_vpn.supervisor import Supervisor, SupervisorConfig
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -277,7 +278,9 @@ class OfflineAdversarialTests(unittest.TestCase):
             crash = Path(td) / "crash.py"
             _write_executable(crash, """#!/usr/bin/env python3\nraise SystemExit(9)\n""")
             sleeps = []
-            config = SupervisorConfig(connect_path=str(crash), lock_path=str(Path(td) / "lock"), max_iterations=3)
+            preference_path = Path(td) / "auto-reconnect.json"
+            AutoReconnectPreference(preference_path).write(True)
+            config = SupervisorConfig(connect_path=str(crash), lock_path=str(Path(td) / "lock"), status_path=str(Path(td) / "status.json"), preference_path=str(preference_path), control_socket_path=str(Path(td) / "control.sock"), max_iterations=3)
             rc = Supervisor(config, conflict_detector=type("Detector", (), {"conflict_active": lambda self: False})(), sleep=sleeps.append).run()
             self.assertEqual(rc, 9)
             self.assertEqual(sleeps, [10, 20])
@@ -292,8 +295,9 @@ class OfflineAdversarialTests(unittest.TestCase):
                 from hyu_vpn.supervisor import Supervisor, SupervisorConfig
                 class Detector:
                     def conflict_active(self): return False
-                raise SystemExit(Supervisor(SupervisorConfig(connect_path=sys.argv[2], lock_path=sys.argv[3], max_iterations=1), conflict_detector=Detector()).run())
+                raise SystemExit(Supervisor(SupervisorConfig(connect_path=sys.argv[2], lock_path=sys.argv[3], status_path=sys.argv[3] + ".status", preference_path=sys.argv[3] + ".auto", control_socket_path=sys.argv[3] + ".sock", max_iterations=1), conflict_detector=Detector()).run())
             ''')
+            AutoReconnectPreference(str(lock) + ".auto").write(True)
             first = subprocess.Popen([sys.executable, str(runner), str(ROOT / "src"), str(sleeper), str(lock)])
             try:
                 _wait_for(lambda: lock.exists())
