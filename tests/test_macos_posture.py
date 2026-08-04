@@ -3,13 +3,14 @@ import plistlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from hyu_vpn.hip_xml import Drive, Patch, Product
-from hyu_vpn.macos_posture import CommandResult, MacPostureCollector
+from hyu_vpn.macos_posture import CommandResult, CommandRunner, MacPostureCollector
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "commands"
@@ -41,6 +42,25 @@ def write_plist(path, values):
         plistlib.dump(values, fh)
 
 
+
+class CommandRunnerTests(unittest.TestCase):
+    def test_run_forces_deterministic_c_locale_for_child_process(self):
+        completed = subprocess_completed(stdout="ok\n")
+        with mock.patch.dict(os.environ, {"LC_ALL": "ko_KR.UTF-8", "LANG": "ko_KR.UTF-8"}, clear=False):
+            with mock.patch("hyu_vpn.macos_posture.subprocess.run", return_value=completed) as run:
+                result_value = CommandRunner().run(("/usr/bin/true",), timeout=3.0)
+
+        self.assertEqual(result_value.stdout, "ok\n")
+        kwargs = run.call_args.kwargs
+        self.assertEqual(kwargs["env"]["LC_ALL"], "C")
+        self.assertEqual(kwargs["env"]["LANG"], "C")
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/true"])
+
+
+def subprocess_completed(stdout="", stderr="", returncode=0):
+    return mock.Mock(stdout=stdout, stderr=stderr, returncode=returncode)
+
+
 class MacPostureCollectorTests(unittest.TestCase):
     def test_collects_os_and_xprotect(self):
         with tempfile.TemporaryDirectory() as td:
@@ -60,6 +80,22 @@ class MacPostureCollectorTests(unittest.TestCase):
         self.assertEqual(posture.host_info.os, "macOS")
         self.assertEqual(posture.host_info.os_version, "14.5 (23F79)")
         self.assertEqual(posture.anti_malware, (Product(name="XProtect", version="2176", definition_date="2026-08-01", real_time_protection="unknown"),))
+
+    def test_xprotect_definition_date_falls_back_to_plist_mtime(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            xprotect_plist = root / "XProtectInfo.plist"
+            write_plist(xprotect_plist, {"CFBundleShortVersionString": "2177"})
+            mtime = datetime(2026, 7, 29, 12, 34, 56, tzinfo=timezone.utc).timestamp()
+            os.utime(xprotect_plist, (mtime, mtime))
+
+            posture = MacPostureCollector(
+                runner=FakeRunner([]),
+                xprotect_plist=xprotect_plist,
+                software_update_cache=root / "updates.json",
+            ).collect()
+
+        self.assertEqual(posture.anti_malware, (Product(name="XProtect", version="2177", definition_date="2026-07-29", real_time_protection="unknown"),))
 
 
     def test_collects_security_states_from_enabled_outputs(self):
@@ -161,8 +197,10 @@ class MacPostureCollectorTests(unittest.TestCase):
 
             posture = MacPostureCollector(runner=runner, software_update_cache=cache, software_update_timeout=12.5).collect()
 
-        self.assertEqual(posture.patches, ())
-        self.assertIn((argv, 12.5), runner.calls)
+            self.assertEqual(posture.patches, ())
+            self.assertIn((argv, 12.5), runner.calls)
+            self.assertTrue(cache.exists())
+            self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
 
     def test_software_update_multiple_updates_and_restart_required_are_missing_patches(self):
         with tempfile.TemporaryDirectory() as td:
@@ -183,7 +221,8 @@ class MacPostureCollectorTests(unittest.TestCase):
 
             posture = MacPostureCollector(runner=runner, software_update_cache=cache).collect()
 
-        self.assertEqual(posture.patches, ())
+            self.assertEqual(posture.patches, ())
+            self.assertFalse(cache.exists())
 
     def test_software_update_timeout_uses_fresh_six_hour_cache_when_available(self):
         with tempfile.TemporaryDirectory() as td:

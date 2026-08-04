@@ -27,12 +27,16 @@ class CommandResult:
 class CommandRunner:
     def run(self, argv: Sequence[str], timeout: float) -> CommandResult:
         try:
+            env = os.environ.copy()
+            env["LC_ALL"] = "C"
+            env["LANG"] = "C"
             completed = subprocess.run(
                 list(argv),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 check=False,
+                env=env,
             )
             return CommandResult(tuple(argv), completed.returncode, completed.stdout, completed.stderr)
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
@@ -92,6 +96,8 @@ class MacPostureCollector:
         data = _read_plist(self.xprotect_plist)
         version = _string_value(data.get("CFBundleShortVersionString") or data.get("CFBundleVersion"))
         definition_date = _date_value(data.get("LastModification") or data.get("BuildDate"))
+        if definition_date is None:
+            definition_date = _file_mtime_date(self.xprotect_plist)
         return Product(name="XProtect", version=version, definition_date=definition_date, real_time_protection="unknown")
 
     def _collect_software_updates(self) -> Tuple[Patch, ...]:
@@ -102,6 +108,8 @@ class MacPostureCollector:
         if status.returncode != 0:
             return ()
         patches = _parse_softwareupdate_list(status.stdout)
+        if patches is None:
+            return ()
         self._write_update_cache(patches)
         return patches
 
@@ -219,6 +227,13 @@ def _date_value(value: object) -> Optional[str]:
     return None
 
 
+def _file_mtime_date(path: Path) -> Optional[str]:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).date().isoformat()
+    except OSError:
+        return None
+
+
 def _parse_enabled_disabled(stdout: str, enabled_phrase: str, disabled_phrase: str) -> str:
     text = stdout.lower()
     if enabled_phrase in text:
@@ -294,7 +309,11 @@ def _parse_ifconfig_interfaces(stdout: str) -> Optional[tuple[str, str]]:
 _LABEL_RE = re.compile(r"^\s*\*\s+Label:\s*(.+?)\s*$")
 
 
-def _parse_softwareupdate_list(stdout: str) -> Tuple[Patch, ...]:
+def _parse_softwareupdate_list(stdout: str) -> Optional[Tuple[Patch, ...]]:
+    lowered = stdout.lower()
+    if "no new software available" in lowered:
+        return ()
+
     patches: list[Patch] = []
     current_label: Optional[str] = None
     current_restart = False
@@ -315,4 +334,6 @@ def _parse_softwareupdate_list(stdout: str) -> Tuple[Patch, ...]:
         if current_label and "restart" in line.lower():
             current_restart = True
     flush()
-    return tuple(patches)
+    if patches:
+        return tuple(patches)
+    return None
