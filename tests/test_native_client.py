@@ -245,6 +245,7 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
                 "schema_version": 1,
                 "console_uid": 501,
                 "phase": "disabling",
+                "pending_identifier": None,
                 "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"],
                 "mechanisms": [
                     {"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"},
@@ -268,7 +269,7 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
                 {"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"},
                 {"identifier": "com.paloaltonetworks.gp.pangps", "kind": "launchd-gui", "enabled": True, "exact_target": "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"},
             ]
-            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "rolling-back", "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd", "com.paloaltonetworks.gp.pangps"], "mechanisms": mechanisms}), encoding="utf-8")
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "rolling-back", "pending_identifier": None, "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd", "com.paloaltonetworks.gp.pangps"], "mechanisms": mechanisms}), encoding="utf-8")
 
             NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
 
@@ -282,7 +283,7 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
         store = FakeAutoLaunchStore([])
         with tempfile.TemporaryDirectory() as td:
             record_path = Path(td) / "record.json"
-            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "preparing", "applied_identifiers": [], "mechanisms": []}), encoding="utf-8")
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "preparing", "pending_identifier": None, "applied_identifiers": [], "mechanisms": []}), encoding="utf-8")
 
             NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
 
@@ -293,7 +294,7 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
         store = FakeAutoLaunchStore([])
         with tempfile.TemporaryDirectory() as td:
             record_path = Path(td) / "record.json"
-            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "rolling-back", "applied_identifiers": [], "mechanisms": []}), encoding="utf-8")
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "rolling-back", "pending_identifier": None, "applied_identifiers": [], "mechanisms": []}), encoding="utf-8")
 
             NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
 
@@ -304,10 +305,31 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
         store = FakeAutoLaunchStore([])
         with tempfile.TemporaryDirectory() as td:
             record_path = Path(td) / "record.json"
-            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "preparing", "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"], "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}]}), encoding="utf-8")
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "preparing", "pending_identifier": None, "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"], "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}]}), encoding="utf-8")
 
             with self.assertRaises(NativeClientConflict):
                 NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+
+    def test_restore_recovers_retained_rollback_required_with_pending_after_snapshot_later_recovers(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", False, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({
+                "schema_version": 1,
+                "console_uid": 501,
+                "phase": "rollback-required",
+                "pending_identifier": "com.paloaltonetworks.gp.pangpsd",
+                "applied_identifiers": [],
+                "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}],
+            }), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [("com.paloaltonetworks.gp.pangpsd", True)])
 
     def test_restore_retains_rollback_required_when_interrupted_journal_recovery_fails(self):
         class FailingRestoreStore(FakeAutoLaunchStore):
@@ -319,7 +341,7 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
         ])
         with tempfile.TemporaryDirectory() as td:
             record_path = Path(td) / "record.json"
-            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "disabling", "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"], "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}]}), encoding="utf-8")
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "disabling", "pending_identifier": None, "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"], "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}]}), encoding="utf-8")
 
             with self.assertRaises(NativeClientConflict):
                 NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
@@ -327,6 +349,198 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
 
         self.assertEqual(journal["phase"], "rollback-required")
         self.assertEqual(journal["applied_identifiers"], ["com.paloaltonetworks.gp.pangpsd"])
+
+
+    def test_restore_removes_disabling_empty_no_pending_as_safe_noop(self):
+        store = FakeAutoLaunchStore([])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "disabling", "pending_identifier": None, "applied_identifiers": [], "mechanisms": []}), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [])
+
+    def test_restore_removes_rolling_back_empty_no_pending_as_safe_completion(self):
+        store = FakeAutoLaunchStore([])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({"schema_version": 1, "console_uid": 501, "phase": "rolling-back", "pending_identifier": None, "applied_identifiers": [], "mechanisms": []}), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [])
+
+    def test_restore_treats_pending_disabled_target_as_owned_effect_and_restores_it(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", False, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({
+                "schema_version": 1,
+                "console_uid": 501,
+                "phase": "disabling",
+                "pending_identifier": "com.paloaltonetworks.gp.pangpsd",
+                "applied_identifiers": [],
+                "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}],
+            }), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [("com.paloaltonetworks.gp.pangpsd", True)])
+
+    def test_restore_treats_pending_enabled_target_as_no_effect(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({
+                "schema_version": 1,
+                "console_uid": 501,
+                "phase": "disabling",
+                "pending_identifier": "com.paloaltonetworks.gp.pangpsd",
+                "applied_identifiers": [],
+                "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}],
+            }), encoding="utf-8")
+
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [])
+
+    def test_restore_rejects_impossible_pending_already_applied_combination(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", False, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            record_path.write_text(json.dumps({
+                "schema_version": 1,
+                "console_uid": 501,
+                "phase": "disabling",
+                "pending_identifier": "com.paloaltonetworks.gp.pangpsd",
+                "applied_identifiers": ["com.paloaltonetworks.gp.pangpsd"],
+                "mechanisms": [{"identifier": "com.paloaltonetworks.gp.pangpsd", "kind": "launchd-system", "enabled": True, "exact_target": "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"}],
+            }), encoding="utf-8")
+
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+
+    def test_suppress_rolls_back_pending_when_disable_applies_then_raises(self):
+        class AppliesThenRaisesStore(FakeAutoLaunchStore):
+            def set_enabled(self, identifier, enabled):
+                super().set_enabled(identifier, enabled)
+                if identifier == "com.paloaltonetworks.gp.pangpsd" and enabled is False:
+                    raise NativeClientConflict("transport timeout after disable")
+
+        store = AppliesThenRaisesStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).suppress_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+
+        self.assertEqual(store.set_calls, [
+            ("com.paloaltonetworks.gp.pangpsd", False),
+            ("com.paloaltonetworks.gp.pangpsd", True),
+        ])
+
+
+    def test_suppress_snapshot_failure_retained_pending_journal_is_later_restorable(self):
+        class ToggleSnapshotStore(FakeAutoLaunchStore):
+            def __init__(self, mechanisms):
+                super().__init__(mechanisms)
+                self.fail_snapshot = False
+            def set_enabled(self, identifier, enabled):
+                super().set_enabled(identifier, enabled)
+                if identifier == "com.paloaltonetworks.gp.pangpsd" and enabled is False:
+                    self.fail_snapshot = True
+                    raise NativeClientConflict("transport timeout after disable")
+            def list_mechanisms(self):
+                if self.fail_snapshot:
+                    raise NativeClientConflict("snapshot failed")
+                return super().list_mechanisms()
+
+        store = ToggleSnapshotStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).suppress_auto_launch(record_path)
+
+            retained = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(retained["phase"], "rollback-required")
+            self.assertEqual(retained["pending_identifier"], "com.paloaltonetworks.gp.pangpsd")
+            self.assertEqual(retained["applied_identifiers"], [])
+
+            store.fail_snapshot = False
+            NativeAutoLaunchManager(store=store, console_uid=501).restore_auto_launch(record_path)
+
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [
+            ("com.paloaltonetworks.gp.pangpsd", False),
+            ("com.paloaltonetworks.gp.pangpsd", True),
+        ])
+
+    def test_suppress_retains_rollback_required_when_pending_snapshot_fails_after_disable_error(self):
+        class SnapshotFailsAfterDisableStore(FakeAutoLaunchStore):
+            def __init__(self, mechanisms):
+                super().__init__(mechanisms)
+                self.fail_snapshot = False
+            def set_enabled(self, identifier, enabled):
+                super().set_enabled(identifier, enabled)
+                if identifier == "com.paloaltonetworks.gp.pangpsd" and enabled is False:
+                    self.fail_snapshot = True
+                    raise NativeClientConflict("transport timeout after disable")
+            def list_mechanisms(self):
+                if self.fail_snapshot:
+                    raise NativeClientConflict("snapshot failed")
+                return super().list_mechanisms()
+
+        store = SnapshotFailsAfterDisableStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            with self.assertRaises(NativeClientConflict):
+                NativeAutoLaunchManager(store=store, console_uid=501).suppress_auto_launch(record_path)
+            journal = json.loads(record_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(journal["phase"], "rollback-required")
+        self.assertEqual(journal["pending_identifier"], "com.paloaltonetworks.gp.pangpsd")
+        self.assertEqual(journal["applied_identifiers"], [])
+
+    def test_suppress_journals_pending_identifier_before_external_disable(self):
+        snapshots = []
+        class InspectingStore(FakeAutoLaunchStore):
+            def __init__(self, mechanisms, record_path):
+                super().__init__(mechanisms)
+                self.record_path = record_path
+            def set_enabled(self, identifier, enabled):
+                snapshots.append(json.loads(self.record_path.read_text(encoding="utf-8")))
+                super().set_enabled(identifier, enabled)
+
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "record.json"
+            store = InspectingStore([
+                AutoLaunchMechanism("com.paloaltonetworks.gp.pangpsd", "launchd-system", True, "/Library/LaunchDaemons/com.paloaltonetworks.gp.pangpsd.plist"),
+            ], record_path)
+
+            NativeAutoLaunchManager(store=store, console_uid=501).suppress_auto_launch(record_path)
+
+        self.assertEqual(snapshots[0]["phase"], "disabling")
+        self.assertEqual(snapshots[0]["pending_identifier"], "com.paloaltonetworks.gp.pangpsd")
+        self.assertEqual(snapshots[0]["applied_identifiers"], [])
 
     def test_restore_rejects_cross_user_record_console_uid(self):
         store = FakeAutoLaunchStore([])
