@@ -26,7 +26,7 @@ from hyu_vpn.connector import (
     main,
     parse_connector_event_line,
 )
-from hyu_vpn.otp import Keychain, TotpError, TotpProvider
+from hyu_vpn.otp import KEYCHAIN_ACCOUNT, Keychain, TotpError, TotpProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENCONNECT = ROOT / "tests" / "helpers" / "fake_openconnect.py"
@@ -696,9 +696,9 @@ class ConnectorTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [
-            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-username", "-w"),
-            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-password", "-w"),
-            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-totp", "-w"),
+            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-username", "-a", "hyu-vpn", "-w"),
+            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-password", "-a", "hyu-vpn", "-w"),
+            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-totp", "-a", "hyu-vpn", "-w"),
         ])
         provider = session_cls.call_args.kwargs["totp_provider"]
         self.assertEqual(provider.state_path.name, "totp-counter.json")
@@ -708,6 +708,33 @@ class ConnectorTests(unittest.TestCase):
         self.assertIsNone(session_cls.call_args.kwargs["stdout"])
         self.assertTrue(callable(session_cls.call_args.kwargs["event_sink"]))
 
+
+
+    def test_keychain_reads_use_fixed_singleton_account(self):
+        calls = []
+        def fake_run(argv, **kwargs):
+            calls.append(tuple(argv))
+            return mock.Mock(returncode=0, stdout="value\n", stderr="")
+
+        self.assertEqual(Keychain(runner=fake_run).read("gp-vpn-password"), "value")
+
+        self.assertEqual(KEYCHAIN_ACCOUNT, "hyu-vpn")
+        self.assertEqual(calls, [
+            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-password", "-a", "hyu-vpn", "-w"),
+        ])
+
+    def test_keychain_missing_item_error_is_redacted_and_does_not_expose_account_query_output(self):
+        def fake_run(argv, **kwargs):
+            self.assertEqual(argv[argv.index("-a") + 1], "hyu-vpn")
+            return mock.Mock(returncode=44, stdout="", stderr="multiple accounts PASSWORD-CANARY SEED-CANARY hyu-vpn")
+
+        with self.assertRaisesRegex(RuntimeError, "gp-vpn-password") as cm:
+            Keychain(runner=fake_run).read("gp-vpn-password")
+
+        message = str(cm.exception)
+        self.assertNotIn("PASSWORD-CANARY", message)
+        self.assertNotIn("SEED-CANARY", message)
+        self.assertNotIn("hyu-vpn", message)
 
 class TotpProviderTests(unittest.TestCase):
     def test_oathtool_failure_raises_redacted_error(self):

@@ -14,6 +14,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 
 SECURITY = "/usr/bin/security"
+KEYCHAIN_ACCOUNT = "hyu-vpn"
 OATHTOOL = "/opt/homebrew/bin/oathtool"
 SUBPROCESS_TIMEOUT = 5.0
 
@@ -28,7 +29,7 @@ class Keychain:
         self.runner = runner or subprocess.run
 
     def read(self, service: str) -> str:
-        argv = [self.security_path, "find-generic-password", "-s", service, "-w"]
+        argv = [self.security_path, "find-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT, "-w"]
         try:
             completed = self.runner(
                 argv,
