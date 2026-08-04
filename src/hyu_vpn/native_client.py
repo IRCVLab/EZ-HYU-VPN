@@ -24,11 +24,15 @@ class AutoLaunchMechanism:
     kind: str
     enabled: bool
     exact_target: str
+    running: bool = False
 
 
 class AutoLaunchStore(Protocol):
     def list_mechanisms(self) -> list[AutoLaunchMechanism]: ...
     def set_enabled(self, identifier: str, enabled: bool) -> None: ...
+    def stop_running(self, identifier: str) -> None: ...
+    def start_running(self, identifier: str) -> None: ...
+    def is_running(self, identifier: str) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -68,7 +72,7 @@ _EXACT_AUTO_LAUNCH_TARGETS = {
 }
 _KNOWN_GLOBALPROTECT_IDS = {target.label for target in _TARGETS} | {"com.paloaltonetworks.GlobalProtect.client"}
 _RECORD_KEYS = {"schema_version", "console_uid", "mechanisms"}
-_MECHANISM_KEYS = {"identifier", "kind", "enabled", "exact_target"}
+_MECHANISM_KEYS = {"identifier", "kind", "enabled", "exact_target", "running"}
 
 
 def _is_known_gp(mechanism: AutoLaunchMechanism) -> bool:
@@ -93,16 +97,23 @@ class NativeAutoLaunchManager:
         if ambiguous:
             raise NativeClientConflict("ambiguous GlobalProtect auto-launch mechanism")
         self._validate_mechanism_list(targets)
-        applied: list[str] = []
-        self._write_journal(path, targets, phase="preparing", applied_identifiers=applied, pending_identifier=None)
+        enabled_applied: list[str] = []
+        stopped_applied: list[str] = []
+        self._write_journal(path, targets, phase="preparing", applied_identifiers=enabled_applied, stopped_identifiers=stopped_applied, pending_identifier=None)
         try:
             for mechanism in targets:
-                if not mechanism.enabled:
-                    continue
-                self._write_journal(path, targets, phase="disabling", applied_identifiers=applied, pending_identifier=mechanism.identifier)
-                self.store.set_enabled(mechanism.identifier, False)
-                applied.append(mechanism.identifier)
-                self._write_journal(path, targets, phase="disabling", applied_identifiers=applied, pending_identifier=None)
+                if mechanism.enabled:
+                    self._write_journal(path, targets, phase="disabling", applied_identifiers=enabled_applied, stopped_identifiers=stopped_applied, pending_identifier=mechanism.identifier)
+                    self.store.set_enabled(mechanism.identifier, False)
+                    enabled_applied.append(mechanism.identifier)
+                    self._write_journal(path, targets, phase="disabling", applied_identifiers=enabled_applied, stopped_identifiers=stopped_applied, pending_identifier=None)
+                if mechanism.running:
+                    self._write_journal(path, targets, phase="stopping", applied_identifiers=enabled_applied, stopped_identifiers=stopped_applied, pending_identifier=mechanism.identifier)
+                    self.store.stop_running(mechanism.identifier)
+                    if self.store.is_running(mechanism.identifier):
+                        raise NativeClientConflict("native auto-launch job still running")
+                    stopped_applied.append(mechanism.identifier)
+                    self._write_journal(path, targets, phase="stopping", applied_identifiers=enabled_applied, stopped_identifiers=stopped_applied, pending_identifier=None)
         except Exception as exc:
             try:
                 data = self._read_record(path)
@@ -116,12 +127,13 @@ class NativeAutoLaunchManager:
                             [AutoLaunchMechanism(**item) for item in data["mechanisms"]],
                             phase="rollback-required",
                             applied_identifiers=list(data["applied_identifiers"]),
+                            stopped_identifiers=list(data.get("stopped_identifiers", [])),
                             pending_identifier=data.get("pending_identifier"),
                         )
                     else:
-                        self._write_journal(path, targets, phase="rollback-required", applied_identifiers=applied, pending_identifier=None)
+                        self._write_journal(path, targets, phase="rollback-required", applied_identifiers=enabled_applied, stopped_identifiers=stopped_applied, pending_identifier=None)
                 except Exception:
-                    self._write_journal(path, targets, phase="rollback-required", applied_identifiers=applied, pending_identifier=None)
+                    self._write_journal(path, targets, phase="rollback-required", applied_identifiers=enabled_applied, stopped_identifiers=stopped_applied, pending_identifier=None)
             if isinstance(exc, NativeClientConflict):
                 raise exc
             raise NativeClientConflict("native auto-launch suppression failed") from None
@@ -141,6 +153,7 @@ class NativeAutoLaunchManager:
         recorded = [AutoLaunchMechanism(**item) for item in data["mechanisms"]]
         current = {m.identifier: m for m in self.store.list_mechanisms()}
         changes: list[tuple[str, bool]] = []
+        starts: list[str] = []
         for mechanism in recorded:
             now = current.get(mechanism.identifier)
             if now is None or now.kind != mechanism.kind or now.exact_target != mechanism.exact_target:
@@ -148,14 +161,35 @@ class NativeAutoLaunchManager:
             expected_suppressed = False if mechanism.enabled else mechanism.enabled
             if now.enabled != expected_suppressed:
                 raise NativeClientConflict("native auto-launch state was modified by user")
+            if now.running:
+                raise NativeClientConflict("native auto-launch state was modified by user")
             if mechanism.enabled:
                 changes.append((mechanism.identifier, True))
+            if mechanism.running:
+                starts.append(mechanism.identifier)
         for identifier, enabled in changes:
             self.store.set_enabled(identifier, enabled)
+        by_record_id = {m.identifier: m for m in recorded}
+        for identifier in starts:
+            mechanism = by_record_id[identifier]
+            temporarily_enabled = False
+            if not mechanism.enabled:
+                self.store.set_enabled(identifier, True)
+                temporarily_enabled = True
+            try:
+                self.store.start_running(identifier)
+            except Exception:
+                if temporarily_enabled:
+                    self.store.set_enabled(identifier, False)
+                raise
+            if temporarily_enabled:
+                self.store.set_enabled(identifier, False)
+        self._remove_record(path)
 
     def _restore_interrupted_journal(self, path: Path, data: dict) -> None:
         recorded = [AutoLaunchMechanism(**item) for item in data["mechanisms"]]
-        applied = list(data["applied_identifiers"])
+        enabled_applied = list(data["applied_identifiers"])
+        stopped_applied = list(data.get("stopped_identifiers", []))
         pending = data.get("pending_identifier")
         phase = data["phase"]
         if phase == "preparing":
@@ -168,34 +202,55 @@ class NativeAutoLaunchManager:
             now = current.get(pending)
             if now is None or now.kind != mechanism.kind or now.exact_target != mechanism.exact_target:
                 raise NativeClientConflict("recorded native auto-launch target changed")
-            if not now.enabled:
-                applied.append(pending)
-        if not applied:
+            if phase in {"disabling", "rollback-required"} and mechanism.enabled and not now.enabled and pending not in enabled_applied:
+                enabled_applied.append(pending)
+            if phase in {"stopping", "rollback-required"} and mechanism.running and not self.store.is_running(pending) and pending not in stopped_applied:
+                stopped_applied.append(pending)
+        if not enabled_applied and not stopped_applied:
             self._remove_record(path)
             return
-        remaining = list(applied)
-        for identifier in applied:
+        remaining_enabled = list(enabled_applied)
+        remaining_stopped = list(stopped_applied)
+        for identifier in set(enabled_applied + stopped_applied):
             mechanism = by_id[identifier]
             now = current.get(identifier)
             if now is None or now.kind != mechanism.kind or now.exact_target != mechanism.exact_target:
                 raise NativeClientConflict("recorded native auto-launch target changed")
-        self._write_journal(path, recorded, phase="rolling-back", applied_identifiers=remaining, pending_identifier=None)
+        self._write_journal(path, recorded, phase="rolling-back", applied_identifiers=remaining_enabled, stopped_identifiers=remaining_stopped, pending_identifier=None)
         try:
-            for identifier in reversed(applied):
+            for identifier in reversed(enabled_applied):
                 now = current[identifier]
                 if not now.enabled:
                     self.store.set_enabled(identifier, True)
-                if identifier in remaining:
-                    remaining.remove(identifier)
-                self._write_journal(path, recorded, phase="rolling-back", applied_identifiers=remaining, pending_identifier=None)
+                if identifier in remaining_enabled:
+                    remaining_enabled.remove(identifier)
+                self._write_journal(path, recorded, phase="rolling-back", applied_identifiers=remaining_enabled, stopped_identifiers=remaining_stopped, pending_identifier=None)
+            for identifier in reversed(stopped_applied):
+                mechanism = by_id[identifier]
+                temporarily_enabled = False
+                if not self.store.is_running(identifier):
+                    if not mechanism.enabled:
+                        self.store.set_enabled(identifier, True)
+                        temporarily_enabled = True
+                    try:
+                        self.store.start_running(identifier)
+                    except Exception:
+                        if temporarily_enabled:
+                            self.store.set_enabled(identifier, False)
+                        raise
+                    if temporarily_enabled:
+                        self.store.set_enabled(identifier, False)
+                if identifier in remaining_stopped:
+                    remaining_stopped.remove(identifier)
+                self._write_journal(path, recorded, phase="rolling-back", applied_identifiers=remaining_enabled, stopped_identifiers=remaining_stopped, pending_identifier=None)
         except Exception as exc:
-            self._write_journal(path, recorded, phase="rollback-required", applied_identifiers=remaining, pending_identifier=None)
+            self._write_journal(path, recorded, phase="rollback-required", applied_identifiers=remaining_enabled, stopped_identifiers=remaining_stopped, pending_identifier=None)
             if isinstance(exc, NativeClientConflict):
                 raise exc
             raise NativeClientConflict("native auto-launch rollback failed") from None
         self._remove_record(path)
 
-    def _write_journal(self, path: Path, mechanisms: list[AutoLaunchMechanism], *, phase: str, applied_identifiers: list[str], pending_identifier: Optional[str]) -> None:
+    def _write_journal(self, path: Path, mechanisms: list[AutoLaunchMechanism], *, phase: str, applied_identifiers: list[str], stopped_identifiers: list[str], pending_identifier: Optional[str]) -> None:
         self._write_record(path, {
             "schema_version": 1,
             "console_uid": self.console_uid,
@@ -203,6 +258,7 @@ class NativeAutoLaunchManager:
             "pending_identifier": pending_identifier,
             "mechanisms": [asdict(m) for m in mechanisms],
             "applied_identifiers": list(applied_identifiers),
+            "stopped_identifiers": list(stopped_identifiers),
         })
 
     def _remove_record(self, path: Path) -> None:
@@ -224,8 +280,11 @@ class NativeAutoLaunchManager:
         if phase is None:
             if set(data) != _RECORD_KEYS:
                 raise NativeClientConflict("invalid native suppression record schema")
-        elif phase in {"preparing", "disabling", "rolling-back", "rollback-required"}:
-            if set(data) != {"schema_version", "console_uid", "phase", "pending_identifier", "mechanisms", "applied_identifiers"}:
+        elif phase in {"preparing", "disabling", "stopping", "rolling-back", "rollback-required"}:
+            journal_keys = set(data)
+            if journal_keys == {"schema_version", "console_uid", "phase", "pending_identifier", "mechanisms", "applied_identifiers"}:
+                data["stopped_identifiers"] = []
+            elif journal_keys != {"schema_version", "console_uid", "phase", "pending_identifier", "mechanisms", "applied_identifiers", "stopped_identifiers"}:
                 raise NativeClientConflict("invalid native rollback journal schema")
         else:
             raise NativeClientConflict("native suppression journal is not restorable")
@@ -240,29 +299,42 @@ class NativeAutoLaunchManager:
         if not isinstance(mechanisms, list):
             raise NativeClientConflict("invalid native suppression record mechanisms")
         parsed: list[AutoLaunchMechanism] = []
+        normalized_mechanisms: list[dict] = []
+        legacy_keys = {"identifier", "kind", "enabled", "exact_target"}
         for item in mechanisms:
-            if not isinstance(item, dict) or set(item) != _MECHANISM_KEYS:
+            if not isinstance(item, dict) or (set(item) != _MECHANISM_KEYS and set(item) != legacy_keys):
                 raise NativeClientConflict("invalid native suppression record mechanism")
+            normalized = dict(item)
+            normalized.setdefault("running", False)
             try:
-                mechanism = AutoLaunchMechanism(**item)
+                mechanism = AutoLaunchMechanism(**normalized)
             except TypeError:
                 raise NativeClientConflict("invalid native suppression record mechanism") from None
             if not _valid_mechanism(mechanism):
                 raise NativeClientConflict("invalid native suppression record mechanism")
             parsed.append(mechanism)
+            normalized_mechanisms.append(normalized)
+        data["mechanisms"] = normalized_mechanisms
         if phase is not None:
             applied = data.get("applied_identifiers")
+            stopped = data.get("stopped_identifiers")
             ids = {m.identifier for m in parsed}
             if not isinstance(applied, list) or any(not isinstance(i, str) or i not in ids for i in applied):
                 raise NativeClientConflict("invalid native rollback journal applied targets")
+            if not isinstance(stopped, list) or any(not isinstance(i, str) or i not in ids for i in stopped):
+                raise NativeClientConflict("invalid native rollback journal stopped targets")
             if len(applied) != len(set(applied)):
                 raise NativeClientConflict("invalid native rollback journal applied targets")
+            if len(stopped) != len(set(stopped)):
+                raise NativeClientConflict("invalid native rollback journal stopped targets")
             pending = data.get("pending_identifier")
             if pending is not None and (not isinstance(pending, str) or pending not in ids):
                 raise NativeClientConflict("invalid native rollback journal pending target")
-            if pending is not None and pending in applied:
+            if pending is not None and pending in stopped:
                 raise NativeClientConflict("invalid native rollback journal pending target")
-            if phase == "preparing" and (applied or pending is not None):
+            if pending is not None and pending in applied and phase not in {"stopping", "rollback-required"}:
+                raise NativeClientConflict("invalid native rollback journal pending target")
+            if phase == "preparing" and (applied or stopped or pending is not None):
                 raise NativeClientConflict("invalid native preparing journal applied targets")
             if phase == "rolling-back" and pending is not None:
                 raise NativeClientConflict("invalid native rollback journal pending target")
@@ -299,6 +371,7 @@ def _valid_mechanism(mechanism: AutoLaunchMechanism) -> bool:
         and isinstance(mechanism.kind, str)
         and isinstance(mechanism.enabled, bool)
         and isinstance(mechanism.exact_target, str)
+        and isinstance(mechanism.running, bool)
         and (mechanism.identifier, mechanism.kind, mechanism.exact_target) in _EXACT_AUTO_LAUNCH_TARGETS
     )
 
@@ -345,7 +418,7 @@ class MacOSLaunchctlAutoLaunchStore:
                 continue
             self._validate_plist(path, target)
             disabled = disabled_by_domain.get(domain, {}).get(target.label, False)
-            mechanisms.append(AutoLaunchMechanism(target.label, target.kind, not disabled, target.plist_path))
+            mechanisms.append(AutoLaunchMechanism(target.label, target.kind, not disabled, target.plist_path, self._is_running(target)))
         return mechanisms
 
     def set_enabled(self, identifier: str, enabled: bool) -> None:
@@ -355,6 +428,28 @@ class MacOSLaunchctlAutoLaunchStore:
         result = self.runner(argv, self.timeout)
         if getattr(result, "returncode", 1) != 0:
             raise NativeClientConflict("launchctl state change failed")
+
+    def stop_running(self, identifier: str) -> None:
+        target = self._target_for(identifier)
+        result = self.runner(["/bin/launchctl", "bootout", f"{self._domain(target)}/{target.label}"], self.timeout)
+        if getattr(result, "returncode", 0) not in {0, 3, 36}:
+            raise NativeClientConflict("launchctl bootout failed")
+
+    def start_running(self, identifier: str) -> None:
+        target = self._target_for(identifier)
+        result = self.runner(["/bin/launchctl", "bootstrap", self._domain(target), target.plist_path], self.timeout)
+        if getattr(result, "returncode", 1) != 0:
+            raise NativeClientConflict("launchctl bootstrap failed")
+
+    def is_running(self, identifier: str) -> bool:
+        target = self._target_for(identifier)
+        return self._is_running(target)
+
+    def _is_running(self, target: _LaunchdTarget) -> bool:
+        result = self.runner(["/bin/launchctl", "print", f"{self._domain(target)}/{target.label}"], self.timeout)
+        if getattr(result, "returncode", 1) != 0:
+            return False
+        return "state = running" in getattr(result, "stdout", "") or "state = waiting" in getattr(result, "stdout", "")
 
     def _print_disabled(self, domain: str) -> dict[str, bool]:
         result = self.runner(["/bin/launchctl", "print-disabled", domain], self.timeout)

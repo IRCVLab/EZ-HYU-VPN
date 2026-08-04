@@ -19,14 +19,29 @@ class FakeAutoLaunchStore:
     def __init__(self, mechanisms):
         self.mechanisms = {m.identifier: m for m in mechanisms}
         self.set_calls = []
+        self.stop_calls = []
+        self.start_calls = []
 
     def list_mechanisms(self):
         return list(self.mechanisms.values())
 
     def set_enabled(self, identifier, enabled):
         current = self.mechanisms[identifier]
-        self.mechanisms[identifier] = AutoLaunchMechanism(current.identifier, current.kind, enabled, current.exact_target)
+        self.mechanisms[identifier] = AutoLaunchMechanism(current.identifier, current.kind, enabled, current.exact_target, current.running)
         self.set_calls.append((identifier, enabled))
+
+    def stop_running(self, identifier):
+        current = self.mechanisms[identifier]
+        self.mechanisms[identifier] = AutoLaunchMechanism(current.identifier, current.kind, current.enabled, current.exact_target, False)
+        self.stop_calls.append(identifier)
+
+    def start_running(self, identifier):
+        current = self.mechanisms[identifier]
+        self.mechanisms[identifier] = AutoLaunchMechanism(current.identifier, current.kind, current.enabled, current.exact_target, True)
+        self.start_calls.append(identifier)
+
+    def is_running(self, identifier):
+        return self.mechanisms[identifier].running
 
 
 class NativeClientTests(unittest.TestCase):
@@ -48,8 +63,106 @@ class NativeClientTests(unittest.TestCase):
             "kind": "launchd-gui",
             "enabled": True,
             "exact_target": "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist",
+            "running": False,
         }])
         self.assertNotIn("com.example.unrelated", json.dumps(record))
+
+
+    def test_suppression_snapshots_running_jobs_bootouts_and_restore_rebootstraps_exact_previous_running(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpa", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist", True),
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangps", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist", False),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "native-suppression.json"
+            manager = NativeAutoLaunchManager(store=store, console_uid=501)
+            manager.suppress_auto_launch(record_path)
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertTrue(next(m for m in record["mechanisms"] if m["identifier"].endswith("pangpa"))["running"])
+            self.assertFalse(store.mechanisms["com.paloaltonetworks.gp.pangpa"].running)
+            manager.restore_auto_launch(record_path)
+        self.assertEqual(store.stop_calls, ["com.paloaltonetworks.gp.pangpa"])
+        self.assertEqual(store.start_calls, ["com.paloaltonetworks.gp.pangpa"])
+
+    def test_restore_deletes_completed_suppression_record_and_second_restore_fails_closed(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpa", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist", True),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "native-suppression.json"
+            manager = NativeAutoLaunchManager(store=store, console_uid=501)
+            manager.suppress_auto_launch(record_path)
+            self.assertTrue(record_path.exists())
+            manager.restore_auto_launch(record_path)
+            self.assertFalse(record_path.exists())
+            with self.assertRaises(NativeClientConflict):
+                manager.restore_auto_launch(record_path)
+
+    def test_restore_disabled_but_running_job_uses_enable_bootstrap_disable_order(self):
+        store = FakeAutoLaunchStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpa", "launchd-gui", False, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist", True),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "native-suppression.json"
+            manager = NativeAutoLaunchManager(store=store, console_uid=501)
+            manager.suppress_auto_launch(record_path)
+            self.assertFalse(store.mechanisms["com.paloaltonetworks.gp.pangpa"].running)
+            manager.restore_auto_launch(record_path)
+            self.assertFalse(record_path.exists())
+        self.assertEqual(store.set_calls, [
+            ("com.paloaltonetworks.gp.pangpa", True),
+            ("com.paloaltonetworks.gp.pangpa", False),
+        ])
+        self.assertEqual(store.start_calls, ["com.paloaltonetworks.gp.pangpa"])
+        self.assertFalse(store.mechanisms["com.paloaltonetworks.gp.pangpa"].enabled)
+        self.assertTrue(store.mechanisms["com.paloaltonetworks.gp.pangpa"].running)
+
+    def test_restore_disabled_running_job_re_disables_and_retains_record_when_bootstrap_fails(self):
+        class FailingStartStore(FakeAutoLaunchStore):
+            def start_running(self, identifier):
+                self.start_calls.append(identifier)
+                raise NativeClientConflict("bootstrap failed")
+
+        store = FailingStartStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpa", "launchd-gui", False, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist", True),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "native-suppression.json"
+            manager = NativeAutoLaunchManager(store=store, console_uid=501)
+            manager.suppress_auto_launch(record_path)
+            with self.assertRaises(NativeClientConflict):
+                manager.restore_auto_launch(record_path)
+            self.assertTrue(record_path.exists())
+        self.assertEqual(store.set_calls, [
+            ("com.paloaltonetworks.gp.pangpa", True),
+            ("com.paloaltonetworks.gp.pangpa", False),
+        ])
+        self.assertEqual(store.start_calls, ["com.paloaltonetworks.gp.pangpa"])
+        self.assertFalse(store.mechanisms["com.paloaltonetworks.gp.pangpa"].enabled)
+        self.assertFalse(store.mechanisms["com.paloaltonetworks.gp.pangpa"].running)
+
+    def test_suppress_restores_booted_out_job_when_stop_raises_after_applying(self):
+        class StopRaisesAfterApplyStore(FakeAutoLaunchStore):
+            def stop_running(self, identifier):
+                super().stop_running(identifier)
+                raise RuntimeError("interrupted after bootout")
+
+        store = StopRaisesAfterApplyStore([
+            AutoLaunchMechanism("com.paloaltonetworks.gp.pangpa", "launchd-gui", True, "/Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist", True),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            record_path = Path(td) / "native-suppression.json"
+            manager = NativeAutoLaunchManager(store=store, console_uid=501)
+            with self.assertRaises(NativeClientConflict):
+                manager.suppress_auto_launch(record_path)
+            self.assertFalse(record_path.exists())
+
+        self.assertEqual(store.set_calls, [
+            ("com.paloaltonetworks.gp.pangpa", False),
+            ("com.paloaltonetworks.gp.pangpa", True),
+        ])
+        self.assertEqual(store.stop_calls, ["com.paloaltonetworks.gp.pangpa"])
+        self.assertEqual(store.start_calls, ["com.paloaltonetworks.gp.pangpa"])
 
     def test_restore_only_unchanged_recorded_targets_and_refuses_user_modified_state(self):
         store = FakeAutoLaunchStore([
@@ -198,6 +311,44 @@ class MacOSProductionNativeClientTests(unittest.TestCase):
         self.assertIn(("/bin/launchctl", "disable", "gui/501/com.paloaltonetworks.gp.pangps"), calls)
         self.assertNotIn(("launchctl", "disable", "gui/501/com.paloaltonetworks.gp.pangps"), calls)
 
+
+
+    def test_suppress_bootouts_running_exact_jobs_and_restore_bootstraps_only_previously_running(self):
+        from hyu_vpn.native_client import MacOSLaunchctlAutoLaunchStore, NativeAutoLaunchManager
+        plists = {
+            "/Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist": {"Label": "com.paloaltonetworks.gp.pangpa", "Program": "/Applications/GlobalProtect.app/Contents/MacOS/GlobalProtect"},
+            "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist": {"Label": "com.paloaltonetworks.gp.pangps", "Program": "/Applications/GlobalProtect.app/Contents/Resources/PanGPS"},
+        }
+        running = {"com.paloaltonetworks.gp.pangpa"}
+        disabled = set()
+        calls = []
+        def runner(argv, timeout):
+            calls.append(tuple(argv))
+            if argv[:2] == ["/bin/launchctl", "print-disabled"]:
+                stdout = "".join(f'"{label}" => {str(label in disabled).lower()}\n' for label in ["com.paloaltonetworks.gp.pangpa", "com.paloaltonetworks.gp.pangps"])
+                return type("R", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+            if argv[:2] == ["/bin/launchctl", "print"]:
+                label = argv[2].rsplit("/", 1)[-1]
+                return type("R", (), {"returncode": 0 if label in running else 113, "stdout": "state = running\n" if label in running else "", "stderr": ""})()
+            if argv[:2] == ["/bin/launchctl", "bootout"]:
+                running.discard(argv[2].rsplit("/", 1)[-1]); return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if argv[:2] == ["/bin/launchctl", "bootstrap"]:
+                label = Path(argv[3]).stem; running.add(label); return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if argv[:2] == ["/bin/launchctl", "disable"]:
+                disabled.add(argv[2].rsplit("/", 1)[-1]); return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if argv[:2] == ["/bin/launchctl", "enable"]:
+                disabled.discard(argv[2].rsplit("/", 1)[-1]); return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with tempfile.TemporaryDirectory() as td:
+            store = MacOSLaunchctlAutoLaunchStore(console_uid=501, fs=FakePlistFS(plists), runner=runner)
+            manager = NativeAutoLaunchManager(store=store, console_uid=501)
+            record = Path(td) / "record.json"
+            manager.suppress_auto_launch(record)
+            self.assertNotIn("com.paloaltonetworks.gp.pangpa", running)
+            manager.restore_auto_launch(record)
+        self.assertIn(("/bin/launchctl", "bootout", "gui/501/com.paloaltonetworks.gp.pangpa"), calls)
+        self.assertIn(("/bin/launchctl", "bootstrap", "gui/501", "/Library/LaunchAgents/com.paloaltonetworks.gp.pangpa.plist"), calls)
+        self.assertNotIn(("/bin/launchctl", "bootstrap", "gui/501", "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist"), calls)
 
     def test_macos_store_accepts_exact_program_or_matching_program_arguments_only(self):
         from hyu_vpn.native_client import MacOSLaunchctlAutoLaunchStore, NativeClientConflict
