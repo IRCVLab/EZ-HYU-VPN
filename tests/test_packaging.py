@@ -369,6 +369,7 @@ class ReleaseBuilderTests(PackagingTestCase):
         packaging_module.validate_final_runtime_binding(binding, packaged_bundle, src)
         data = json.loads(binding.read_text(encoding="utf-8"))
         self.assertEqual(data["source_compliance_bundle"]["semantics"], "canonical-pre-rewrite-pre-sign")
+        self.assertEqual(data["source_compliance_bundle"]["scope"], "third-party-runtime-corresponding-source-only")
         final_entry = next(item for item in data["files"] if item["path"] == "runtime/openconnect/bin/openconnect")
         self.assertNotEqual(final_entry["canonical_sha256"], final_entry["final_sha256"])
 
@@ -699,12 +700,32 @@ class ReleaseCliTests(PackagingTestCase):
         bundle = self.make_source_bundle(runtime_files=runtime_files)
         (src / "SOURCE-COMPLIANCE-BUNDLE.tar.gz").write_bytes(bundle.read_bytes())
         result = ReleaseBuilder(ReleaseToolchain(fake=True)).build(
-            source_payload=src, build_root=self.build_root, output_root=self.output_root, version="0.1.0-test", arch="arm64"
+            source_payload=src,
+            build_root=self.build_root,
+            output_root=self.output_root,
+            version="0.1.0-test",
+            arch="arm64",
+            git_commit="a" * 40,
         )
         self.assertEqual(result.metadata["release_blockers"], [])
         self.assertEqual(result.metadata["final_runtime_binding"], "FINAL-RUNTIME-BINDING.json")
+        self.assertEqual(result.metadata["git_commit"], "a" * 40)
+        self.assertEqual(result.metadata["source_compliance_bundle_scope"], "third-party-runtime-corresponding-source-only")
         self.assertIn("FINAL-RUNTIME-BINDING.json", result.manifest["files"])
         self.assertNotIn("task7_followups", result.metadata)
+
+    def test_invalid_git_commit_is_rejected(self):
+        src = self.make_payload_source()
+
+        with self.assertRaisesRegex(PackagingError, "git commit"):
+            ReleaseBuilder(ReleaseToolchain(fake=True)).build(
+                source_payload=src,
+                build_root=self.build_root,
+                output_root=self.output_root,
+                version="0.1.0-test",
+                arch="arm64",
+                git_commit="not-a-sha",
+            )
 
     def test_cli_without_fake_tools_fails_closed_before_claiming_dmg(self):
         src = self.make_payload_source()
@@ -784,8 +805,15 @@ class ReleaseCliTests(PackagingTestCase):
         ], text=True, capture_output=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         data = json.loads(proc.stdout)
-        self.assertTrue(Path(data["stage"]).exists())
-        self.assertTrue((Path(data["stage"]) / "SOURCE-COMPLIANCE-BUNDLE.tar.gz").exists())
+        stage = Path(data["stage"])
+        self.assertTrue(stage.exists())
+        self.assertTrue((stage / "SOURCE-COMPLIANCE-BUNDLE.tar.gz").exists())
+        self.assertRegex(data["git_commit"], r"^[0-9a-f]{40}$")
+        metadata = json.loads((stage / "release-metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["git_commit"], data["git_commit"])
+        self.assertEqual(metadata["source_compliance_bundle_scope"], "third-party-runtime-corresponding-source-only")
+        binding = json.loads((stage / "FINAL-RUNTIME-BINDING.json").read_text(encoding="utf-8"))
+        self.assertEqual(binding["source_compliance_bundle"]["scope"], "third-party-runtime-corresponding-source-only")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +12,22 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from release_packaging import PackagingError, ReleaseBuilder, ReleaseToolchain, assemble_payload_from_repo  # noqa: E402
+
+
+def git_commit(repo_root: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/git", "-C", str(repo_root), "rev-parse", "--verify", "HEAD"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PackagingError("unable to determine git commit") from exc
+    if completed.returncode != 0:
+        raise PackagingError("unable to determine git commit")
+    return completed.stdout.strip()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,12 +67,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         if source_payload is None:
             raise PackagingError("--source-payload or --assemble-from-repo is required")
+        commit = git_commit(args.repo_root)
         result = ReleaseBuilder(ReleaseToolchain(fake=args.fake_tools)).build(
             source_payload=source_payload,
             build_root=args.build_root,
             output_root=args.output_root,
             version=args.version,
             arch=args.arch,
+            git_commit=commit,
         )
     except PackagingError as exc:
         print(f"package-release: {exc}", file=sys.stderr)
@@ -66,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         "checksum": str(result.checksum_path),
         "architecture": result.metadata["architecture"],
         "notarized": result.metadata["notarized"],
+        "git_commit": result.metadata["git_commit"],
     }, sort_keys=True))
     return 0
 

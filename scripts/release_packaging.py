@@ -49,6 +49,9 @@ REQUIRED_SOURCE_MODULES = {
 }
 SOURCE_COMPLIANCE_BUNDLE = "SOURCE-COMPLIANCE-BUNDLE.tar.gz"
 FINAL_RUNTIME_BINDING = "FINAL-RUNTIME-BINDING.json"
+SOURCE_COMPLIANCE_BUNDLE_SEMANTICS = "canonical-pre-rewrite-pre-sign"
+SOURCE_COMPLIANCE_BUNDLE_SCOPE = "third-party-runtime-corresponding-source-only"
+GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 REQUIRED_PAYLOAD_FILES = {
     "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
@@ -438,7 +441,8 @@ def _final_runtime_binding_data(bundle: Path, payload: Path) -> Dict[str, Any]:
         "source_compliance_bundle": {
             "path": SOURCE_COMPLIANCE_BUNDLE,
             "sha256": _sha256(bundle),
-            "semantics": "canonical-pre-rewrite-pre-sign",
+            "semantics": SOURCE_COMPLIANCE_BUNDLE_SEMANTICS,
+            "scope": SOURCE_COMPLIANCE_BUNDLE_SCOPE,
         },
         "files": files,
     }
@@ -888,11 +892,22 @@ class ReleaseBuilder:
     def __init__(self, toolchain: ReleaseToolchain | None = None) -> None:
         self.toolchain = toolchain or ReleaseToolchain(fake=False)
 
-    def build(self, *, source_payload: Path, build_root: Path, output_root: Path, version: str, arch: str) -> ReleaseResult:
+    def build(
+        self,
+        *,
+        source_payload: Path,
+        build_root: Path,
+        output_root: Path,
+        version: str,
+        arch: str,
+        git_commit: str | None = None,
+    ) -> ReleaseResult:
         if arch != "arm64":
             raise PackagingError("internal lab release must be labeled arm64")
         if not _valid_token(version):
             raise PackagingError("unsafe release version token")
+        if git_commit is not None and GIT_COMMIT_RE.fullmatch(git_commit) is None:
+            raise PackagingError("git commit must be a 40-character lowercase hex SHA")
         build_root = guard_root(build_root)
         output_root = guard_root(output_root)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -924,7 +939,9 @@ class ReleaseBuilder:
             "prerequisites": {"python3": PYTHON_PREREQUISITE},
             "task7_pre_sudo_requirements": ["verify /usr/bin/python3 exists and is executable", "never use PATH or Homebrew python fallback"],
             "release_blockers": [] if has_source_bundle else ["bundle exact GPL/LGPL source archives or retained written-offer packet before real lab distribution"],
-            "source_compliance_bundle_semantics": "canonical-pre-rewrite-pre-sign" if has_source_bundle else None,
+            "git_commit": git_commit,
+            "source_compliance_bundle_scope": SOURCE_COMPLIANCE_BUNDLE_SCOPE if has_source_bundle else None,
+            "source_compliance_bundle_semantics": SOURCE_COMPLIANCE_BUNDLE_SEMANTICS if has_source_bundle else None,
             "final_runtime_binding": FINAL_RUNTIME_BINDING if has_source_bundle else None,
             "bit_reproducible_dmg": False,
             "deterministic_manifest": True,
