@@ -18,12 +18,19 @@ from typing import Callable, Optional, Sequence, TextIO
 from .control import AutoReconnectPreference, ControlServer
 from .network import HelperOwnedSessionProvider, NetworkReadiness, OwnedSessionEvidence, route_interface
 from .native_client import NativeClientState, production_status_reader
-from .connector import parse_connector_event_line
+from .connector import NETWORK_SCRIPT_EVENT_KINDS, parse_connector_event_line
 from .status import VpnStatus, write_status
 
 
 PROTECTED_ROUTE = "166.104.100.100"
 _NATIVE_PROCESS_NAMES = ("PanGPS", "PanGPA", "PanGpHip", "PanGpHipMp", "GlobalProtect")
+_NETWORK_SCRIPT_ERROR_CODES = {
+    "network-script-bad-configuration": "NETWORK_SCRIPT_BAD_CONFIGURATION",
+    "network-script-state-mismatch": "NETWORK_SCRIPT_STATE_MISMATCH",
+    "network-script-security-failure": "NETWORK_SCRIPT_SECURITY_FAILURE",
+    "network-script-teardown-incomplete": "NETWORK_SCRIPT_TEARDOWN_INCOMPLETE",
+    "network-script-failed": "NETWORK_SCRIPT_FAILED",
+}
 
 
 @dataclass(frozen=True)
@@ -154,6 +161,7 @@ class Supervisor:
         self._state_lock = threading.RLock()
         self._command_lock = threading.Lock()
         self._repair_required = False
+        self._connector_failure_code: Optional[str] = None
         self._status = self._base_status("disabled")
         self.policy = ReconnectPolicy()
         self._stop_requested = False
@@ -177,6 +185,7 @@ class Supervisor:
                 self._write_current_status(state="error", automatic=False, error_code="REPAIR_REQUIRED")
                 return False, "REPAIR_REQUIRED"
             if command == "automatic-on":
+                self._connector_failure_code = None
                 self.preference.write(True)
                 self._write_current_status(state=self._status.state, automatic=True)
                 self._control_event.set()
@@ -199,6 +208,7 @@ class Supervisor:
                 ok, error = self._disconnect_locked(disable_auto=False)
                 if not ok:
                     return ok, error
+                self._connector_failure_code = None
                 self.preference.write(True)
                 self._write_current_status(state="connecting", automatic=True)
                 self._control_event.set()
@@ -206,6 +216,7 @@ class Supervisor:
             if command == "connect":
                 if self._repair_required:
                     return False, "REPAIR_REQUIRED"
+                self._connector_failure_code = None
                 self.preference.write(True)
                 if self._child is None or self._child.poll() is not None:
                     self._write_current_status(state="connecting", automatic=True)
@@ -232,6 +243,7 @@ class Supervisor:
                 self._enter_repair_required(automatic=False if disable_auto else None)
                 return False, "REPAIR_REQUIRED"
             self._repair_required = False
+            self._connector_failure_code = None
             self._write_current_status(state="disabled", automatic=False if disable_auto else None)
             return True, None
         finally:
@@ -317,12 +329,21 @@ class Supervisor:
         except ValueError:
             return
         with self._state_lock:
+            if self._connector_failure_code is not None and event.kind not in NETWORK_SCRIPT_EVENT_KINDS:
+                return
             if generation is not None:
                 if generation != self._active_generation:
                     return
                 if self._status.state in {"disabled", "disconnecting", "error", "backoff"}:
                     return
-            if event.kind == "hip-succeeded":
+            if event.kind in NETWORK_SCRIPT_EVENT_KINDS:
+                error_code = _NETWORK_SCRIPT_ERROR_CODES[event.kind]
+                self.preference.write(False)
+                self._connector_failure_code = error_code
+                self._active_generation = None
+                self._write_current_status(state="error", automatic=False, error_code=error_code)
+                self._state_changed.notify_all()
+            elif event.kind == "hip-succeeded":
                 self._write_current_status(last_successful_hip_at=event.timestamp)
             elif event.kind == "session-expiry":
                 self._write_current_status(session_expires_at=event.timestamp)
@@ -400,6 +421,10 @@ class Supervisor:
                     self._write_current_status(state="error", error_code="REPAIR_REQUIRED")
                     self._wait_for_control_or_stop(self.config.conflict_poll_interval)
                     continue
+                if self._connector_failure_code is not None:
+                    self._write_current_status(state="error", automatic=False, error_code=self._connector_failure_code)
+                    self._wait_for_control_or_stop(self.config.conflict_poll_interval)
+                    continue
                 if not self.preference.read(default=False):
                     self._write_current_status(state="disabled", automatic=False)
                     self._wait_for_control_or_stop(self.config.conflict_poll_interval)
@@ -462,9 +487,9 @@ class Supervisor:
                     continue
 
                 last_returncode = self._wait_for_child()
-                self._invalidate_active_generation()
                 if not self._join_stdout_reader():
                     last_returncode = 1
+                self._invalidate_active_generation()
                 runtime = self.monotonic() - started_at
                 failures = self.policy.record_exit(last_returncode, runtime_seconds=runtime)
                 with self._state_changed:
@@ -472,6 +497,12 @@ class Supervisor:
                     self._state_changed.notify_all()
                 if self._stop_requested:
                     break
+                if self._connector_failure_code is not None:
+                    self._write_current_status(state="error", automatic=False, error_code=self._connector_failure_code)
+                    if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
+                        break
+                    self._wait_for_control_or_stop(self.config.conflict_poll_interval)
+                    continue
                 if not self.preference.read(default=False):
                     self._write_current_status(state="disabled", automatic=False)
                     if self.config.max_iterations is not None and iterations >= self.config.max_iterations:

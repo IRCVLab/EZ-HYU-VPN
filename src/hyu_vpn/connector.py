@@ -39,6 +39,17 @@ _PROMPT_RE = re.compile(rb"(?:Password|Challenge):\s*$", re.IGNORECASE)
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}$")
 _EVENT_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
+NETWORK_SCRIPT_EVENT_KINDS = frozenset(
+    {
+        "network-script-bad-configuration",
+        "network-script-state-mismatch",
+        "network-script-security-failure",
+        "network-script-teardown-incomplete",
+        "network-script-failed",
+    }
+)
+CONNECTOR_EVENT_KINDS = frozenset({"hip-succeeded", "session-expiry", "connected"}) | NETWORK_SCRIPT_EVENT_KINDS
+
 
 class ConnectorProtocolError(RuntimeError):
     """Raised for a local bounded control/event protocol failure."""
@@ -71,7 +82,7 @@ class ConnectorEvent:
     timestamp: Optional[datetime] = None
 
     def to_json_line(self) -> str:
-        if self.kind not in {"hip-succeeded", "session-expiry", "connected"}:
+        if self.kind not in CONNECTOR_EVENT_KINDS:
             raise ValueError("invalid connector event")
         if self.timestamp is None or self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
             raise ValueError("connector event timestamp is required")
@@ -99,7 +110,7 @@ def parse_connector_event_line(line: str) -> ConnectorEvent:
     event_name = document.get("event")
     if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
         raise ValueError("invalid connector event schema")
-    if not isinstance(event_name, str) or event_name not in {"hip-succeeded", "session-expiry", "connected"}:
+    if not isinstance(event_name, str) or event_name not in CONNECTOR_EVENT_KINDS:
         raise ValueError("invalid connector event schema")
     raw_timestamp = document.get("timestamp")
     if not isinstance(raw_timestamp, str):
@@ -134,8 +145,11 @@ class ConnectorEventParser:
         self._expiry = OpenConnectExpiryParser(max_buffer_bytes=max_buffer_bytes, now=now)
         self._buffer = ""
         self._connected_emitted = False
+        self._fatal_emitted = False
 
     def feed(self, chunk: bytes | str) -> list[ConnectorEvent]:
+        if self._fatal_emitted:
+            return []
         text = chunk.decode("utf-8", "replace") if isinstance(chunk, bytes) else chunk
         events: list[ConnectorEvent] = []
         expiry = self._expiry.feed(text)
@@ -144,6 +158,12 @@ class ConnectorEventParser:
         combined = bounded.decode("utf-8", "ignore")
         lines = combined.replace("\r", "\n").split("\n")
         self._buffer = lines.pop() if lines else ""
+        for line in lines:
+            fatal_kind = self._network_script_error_kind(" ".join(line.strip().split()))
+            if fatal_kind is not None:
+                self._fatal_emitted = True
+                self._buffer = ""
+                return [ConnectorEvent(fatal_kind, self.now())]
         for line in lines:
             normalized = " ".join(line.strip().split())
             if re.search(r"(?:^|:)\s*HIP report submitted successfully$", normalized):
@@ -156,6 +176,22 @@ class ConnectorEventParser:
                 self._connected_emitted = True
                 events.append(ConnectorEvent("connected", self.now()))
         return events
+
+    @staticmethod
+    def _network_script_error_kind(normalized: str) -> Optional[str]:
+        prefix = "hyu-vpnc-wrapperd: "
+        if not normalized.startswith(prefix):
+            return None
+        detail = normalized[len(prefix) :]
+        if detail == "bad helper configuration":
+            return "network-script-bad-configuration"
+        if detail in {"recorded process did not match live process", "session already exists"}:
+            return "network-script-state-mismatch"
+        if detail == "unauthorized invocation" or detail.startswith(("insecure path: ", "forbidden path: ")):
+            return "network-script-security-failure"
+        if detail.startswith("teardown incomplete: "):
+            return "network-script-teardown-incomplete"
+        return "network-script-failed"
 
 
 def load_connector_runtime_config(
@@ -521,12 +557,17 @@ class PromptSession:
         if self.stdout is not None:
             self.stdout.write(chunk)
             self.stdout.flush()
-        if self.event_sink is not None:
-            try:
-                for event in self.event_parser.feed(chunk):
+        try:
+            events = self.event_parser.feed(chunk)
+            if self.event_sink is not None:
+                for event in events:
                     self.event_sink(event)
-            except Exception:
-                raise ConnectorProtocolError("connector event sink failed") from None
+            if any(event.kind in NETWORK_SCRIPT_EVENT_KINDS for event in events):
+                raise ConnectorProtocolError("connector network script failed")
+        except ConnectorProtocolError:
+            raise
+        except Exception:
+            raise ConnectorProtocolError("connector event sink failed") from None
 
     def _terminate_child(self, signum: int) -> None:
         proc = self._proc

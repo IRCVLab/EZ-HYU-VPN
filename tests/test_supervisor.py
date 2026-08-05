@@ -1286,6 +1286,99 @@ class SupervisorControlTests(unittest.TestCase):
             self.assertNotIn("CANARY", raw)
             self.assertNotIn("xxxx", raw)
 
+    def test_network_script_error_disables_retry_and_cannot_be_overwritten_by_connected(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            supervisor = Supervisor(
+                isolated_supervisor_config(self, status_path=str(status_path), preference_path=str(pref_path)),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+
+            supervisor.apply_connector_event_line('{"schema_version":1,"event":"network-script-state-mismatch","timestamp":"2026-08-05T01:00:00Z"}')
+            supervisor.apply_connector_event_line('{"schema_version":1,"event":"connected","timestamp":"2026-08-05T01:00:01Z"}')
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(status.state, "error")
+            self.assertEqual(status.error_code, "NETWORK_SCRIPT_STATE_MISMATCH")
+            self.assertFalse(status.automatic_reconnect_enabled)
+            self.assertFalse(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
+
+    def test_network_script_error_from_child_remains_error_after_child_exit(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            release_reader = threading.Event()
+
+            class DelayedEventStream:
+                def __init__(self):
+                    self._emitted = False
+
+                def readline(self, _size=-1):
+                    if self._emitted:
+                        return ""
+                    release_reader.wait(1)
+                    self._emitted = True
+                    return '{"schema_version":1,"event":"network-script-bad-configuration","timestamp":"2026-08-05T01:00:00Z"}\n'
+
+                def close(self):
+                    return None
+
+            class FastExitProcess(FakeProcess):
+                def __init__(self):
+                    super().__init__(returncode=1)
+                    self.stdout = DelayedEventStream()
+
+                def wait(self, timeout=None):
+                    threading.Timer(0.05, release_reader.set).start()
+                    return 1
+
+            process = FastExitProcess()
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    max_iterations=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+            )
+
+            self.assertEqual(supervisor.run(), 1)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(status.state, "error")
+            self.assertEqual(status.error_code, "NETWORK_SCRIPT_BAD_CONFIGURATION")
+            self.assertFalse(status.automatic_reconnect_enabled)
+
+    def test_stale_network_script_error_is_ignored(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            supervisor = Supervisor(
+                isolated_supervisor_config(self, status_path=str(status_path), preference_path=str(pref_path)),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+            current_generation = supervisor._begin_new_generation()
+            supervisor._write_current_status(state="connecting", automatic=True)
+
+            supervisor.apply_connector_event_line(
+                '{"schema_version":1,"event":"network-script-bad-configuration","timestamp":"2026-08-05T01:00:00Z"}',
+                generation=current_generation - 1,
+            )
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(status.state, "connecting")
+            self.assertTrue(status.automatic_reconnect_enabled)
+            self.assertTrue(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

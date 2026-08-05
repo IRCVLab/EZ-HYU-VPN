@@ -135,7 +135,7 @@ class StatusProtocolTests(unittest.TestCase):
             last_successful_hip_at=None,
             tunnel_interface=None,
             next_retry_at=None,
-            error_code="HIP_FAILED",
+            error_code="NETWORK_SCRIPT_BAD_CONFIGURATION",
             backend_build_version=None,
         ))
         with tempfile.TemporaryDirectory() as tmp:

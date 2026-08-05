@@ -168,6 +168,71 @@ class ConnectorTests(unittest.TestCase):
             ["connected"],
         )
 
+    def test_wrapper_error_becomes_one_sanitized_fatal_event_and_suppresses_connected(self):
+        parser = ConnectorEventParser(now=lambda: __import__("datetime").datetime(2026, 8, 5, 1, 0, tzinfo=__import__("datetime").timezone.utc))
+
+        events = parser.feed(
+            "PASSWORD-CANARY authcookie=COOKIE-CANARY\n"
+            "hyu-vpnc-wrapperd: bad helper configuration\n"
+            "ESP session established with server\n"
+        )
+
+        self.assertEqual([event.kind for event in events], ["network-script-bad-configuration"])
+        self.assertEqual(parser.feed("ESP session established with server\n"), [])
+        serialized = repr(events) + events[0].to_json_line()
+        self.assertNotIn("PASSWORD-CANARY", serialized)
+        self.assertNotIn("COOKIE-CANARY", serialized)
+
+    def test_wrapper_error_categories_never_serialize_raw_detail(self):
+        cases = (
+            ("bad helper configuration", "network-script-bad-configuration"),
+            ("recorded process did not match live process", "network-script-state-mismatch"),
+            ("insecure path: /tmp/PASSWORD-CANARY", "network-script-security-failure"),
+            ("teardown incomplete: COOKIE-CANARY", "network-script-teardown-incomplete"),
+            ("child exited with status 70 USER-CANARY", "network-script-failed"),
+        )
+        for raw_detail, expected_kind in cases:
+            with self.subTest(raw_detail=raw_detail):
+                parser = ConnectorEventParser(
+                    now=lambda: __import__("datetime").datetime(
+                        2026, 8, 5, 1, 0, tzinfo=__import__("datetime").timezone.utc
+                    )
+                )
+                events = parser.feed(f"hyu-vpnc-wrapperd: {raw_detail}\n")
+
+                self.assertEqual([event.kind for event in events], [expected_kind])
+                serialized = events[0].to_json_line()
+                for forbidden in (raw_detail, "/tmp", "PASSWORD-CANARY", "COOKIE-CANARY", "USER-CANARY"):
+                    self.assertNotIn(forbidden, serialized)
+
+    def test_wrapper_error_terminates_child_and_returns_redacted_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "helper.json"
+            env = {"FAKE_OPENCONNECT_MARKER": str(marker), "FAKE_OPENCONNECT_MODE": "network_script_error"}
+            stderr = mock.Mock()
+            events = []
+            session = PromptSession(
+                [sys.executable, str(FAKE_OPENCONNECT)],
+                password="PASSWORD-CANARY",
+                totp_provider=mock.Mock(),
+                environ=env,
+                stdout=None,
+                stderr=stderr,
+                event_sink=events.append,
+                terminate_timeout=1,
+            )
+
+            rc = session.run()
+            recorded = json.loads(marker.read_text(encoding="utf-8"))
+
+        self.assertEqual(rc, 1)
+        self.assertEqual([event.kind for event in events], ["network-script-state-mismatch"])
+        self.assertEqual(recorded.get("signal"), signal.SIGTERM)
+        written = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("event channel failed", written.lower())
+        for secret in ("PASSWORD-CANARY", "COOKIE-CANARY", "USER-CANARY"):
+            self.assertNotIn(secret, repr(events) + written)
+
     def test_prompt_session_sends_sanitized_events_without_forwarding_raw_output(self):
         with tempfile.TemporaryDirectory() as td:
             marker = Path(td) / "helper.json"

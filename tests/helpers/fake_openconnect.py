@@ -50,6 +50,12 @@ elif mode == "sleep":
 elif mode == "error":
     write("fatal authentication error\n")
     raise SystemExit(5)
+elif mode == "network_script_error":
+    read_line()
+    write("hyu-vpnc-wrapperd: recorded process did not match live process\n")
+    write("PASSWORD-CANARY authcookie=COOKIE-CANARY USER-CANARY\n")
+    while True:
+        time.sleep(0.1)
 elif mode == "eof_after_password":
     read_line()
     raise SystemExit(4)
