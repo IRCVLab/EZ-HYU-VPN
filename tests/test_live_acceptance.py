@@ -138,6 +138,13 @@ class LiveAcceptanceScriptTests(unittest.TestCase):
         self.assertIn("signal_owned_openconnect_group HUP", text)
         self.assertIn("OWNED_OPENCONNECT_PGID", text)
 
+    def test_route_cleanup_check_normalizes_wascloned_route_get_cache(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("normalized_route_identity", text)
+        self.assertIn("WASCLONED", text)
+        self.assertNotIn('cmp -s "$STATE_DIR/native-disconnected/protected-route.txt" "$current"', text)
+
 
 if __name__ == "__main__":
     unittest.main()

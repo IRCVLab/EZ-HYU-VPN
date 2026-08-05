@@ -1263,6 +1263,60 @@ class SupervisorControlTests(unittest.TestCase):
             self.assertEqual(status.error_code, "REPAIR_REQUIRED")
             self.assertNotIn("SECRET", status_path.read_text(encoding="utf-8"))
 
+    def test_second_disconnect_repairs_inactive_repair_required_state_and_clears_sticky_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            calls = []
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+
+            def runner(argv, timeout):
+                calls.append(tuple(argv))
+                if argv[-1] == "stop":
+                    return CommandResult(tuple(argv), 1, "", "stop failed")
+                if argv[-1] == "repair":
+                    return CommandResult(tuple(argv), 0, "", "")
+                raise AssertionError(argv)
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(self, lock_path=str(Path(td) / "lock"), status_path=str(status_path), preference_path=str(pref_path), helper_path="/helper"),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=runner,
+            )
+
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (True, None))
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(calls, [("/usr/bin/sudo", "-n", "/helper", "stop"), ("/usr/bin/sudo", "-n", "/helper", "repair")])
+            self.assertEqual(status.state, "disabled")
+            self.assertIsNone(status.error_code)
+            self.assertFalse(status.automatic_reconnect_enabled)
+
+    def test_second_disconnect_keeps_repair_required_when_inactive_repair_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            calls = []
+            status_path = Path(td) / "status.json"
+
+            def runner(argv, timeout):
+                calls.append(tuple(argv))
+                return CommandResult(tuple(argv), 1, "", "failed")
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(self, lock_path=str(Path(td) / "lock"), status_path=str(status_path), preference_path=str(Path(td) / "auto.json"), helper_path="/helper"),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=runner,
+            )
+
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (False, "REPAIR_REQUIRED"))
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(calls, [("/usr/bin/sudo", "-n", "/helper", "stop"), ("/usr/bin/sudo", "-n", "/helper", "repair")])
+            self.assertEqual(status.state, "error")
+            self.assertEqual(status.error_code, "REPAIR_REQUIRED")
+
     def test_connector_events_update_status_without_persisting_raw_or_secret_output(self):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"

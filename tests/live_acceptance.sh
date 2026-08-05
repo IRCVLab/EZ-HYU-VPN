@@ -374,10 +374,24 @@ wait_for_live_acceptance() {
     return 1
 }
 
+normalized_route_identity() {
+    route_file=$1
+    /usr/bin/awk -v endpoint="$PROTECTED_ENDPOINT" '
+        /^[[:space:]]*destination:/ {destination=$2}
+        /^[[:space:]]*gateway:/ {gateway=$2}
+        /^[[:space:]]*interface:/ {interface=$2}
+        /^[[:space:]]*flags:/ {flags=$0}
+        END {
+            if (destination == endpoint && flags ~ /WASCLONED/) { destination = "default" }
+            printf "%s|%s|%s\n", destination, gateway, interface
+        }
+    ' "$route_file"
+}
+
 route_matches_snapshot() {
     current="$STATE_DIR/current-route.txt"
     /sbin/route -n get "$PROTECTED_ENDPOINT" > "$current" 2>&1 || true
-    /usr/bin/cmp -s "$STATE_DIR/native-disconnected/protected-route.txt" "$current"
+    [ "$(normalized_route_identity "$STATE_DIR/native-disconnected/protected-route.txt")" = "$(normalized_route_identity "$current")" ]
 }
 
 dns_matches_snapshot() {

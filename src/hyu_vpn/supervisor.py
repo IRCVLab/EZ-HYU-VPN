@@ -241,7 +241,8 @@ class Supervisor:
                 self._enter_repair_required(automatic=False if disable_auto else None)
                 return False, "REPAIR_REQUIRED"
             if self._repair_required and self._no_user_connector_lifecycle_active():
-                self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=False if disable_auto else None)
+                if self._repair_inactive_helper_state_locked(automatic=False if disable_auto else None):
+                    return True, None
                 return False, "REPAIR_REQUIRED"
             if not self._stop_helper_and_teardown_user_connector(automatic=False if disable_auto else None):
                 self._enter_repair_required(automatic=False if disable_auto else None)
@@ -260,6 +261,17 @@ class Supervisor:
         self._repair_required = True
         self._invalidate_active_generation()
         self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+
+    def _repair_inactive_helper_state_locked(self, *, automatic: Optional[bool] = None) -> bool:
+        result = self.command_runner(["/usr/bin/sudo", "-n", self.config.helper_path, "repair"], self.config.helper_timeout)
+        if result.returncode != 0:
+            self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+            return False
+        self._repair_required = False
+        self._connector_failure_code = None
+        self._connector_repair_pending = False
+        self._write_current_status(state="disabled", automatic=automatic)
+        return True
 
     def _invalidate_active_generation(self) -> None:
         with self._state_changed:
