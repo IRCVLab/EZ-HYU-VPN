@@ -13,6 +13,9 @@ public enum HelperError: Error, Equatable, CustomStringConvertible {
     case processMismatch
     case sessionExists
     case badConfiguration
+    case networkPreflightDrift
+    case networkUpstreamFailed
+    case networkPostconditionFailed
     case teardownIncomplete(String)
     case childExited(Int32)
 
@@ -26,6 +29,9 @@ public enum HelperError: Error, Equatable, CustomStringConvertible {
         case .processMismatch: "recorded process did not match live process"
         case .sessionExists: "session already exists"
         case .badConfiguration: "bad helper configuration"
+        case .networkPreflightDrift: "network preflight drift"
+        case .networkUpstreamFailed: "network upstream failed"
+        case .networkPostconditionFailed: "network postcondition failed"
         case .teardownIncomplete(let detail): "teardown incomplete: \(detail)"
         case .childExited(let status): "child exited with status \(status)"
         }

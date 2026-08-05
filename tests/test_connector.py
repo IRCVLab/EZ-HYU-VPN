@@ -128,7 +128,11 @@ class ConnectorTests(unittest.TestCase):
         hostile = "PASSWORD-CANARY authcookie=COOKIE-CANARY username=USER-CANARY\n"
 
         first = parser.feed(hostile + "HIP report submitted successfully\nSession authentication will exp")
-        second = parser.feed("ire at Tue, 04 Aug 2026 21:59:30 KST\nESP session established with server\n")
+        second = parser.feed(
+            "ire at Tue, 04 Aug 2026 21:59:30 KST\n"
+            "ESP session established with server\n"
+            "hyu-vpnc-wrapperd-event: network configuration verified\n"
+        )
 
         self.assertEqual([event.kind for event in first + second], ["hip-succeeded", "session-expiry", "connected"])
         serialized = repr(first + second)
@@ -163,8 +167,9 @@ class ConnectorTests(unittest.TestCase):
         parser = ConnectorEventParser()
 
         self.assertEqual(parser.feed("connected\n"), [])
+        self.assertEqual(parser.feed("ESP session established with server\n"), [])
         self.assertEqual(
-            [event.kind for event in parser.feed("ESP session established with server\n")],
+            [event.kind for event in parser.feed("hyu-vpnc-wrapperd-event: network configuration verified\n")],
             ["connected"],
         )
 
@@ -174,11 +179,11 @@ class ConnectorTests(unittest.TestCase):
         events = parser.feed(
             "PASSWORD-CANARY authcookie=COOKIE-CANARY\n"
             "hyu-vpnc-wrapperd: bad helper configuration\n"
-            "ESP session established with server\n"
+            "hyu-vpnc-wrapperd-event: network configuration verified\n"
         )
 
         self.assertEqual([event.kind for event in events], ["network-script-bad-configuration"])
-        self.assertEqual(parser.feed("ESP session established with server\n"), [])
+        self.assertEqual(parser.feed("hyu-vpnc-wrapperd-event: network configuration verified\n"), [])
         serialized = repr(events) + events[0].to_json_line()
         self.assertNotIn("PASSWORD-CANARY", serialized)
         self.assertNotIn("COOKIE-CANARY", serialized)
@@ -190,6 +195,9 @@ class ConnectorTests(unittest.TestCase):
             ("insecure path: /tmp/PASSWORD-CANARY", "network-script-security-failure"),
             ("teardown incomplete: COOKIE-CANARY", "network-script-teardown-incomplete"),
             ("child exited with status 70 USER-CANARY", "network-script-failed"),
+            ("network preflight drift", "network-script-preflight-drift"),
+            ("network upstream failed", "network-script-upstream-failed"),
+            ("network postcondition failed", "network-script-postcondition-failed"),
         )
         for raw_detail, expected_kind in cases:
             with self.subTest(raw_detail=raw_detail):

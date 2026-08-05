@@ -1356,6 +1356,140 @@ class SupervisorControlTests(unittest.TestCase):
             self.assertEqual(status.error_code, "NETWORK_SCRIPT_BAD_CONFIGURATION")
             self.assertFalse(status.automatic_reconnect_enabled)
 
+    def test_network_script_error_repairs_after_child_exit_without_overwriting_diagnostic(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            process = FakeProcess(returncode=1)
+            process.stdout = io.StringIO('{"schema_version":1,"event":"network-script-postcondition-failed","timestamp":"2026-08-05T01:00:00Z"}\n')
+            commands = []
+
+            def runner(argv, timeout):
+                commands.append((tuple(argv), timeout))
+                return CommandResult(tuple(argv), 0, "", "")
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    helper_path="/helper",
+                    max_iterations=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+                command_runner=runner,
+            )
+
+            self.assertEqual(supervisor.run(), 1)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(commands, [(("/usr/bin/sudo", "-n", "/helper", "repair"), 5.0)])
+            self.assertEqual(status.state, "error")
+            self.assertEqual(status.error_code, "NETWORK_SCRIPT_POSTCONDITION_FAILED")
+            self.assertFalse(status.automatic_reconnect_enabled)
+
+    def test_network_script_error_enters_repair_required_when_automatic_repair_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            process = FakeProcess(returncode=1)
+            process.stdout = io.StringIO('{"schema_version":1,"event":"network-script-upstream-failed","timestamp":"2026-08-05T01:00:00Z"}\n')
+            commands = []
+
+            def runner(argv, timeout):
+                commands.append(tuple(argv))
+                return CommandResult(tuple(argv), 1, "", "")
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    helper_path="/helper",
+                    max_iterations=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+                command_runner=runner,
+            )
+
+            self.assertEqual(supervisor.run(), 1)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(commands, [("/usr/bin/sudo", "-n", "/helper", "repair")])
+            self.assertEqual(status.state, "error")
+            self.assertEqual(status.error_code, "REPAIR_REQUIRED")
+            self.assertFalse(status.automatic_reconnect_enabled)
+            self.assertIsNone(status.next_retry_at)
+
+    def test_explicit_connect_after_fatal_event_cannot_skip_post_child_repair(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            fatal_processed = threading.Event()
+            release_eof = threading.Event()
+            commands = []
+
+            class ControlledFailureStream:
+                def __init__(self):
+                    self.emitted = False
+
+                def readline(self, _size=-1):
+                    if not self.emitted:
+                        self.emitted = True
+                        return '{"schema_version":1,"event":"network-script-postcondition-failed","timestamp":"2026-08-05T01:00:00Z"}\n'
+                    release_eof.wait(2)
+                    return ""
+
+                def close(self):
+                    release_eof.set()
+
+            process = FakeProcess(returncode=1)
+            process.stdout = ControlledFailureStream()
+
+            def runner(argv, timeout):
+                commands.append(tuple(argv))
+                return CommandResult(tuple(argv), 0, "", "")
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    helper_path="/helper",
+                    max_iterations=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+                command_runner=runner,
+            )
+            original_apply = supervisor.apply_connector_event_line
+
+            def observed_apply(line, *, generation=None):
+                original_apply(line, generation=generation)
+                if "network-script-postcondition-failed" in line:
+                    fatal_processed.set()
+
+            supervisor.apply_connector_event_line = observed_apply
+            result = []
+            thread = threading.Thread(target=lambda: result.append(supervisor.run()))
+            thread.start()
+            self.assertTrue(fatal_processed.wait(2), "fatal connector event not processed")
+
+            self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
+            release_eof.set()
+            thread.join(3)
+
+            self.assertFalse(thread.is_alive(), "supervisor did not finish")
+            self.assertEqual(result, [1])
+            self.assertEqual(commands, [("/usr/bin/sudo", "-n", "/helper", "repair")])
+
     def test_stale_network_script_error_is_ignored(self):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"

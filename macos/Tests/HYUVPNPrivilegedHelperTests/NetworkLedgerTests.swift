@@ -258,6 +258,58 @@ esac
         #expect(saved.status == "repair-required")
     }
 
+    @Test func zeroExitWithoutAppliedTunnelRoutesFailsPostcondition() throws {
+        let dir = try temporaryDirectory()
+        let ledger = dir.appendingPathComponent("nonceabc123.ledger")
+        let upstream = Round10CountingUpstream()
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
+        let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: Round10DriftTools(), upstream: upstream)
+
+        do {
+            try runner.run(reason: "connect", nonce: "nonceabc123", environment: round10ValidEnv(ledger: ledger), suppliedLedgerPath: ledger)
+            Issue.record("zero-exit upstream without applied routes must fail")
+        } catch let error as HelperError {
+            #expect(error == .networkPostconditionFailed)
+        }
+
+        #expect(upstream.calls == 1)
+        let saved = try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: "nonceabc123")
+        #expect(saved.status == "repair-required")
+        #expect(saved.tunnelInterface == nil)
+    }
+
+    @Test func sanitizedEnvironmentPreservesNumericVPNPIDAndSynthesizesIPv4Mask() {
+        let sanitized = NetworkWrapperRunner.sanitizedEnvironment([
+            "VPNPID": "12345",
+            "CISCO_SPLIT_INC": "1",
+            "CISCO_SPLIT_INC_0_ADDR": "10.0.0.0",
+            "CISCO_SPLIT_INC_0_MASKLEN": "8",
+            "PASSWORD": "CANARY"
+        ])
+
+        #expect(sanitized["VPNPID"] == "12345")
+        #expect(sanitized["CISCO_SPLIT_INC_0_MASK"] == "255.0.0.0")
+        #expect(sanitized["CISCO_SPLIT_INC_0_MASKLEN"] == nil)
+        #expect(sanitized["PASSWORD"] == nil)
+        #expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "../CANARY"])["VPNPID"] == nil)
+        #expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "0"])["VPNPID"] == nil)
+        #expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "0001"])["VPNPID"] == nil)
+        #expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "2147483648"])["VPNPID"] == nil)
+        #expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "2147483647"])["VPNPID"] == "2147483647")
+    }
+
+    @Test func sanitizedEnvironmentDropsMaskLengthWhenCanonicalMaskExists() {
+        let sanitized = NetworkWrapperRunner.sanitizedEnvironment([
+            "CISCO_SPLIT_INC": "1",
+            "CISCO_SPLIT_INC_0_ADDR": "10.0.0.0",
+            "CISCO_SPLIT_INC_0_MASK": "255.0.0.0",
+            "CISCO_SPLIT_INC_0_MASKLEN": "$(CANARY)"
+        ])
+
+        #expect(sanitized["CISCO_SPLIT_INC_0_MASK"] == "255.0.0.0")
+        #expect(sanitized["CISCO_SPLIT_INC_0_MASKLEN"] == nil)
+    }
+
     @Test func splitInputsRequireCanonicalIPv4AndContiguousMasks() throws {
         let dir = try temporaryDirectory()
         let ledger = dir.appendingPathComponent("nonceabc123.ledger")

@@ -48,6 +48,8 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("repair-foreign-mismatch-preserves-evidence", testRepairForeignMismatchPreservesEvidence),
                 ("network-preinit-without-splits-records-baseline", testPreInitWithoutSplitsRecordsBaseline),
                 ("network-connect-expands-preinit-route-intent", testConnectExpandsPreInitRouteIntent),
+                ("network-zero-exit-without-routes-fails-postcondition", testZeroExitWithoutRoutesFailsPostcondition),
+                ("network-sanitized-env-preserves-vpnpid-and-mask", testSanitizedEnvironmentPreservesVPNPIDAndMask),
                 ("network-preinit-ledger-drift-blocks-upstream", testPreInitLedgerDriftBlocksUpstream),
                 ("network-strict-ipv4-split-inputs", testStrictIPv4SplitInputs),
                 ("ledger-schema-route-records-and-resolver-order", testLedgerSchemaRouteRecordsAndResolverOrder),
@@ -388,6 +390,48 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
         try expect(saved.routeRecords.count == 2, "connect expanded protected and gateway routes")
         try expect(saved.tunnelInterface == "utun7", "connect recorded tunnel interface")
+    }
+
+    static func testZeroExitWithoutRoutesFailsPostcondition() throws {
+        let fixture = try HarnessNetworkFixture()
+        do {
+            try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: fixture.validEnv(), suppliedLedgerPath: fixture.ledger)
+            throw HarnessFailure(description: "zero-exit upstream without routes was accepted")
+        } catch let error as HelperError {
+            try expect(error == .networkPostconditionFailed, "postcondition error preserved")
+        }
+        try expect(fixture.upstream.calls == 1, "upstream called once")
+        let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+        try expect(saved.status == "repair-required", "missing routes require repair")
+        try expect(saved.tunnelInterface == nil, "missing tunnel not recorded as success")
+    }
+
+    static func testSanitizedEnvironmentPreservesVPNPIDAndMask() throws {
+        let sanitized = NetworkWrapperRunner.sanitizedEnvironment([
+            "VPNPID": "12345",
+            "CISCO_SPLIT_INC": "1",
+            "CISCO_SPLIT_INC_0_ADDR": "10.0.0.0",
+            "CISCO_SPLIT_INC_0_MASKLEN": "8",
+            "PASSWORD": "CANARY"
+        ])
+        try expect(sanitized["VPNPID"] == "12345", "numeric VPNPID preserved")
+        try expect(sanitized["CISCO_SPLIT_INC_0_MASK"] == "255.0.0.0", "mask synthesized from mask length")
+        try expect(sanitized["CISCO_SPLIT_INC_0_MASKLEN"] == nil, "mask length removed after canonicalization")
+        try expect(sanitized["PASSWORD"] == nil, "secret key stripped")
+        try expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "../CANARY"])["VPNPID"] == nil, "unsafe VPNPID stripped")
+        try expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "0"])["VPNPID"] == nil, "zero VPNPID stripped")
+        try expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "0001"])["VPNPID"] == nil, "non-canonical VPNPID stripped")
+        try expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "2147483648"])["VPNPID"] == nil, "out-of-range VPNPID stripped")
+        try expect(NetworkWrapperRunner.sanitizedEnvironment(["VPNPID": "2147483647"])["VPNPID"] == "2147483647", "maximum pid_t VPNPID preserved")
+
+        let conflictingMask = NetworkWrapperRunner.sanitizedEnvironment([
+            "CISCO_SPLIT_INC": "1",
+            "CISCO_SPLIT_INC_0_ADDR": "10.0.0.0",
+            "CISCO_SPLIT_INC_0_MASK": "255.0.0.0",
+            "CISCO_SPLIT_INC_0_MASKLEN": "$(CANARY)"
+        ])
+        try expect(conflictingMask["CISCO_SPLIT_INC_0_MASK"] == "255.0.0.0", "canonical mask preserved")
+        try expect(conflictingMask["CISCO_SPLIT_INC_0_MASKLEN"] == nil, "conflicting raw mask length stripped")
     }
 
     static func testStrictIPv4SplitInputs() throws {

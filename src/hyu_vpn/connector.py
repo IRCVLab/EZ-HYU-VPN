@@ -45,6 +45,9 @@ NETWORK_SCRIPT_EVENT_KINDS = frozenset(
         "network-script-state-mismatch",
         "network-script-security-failure",
         "network-script-teardown-incomplete",
+        "network-script-preflight-drift",
+        "network-script-upstream-failed",
+        "network-script-postcondition-failed",
         "network-script-failed",
     }
 )
@@ -135,7 +138,7 @@ class ConnectorEventParser:
     """Extract only fixed, non-secret lifecycle events from bounded progress text."""
 
     _HIP_SUCCESS = "HIP report submitted successfully"
-    _CONNECTED = ("ESP session established with server",)
+    _CONNECTED = ("hyu-vpnc-wrapperd-event: network configuration verified",)
 
     def __init__(self, *, now=lambda: datetime.now(timezone.utc), max_buffer_bytes: int = 4096) -> None:
         if isinstance(max_buffer_bytes, bool) or not isinstance(max_buffer_bytes, int) or max_buffer_bytes <= 0 or max_buffer_bytes > 65536:
@@ -191,6 +194,12 @@ class ConnectorEventParser:
             return "network-script-security-failure"
         if detail.startswith("teardown incomplete: "):
             return "network-script-teardown-incomplete"
+        if detail == "network preflight drift":
+            return "network-script-preflight-drift"
+        if detail == "network upstream failed":
+            return "network-script-upstream-failed"
+        if detail == "network postcondition failed":
+            return "network-script-postcondition-failed"
         return "network-script-failed"
 
 

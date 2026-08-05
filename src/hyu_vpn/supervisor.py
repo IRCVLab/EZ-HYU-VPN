@@ -29,6 +29,9 @@ _NETWORK_SCRIPT_ERROR_CODES = {
     "network-script-state-mismatch": "NETWORK_SCRIPT_STATE_MISMATCH",
     "network-script-security-failure": "NETWORK_SCRIPT_SECURITY_FAILURE",
     "network-script-teardown-incomplete": "NETWORK_SCRIPT_TEARDOWN_INCOMPLETE",
+    "network-script-preflight-drift": "NETWORK_SCRIPT_PREFLIGHT_DRIFT",
+    "network-script-upstream-failed": "NETWORK_SCRIPT_UPSTREAM_FAILED",
+    "network-script-postcondition-failed": "NETWORK_SCRIPT_POSTCONDITION_FAILED",
     "network-script-failed": "NETWORK_SCRIPT_FAILED",
 }
 
@@ -162,6 +165,7 @@ class Supervisor:
         self._command_lock = threading.Lock()
         self._repair_required = False
         self._connector_failure_code: Optional[str] = None
+        self._connector_repair_pending = False
         self._status = self._base_status("disabled")
         self.policy = ReconnectPolicy()
         self._stop_requested = False
@@ -244,6 +248,7 @@ class Supervisor:
                 return False, "REPAIR_REQUIRED"
             self._repair_required = False
             self._connector_failure_code = None
+            self._connector_repair_pending = False
             self._write_current_status(state="disabled", automatic=False if disable_auto else None)
             return True, None
         finally:
@@ -340,6 +345,7 @@ class Supervisor:
                 error_code = _NETWORK_SCRIPT_ERROR_CODES[event.kind]
                 self.preference.write(False)
                 self._connector_failure_code = error_code
+                self._connector_repair_pending = True
                 self._active_generation = None
                 self._write_current_status(state="error", automatic=False, error_code=error_code)
                 self._state_changed.notify_all()
@@ -497,11 +503,24 @@ class Supervisor:
                     self._state_changed.notify_all()
                 if self._stop_requested:
                     break
-                if self._connector_failure_code is not None:
-                    self._write_current_status(state="error", automatic=False, error_code=self._connector_failure_code)
+                with self._state_lock:
+                    connector_repair_pending = self._connector_repair_pending
+                    connector_failure_code = self._connector_failure_code
+                if connector_repair_pending:
+                    repair = self.command_runner(
+                        ["/usr/bin/sudo", "-n", self.config.helper_path, "repair"],
+                        self.config.helper_timeout,
+                    )
+                    with self._state_lock:
+                        self._connector_repair_pending = False
+                    if repair.returncode != 0:
+                        self._enter_repair_required(automatic=False)
+                    elif connector_failure_code is not None:
+                        self._write_current_status(state="error", automatic=False, error_code=connector_failure_code)
                     if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
                         break
-                    self._wait_for_control_or_stop(self.config.conflict_poll_interval)
+                    if connector_failure_code is not None or repair.returncode != 0:
+                        self._wait_for_control_or_stop(self.config.conflict_poll_interval)
                     continue
                 if not self.preference.read(default=False):
                     self._write_current_status(state="disabled", automatic=False)

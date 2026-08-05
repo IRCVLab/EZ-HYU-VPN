@@ -8,6 +8,9 @@ import HYUVPNPrivilegedHelper
             let env = ProcessInfo.processInfo.environment
             guard let reason = env["reason"], let nonce = env["HYU_NONCE"] else { throw HelperError.badConfiguration }
             try NetworkWrapperRunner().run(reason: reason, nonce: nonce, environment: env, suppliedLedgerPath: env["HYU_SESSION_LEDGER"].map { URL(fileURLWithPath: $0) })
+            if reason == "connect" {
+                FileHandle.standardOutput.write(Data("hyu-vpnc-wrapperd-event: network configuration verified\n".utf8))
+            }
         } catch {
             FileHandle.standardError.write(Data("hyu-vpnc-wrapperd: \(error)\n".utf8))
             exit(70)

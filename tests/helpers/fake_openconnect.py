@@ -43,6 +43,7 @@ if mode == "helper_header":
     write("HIP report submitted successfully\n")
     write("Session authentication will expire at Tue, 04 Aug 2026 21:59:30 KST\n")
     write("ESP session established with server\n")
+    write("hyu-vpnc-wrapperd-event: network configuration verified\n")
     raise SystemExit(0)
 elif mode == "sleep":
     while True:
