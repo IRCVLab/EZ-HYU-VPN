@@ -127,7 +127,7 @@ class ConnectorTests(unittest.TestCase):
         parser = ConnectorEventParser()
         hostile = "PASSWORD-CANARY authcookie=COOKIE-CANARY username=USER-CANARY\n"
 
-        first = parser.feed(hostile + "HIP report submitted successfully\nSession authentication will exp")
+        first = parser.feed(hostile + "HIP report submitted successfully.\nSession authentication will exp")
         second = parser.feed(
             "ire at Tue, 04 Aug 2026 21:59:30 KST\n"
             "ESP session established with server\n"

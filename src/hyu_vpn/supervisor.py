@@ -184,10 +184,13 @@ class Supervisor:
 
     def handle_control_command(self, command: str) -> tuple[bool, Optional[str]]:
         with self._command_lock:
+            repaired_before_command = False
             if self._repair_required and command in {"automatic-on", "connect", "reconnect"}:
                 self.preference.write(False)
-                self._write_current_status(state="error", automatic=False, error_code="REPAIR_REQUIRED")
-                return False, "REPAIR_REQUIRED"
+                ok, error = self._disconnect_locked(disable_auto=False)
+                if not ok:
+                    return ok, error
+                repaired_before_command = True
             if command == "automatic-on":
                 self._connector_failure_code = None
                 self.preference.write(True)
@@ -209,17 +212,16 @@ class Supervisor:
                 return result
             if command == "reconnect":
                 self.preference.write(False)
-                ok, error = self._disconnect_locked(disable_auto=False)
-                if not ok:
-                    return ok, error
+                if not repaired_before_command:
+                    ok, error = self._disconnect_locked(disable_auto=False)
+                    if not ok:
+                        return ok, error
                 self._connector_failure_code = None
                 self.preference.write(True)
                 self._write_current_status(state="connecting", automatic=True)
                 self._control_event.set()
                 return True, None
             if command == "connect":
-                if self._repair_required:
-                    return False, "REPAIR_REQUIRED"
                 self._connector_failure_code = None
                 self.preference.write(True)
                 if self._child is None or self._child.poll() is not None:
@@ -260,12 +262,15 @@ class Supervisor:
     def _enter_repair_required(self, *, automatic: Optional[bool] = None) -> None:
         self._repair_required = True
         self._invalidate_active_generation()
-        self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+        self._write_current_status(state="error", error_code=self._repair_status_error_code(), automatic=automatic)
+
+    def _repair_status_error_code(self) -> str:
+        return self._connector_failure_code or "REPAIR_REQUIRED"
 
     def _repair_inactive_helper_state_locked(self, *, automatic: Optional[bool] = None) -> bool:
         result = self.command_runner(["/usr/bin/sudo", "-n", self.config.helper_path, "repair"], self.config.helper_timeout)
         if result.returncode != 0:
-            self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+            self._write_current_status(state="error", error_code=self._repair_status_error_code(), automatic=automatic)
             return False
         self._repair_required = False
         self._connector_failure_code = None
@@ -281,13 +286,13 @@ class Supervisor:
     def _stop_helper_and_teardown_user_connector(self, *, automatic: Optional[bool] = None, keep_repair: bool = False) -> bool:
         with self._teardown_lock:
             if keep_repair is False and self._repair_required and self._no_user_connector_lifecycle_active():
-                self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+                self._write_current_status(state="error", error_code=self._repair_status_error_code(), automatic=automatic)
                 return False
             result = self.command_runner(["/usr/bin/sudo", "-n", self.config.helper_path, "stop"], self.config.helper_timeout)
             helper_ok = result.returncode == 0
             reap_ok = self._reap_user_connector_only()
             if keep_repair and self._repair_required:
-                self._write_current_status(state="error", error_code="REPAIR_REQUIRED", automatic=automatic)
+                self._write_current_status(state="error", error_code=self._repair_status_error_code(), automatic=automatic)
             return helper_ok and reap_ok
 
     def _no_user_connector_lifecycle_active(self) -> bool:
@@ -436,7 +441,7 @@ class Supervisor:
             self._start_control_server()
             while not self._stop_requested:
                 if self._repair_required:
-                    self._write_current_status(state="error", error_code="REPAIR_REQUIRED")
+                    self._write_current_status(state="error", error_code=self._repair_status_error_code())
                     self._wait_for_control_or_stop(self.config.conflict_poll_interval)
                     continue
                 if self._connector_failure_code is not None:

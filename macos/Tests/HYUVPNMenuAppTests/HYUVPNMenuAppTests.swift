@@ -89,6 +89,24 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
             #expect(projected.statusItemTitle == title)
         }
     }
+
+    @Test func errorStateOffersAnExplicitRepairAndDisableAction() throws {
+        var document = sampleDocument()
+        document["state"] = "error"
+        document["automatic_reconnect_enabled"] = false
+        document["connected_at"] = NSNull()
+        document["session_expires_at"] = NSNull()
+        document["last_successful_hip_at"] = NSNull()
+        document["tunnel_interface"] = NSNull()
+        document["error_code"] = "NETWORK_SCRIPT_POSTCONDITION_FAILED"
+        let status = try VPNStatusDecoder.decode(try json(document))
+
+        let menu = MenuModel.make(status: status, notificationsEnabled: false, diagnostics: "")
+
+        #expect(menu[.disconnect]?.isEnabled == true)
+        #expect(menu[.disconnect]?.title == "Repair and Disable")
+        #expect(menu[.disconnect]?.command == .disconnect)
+    }
 }
 
 @Suite struct ControlNotificationAndWatcherTests {

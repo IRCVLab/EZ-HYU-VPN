@@ -452,6 +452,7 @@ public struct NetworkWrapperRunner {
 
     private func connectLike(reason: String, nonce: String, ledgerPath: URL, environment: [String: String]) throws {
         let store = NetworkLedgerStore(path: ledgerPath, expectedOwnerUID: expectedOwnerUID)
+        let tunnelInterface = try validatedTunnelInterface(environment["TUNDEV"])
         if reason == "pre-init" {
             let baseline: NetworkLedger
             if FileManager.default.fileExists(atPath: ledgerPath.path) {
@@ -490,14 +491,14 @@ public struct NetworkWrapperRunner {
             if baseline.routeRecords.isEmpty {
                 let current = try snapshot(destinations: [], environment: [:])
                 guard preflightSafe(ledger: baseline, current: current) else { try store.save(baseline.withStatus("repair-required")); throw HelperError.networkPreflightDrift }
-                baseline = try makeBaseline(nonce: nonce, destinations: destinations)
+                baseline = try makeBaseline(nonce: nonce, destinations: destinations, tunnelInterface: tunnelInterface)
                 try store.save(baseline)
             }
         } else {
-            baseline = try makeBaseline(nonce: nonce, destinations: destinations)
+            baseline = try makeBaseline(nonce: nonce, destinations: destinations, tunnelInterface: tunnelInterface)
             try store.save(baseline)
         }
-        let preflight = try snapshot(destinations: baseline.routeRecords.map { ($0.applied.destination, $0.applied.netmask ?? "") }, environment: [:])
+        let preflight = try snapshot(destinations: baseline.routeRecords.map { ($0.applied.destination, $0.applied.netmask ?? "") }, environment: environment)
         guard preflightSafe(ledger: baseline, current: preflight) else { try store.save(baseline.withStatus("repair-required")); throw HelperError.networkPreflightDrift }
         let intentLedger = try ledgerWithPersistedIntent(baseline: baseline, destinations: destinations, environment: environment)
         try store.save(intentLedger)
@@ -516,9 +517,10 @@ public struct NetworkWrapperRunner {
             throw HelperError.networkPostconditionFailed
         }
         let records = makeRouteRecords(baseline: intentLedger, after: after)
-        let postconditionSatisfied = connectPostconditionSatisfied(intent: intentLedger, after: after, expectedTunnel: environment["TUNDEV"])
+        let postconditionSatisfied = connectPostconditionSatisfied(intent: intentLedger, after: after, expectedTunnel: tunnelInterface)
         let status = code == 0 && postconditionSatisfied ? "recorded" : "repair-required"
-        let updated = NetworkLedger(schemaVersion: 1, sessionNonce: nonce, rebootIdentity: intentLedger.rebootIdentity, serviceIDBefore: intentLedger.serviceIDBefore, defaultInterfaceBefore: intentLedger.defaultInterfaceBefore, defaultRouteBefore: intentLedger.defaultRouteBefore, tunnelInterface: after.tunnelInterface.isEmpty ? nil : after.tunnelInterface, routeDeltasApplied: records.map(\.applied), routeRecords: records, dnsBefore: intentLedger.dnsBefore, dnsApplied: after.resolver, status: status, timestamp: intentLedger.timestamp)
+        let recordedTunnel = after.tunnelInterface.isEmpty ? intentLedger.tunnelInterface : after.tunnelInterface
+        let updated = NetworkLedger(schemaVersion: 1, sessionNonce: nonce, rebootIdentity: intentLedger.rebootIdentity, serviceIDBefore: intentLedger.serviceIDBefore, defaultInterfaceBefore: intentLedger.defaultInterfaceBefore, defaultRouteBefore: intentLedger.defaultRouteBefore, tunnelInterface: recordedTunnel, routeDeltasApplied: records.map(\.applied), routeRecords: records, dnsBefore: intentLedger.dnsBefore, dnsApplied: after.resolver, status: status, timestamp: intentLedger.timestamp)
         try store.save(updated)
         if code != 0 { throw HelperError.networkUpstreamFailed }
         if !postconditionSatisfied { throw HelperError.networkPostconditionFailed }
@@ -536,13 +538,17 @@ public struct NetworkWrapperRunner {
         let store = NetworkLedgerStore(path: ledgerPath, expectedOwnerUID: expectedOwnerUID)
         let ledger = try store.load(expectedNonce: nonce)
         let destinations = ledger.routeRecords.map { ($0.applied.destination, $0.applied.netmask ?? "") }
-        let preflight = try snapshot(destinations: destinations, environment: environment)
+        var snapshotEnvironment = environment
+        if snapshotEnvironment["TUNDEV"] == nil, let tunnelInterface = ledger.tunnelInterface {
+            snapshotEnvironment["TUNDEV"] = tunnelInterface
+        }
+        let preflight = try snapshot(destinations: destinations, environment: snapshotEnvironment)
         guard preflightSafe(ledger: ledger, current: preflight, allowRepairRequired: reason == "repair") else { try store.save(ledger.withStatus("repair-required")); throw HelperError.processMismatch }
         if reason == "disconnect" {
             let code = try upstream.run(reason: reason, environment: Self.sanitizedEnvironment(environment))
             if code != 0 { try store.save(ledger.withStatus("repair-required")); throw HelperError.processMismatch }
         }
-        let post = try snapshot(destinations: destinations, environment: environment)
+        let post = try snapshot(destinations: destinations, environment: snapshotEnvironment)
         let plan = repairActions(ledger: ledger, current: post)
         guard plan.safe else { try store.save(ledger.withStatus("repair-required")); throw HelperError.processMismatch }
         do {
@@ -561,7 +567,7 @@ public struct NetworkWrapperRunner {
             try store.save(ledger.withStatus("repair-required"))
             throw error
         }
-        let verified = try snapshot(destinations: destinations, environment: environment)
+        let verified = try snapshot(destinations: destinations, environment: snapshotEnvironment)
         guard baselineRestored(ledger: ledger, current: verified) else { try store.save(ledger.withStatus("repair-required")); throw HelperError.teardownIncomplete("post-repair snapshot did not match baseline") }
         try removeLedgerAndSyncDirectory(ledgerPath)
     }
@@ -569,15 +575,17 @@ public struct NetworkWrapperRunner {
     private func saveRepairRequired(store: NetworkLedgerStore, baseline: NetworkLedger, destinations: [(String, String)], environment: [String: String]) throws {
         if let current = try? snapshot(destinations: destinations, environment: environment) {
             let records = makeRouteRecords(baseline: baseline, after: current)
-            let updated = NetworkLedger(schemaVersion: 1, sessionNonce: baseline.sessionNonce, rebootIdentity: baseline.rebootIdentity, serviceIDBefore: baseline.serviceIDBefore, defaultInterfaceBefore: baseline.defaultInterfaceBefore, defaultRouteBefore: baseline.defaultRouteBefore, tunnelInterface: current.tunnelInterface.isEmpty ? nil : current.tunnelInterface, routeDeltasApplied: records.map(\.applied), routeRecords: records, dnsBefore: baseline.dnsBefore, dnsApplied: current.resolver, status: "repair-required", timestamp: baseline.timestamp)
+            let recordedTunnel = current.tunnelInterface.isEmpty ? baseline.tunnelInterface : current.tunnelInterface
+            let updated = NetworkLedger(schemaVersion: 1, sessionNonce: baseline.sessionNonce, rebootIdentity: baseline.rebootIdentity, serviceIDBefore: baseline.serviceIDBefore, defaultInterfaceBefore: baseline.defaultInterfaceBefore, defaultRouteBefore: baseline.defaultRouteBefore, tunnelInterface: recordedTunnel, routeDeltasApplied: records.map(\.applied), routeRecords: records, dnsBefore: baseline.dnsBefore, dnsApplied: current.resolver, status: "repair-required", timestamp: baseline.timestamp)
             try store.save(updated)
         } else {
             try store.save(baseline.withStatus("repair-required"))
         }
     }
 
-    private func makeBaseline(nonce: String, destinations: [(String, String)]) throws -> NetworkLedger {
-        let before = try snapshot(destinations: destinations, environment: [:])
+    private func makeBaseline(nonce: String, destinations: [(String, String)], tunnelInterface: String? = nil) throws -> NetworkLedger {
+        let snapshotEnvironment = tunnelInterface.map { ["TUNDEV": $0] } ?? [:]
+        let before = try snapshot(destinations: destinations, environment: snapshotEnvironment)
         var records: [RouteRecord] = []
         let beforeByTarget = Dictionary(uniqueKeysWithValues: before.routes.map { (routeKey($0), $0) })
         for (destination, mask) in destinations {
@@ -585,11 +593,12 @@ public struct NetworkWrapperRunner {
             let applied = RouteDelta(operation: "add", destination: destination, gateway: nil, interface: nil, netmask: mask.isEmpty ? nil : mask, protocol: "ipv4")
             records.append(RouteRecord(before: beforeRoute, applied: applied, after: beforeRoute))
         }
-        return NetworkLedger(schemaVersion: 1, sessionNonce: nonce, rebootIdentity: before.rebootIdentity, serviceIDBefore: before.serviceID, defaultInterfaceBefore: before.defaultInterface, defaultRouteBefore: before.defaultRoute, tunnelInterface: nil, routeDeltasApplied: records.map(\.applied), routeRecords: records, dnsBefore: before.resolver, dnsApplied: nil, status: "recorded", timestamp: Date())
+        return NetworkLedger(schemaVersion: 1, sessionNonce: nonce, rebootIdentity: before.rebootIdentity, serviceIDBefore: before.serviceID, defaultInterfaceBefore: before.defaultInterface, defaultRouteBefore: before.defaultRoute, tunnelInterface: tunnelInterface, routeDeltasApplied: records.map(\.applied), routeRecords: records, dnsBefore: before.resolver, dnsApplied: nil, status: "recorded", timestamp: Date())
     }
 
     private func ledgerWithPersistedIntent(baseline: NetworkLedger, destinations: [(String, String)], environment: [String: String]) throws -> NetworkLedger {
-        guard let tunnel = environment["TUNDEV"], tunnel.hasPrefix("utun"), let tunnelGateway = environment["INTERNAL_IP4_ADDRESS"], !tunnelGateway.isEmpty else { throw HelperError.badConfiguration }
+        let tunnel = try validatedTunnelInterface(environment["TUNDEV"])
+        guard let tunnelGateway = environment["INTERNAL_IP4_ADDRESS"], !tunnelGateway.isEmpty else { throw HelperError.badConfiguration }
         let vpnGateway = environment["VPNGATEWAY"] ?? ""
         let prior = Dictionary(uniqueKeysWithValues: baseline.routeRecords.map { (routeKey($0.applied), $0) })
         var records: [RouteRecord] = []
@@ -615,9 +624,27 @@ public struct NetworkWrapperRunner {
         let service = try tools.primaryServiceID()
         guard !service.isEmpty else { throw HelperError.processMismatch }
         let routes = try destinations.compactMap { try tools.route(destination: $0.0, netmask: $0.1.isEmpty ? nil : $0.1) }.sorted()
-        let tunnel = routes.first(where: { ($0.interface ?? "").hasPrefix("utun") })?.interface ?? ""
-        let requestedTunnel = [tunnel, environment["TUNDEV"] ?? ""].first { !$0.isEmpty } ?? ""
-        let resolver = try tools.resolver(serviceID: service, baselineInterface: defaultInterface, tunnelInterface: requestedTunnel.isEmpty ? nil : requestedTunnel)
+        let routeTunnelCandidates = routes.compactMap(\.interface).filter { $0.hasPrefix("utun") }
+        for candidate in routeTunnelCandidates { _ = try validatedTunnelInterface(candidate) }
+        let tunnel = routeTunnelCandidates.first ?? ""
+        let requestedTunnel: String?
+        if !tunnel.isEmpty {
+            requestedTunnel = tunnel
+        } else if let candidate = environment["TUNDEV"], !candidate.isEmpty {
+            requestedTunnel = try validatedTunnelInterface(candidate)
+        } else {
+            requestedTunnel = nil
+        }
+        let probedResolver = try tools.resolver(serviceID: service, baselineInterface: defaultInterface, tunnelInterface: requestedTunnel)
+        let resolver = ResolverSnapshot(
+            serviceID: probedResolver.serviceID,
+            servers: probedResolver.servers,
+            searchDomains: probedResolver.searchDomains,
+            activeInterface: tunnel.isEmpty ? defaultInterface : tunnel,
+            serversPresent: probedResolver.serversPresent,
+            searchDomainsPresent: probedResolver.searchDomainsPresent,
+            surfaces: probedResolver.surfaces
+        )
         return NetworkSnapshotData(rebootIdentity: boot, serviceID: service, defaultInterface: defaultInterface, defaultRoute: defaultRoute, tunnelInterface: tunnel, routes: routes, resolver: resolver)
     }
 
@@ -760,6 +787,13 @@ public struct NetworkWrapperRunner {
             result.append((gateway, "255.255.255.255"))
         }
         return result
+    }
+
+    private func validatedTunnelInterface(_ value: String?) throws -> String {
+        guard let value, value.range(of: "^utun[0-9]{1,8}$", options: .regularExpression) != nil else {
+            throw HelperError.badConfiguration
+        }
+        return value
     }
 
     private func canonicalIPv4Literal(_ raw: String) throws -> String {

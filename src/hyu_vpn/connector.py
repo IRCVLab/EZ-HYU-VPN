@@ -169,7 +169,7 @@ class ConnectorEventParser:
                 return [ConnectorEvent(fatal_kind, self.now())]
         for line in lines:
             normalized = " ".join(line.strip().split())
-            if re.search(r"(?:^|:)\s*HIP report submitted successfully$", normalized):
+            if re.search(r"(?:^|:)\s*HIP report submitted successfully\.?$", normalized):
                 events.append(ConnectorEvent("hip-succeeded", self.now()))
         if expiry is not None:
             events.append(ConnectorEvent("session-expiry", expiry))

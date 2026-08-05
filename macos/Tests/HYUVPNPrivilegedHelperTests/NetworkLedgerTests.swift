@@ -275,7 +275,69 @@ esac
         #expect(upstream.calls == 1)
         let saved = try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: "nonceabc123")
         #expect(saved.status == "repair-required")
-        #expect(saved.tunnelInterface == nil)
+        #expect(saved.tunnelInterface == "utun7")
+    }
+
+    @Test func noRouteFailureRetainsResolverProbeTunnelForRepair() throws {
+        let dir = try temporaryDirectory()
+        let ledger = dir.appendingPathComponent("nonceabc123.ledger")
+        let tools = TunnelSurfaceNetworkTools()
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
+        let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: tools, upstream: Round10CountingUpstream())
+
+        do {
+            try runner.run(reason: "connect", nonce: "nonceabc123", environment: round10ValidEnv(ledger: ledger), suppliedLedgerPath: ledger)
+            Issue.record("missing routes must fail")
+        } catch let error as HelperError {
+            #expect(error == .networkPostconditionFailed)
+        }
+
+        let failed = try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: "nonceabc123")
+        #expect(failed.status == "repair-required")
+        #expect(failed.tunnelInterface == "utun7")
+
+        try runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: ledger)
+        #expect(!FileManager.default.fileExists(atPath: ledger.path))
+    }
+
+    @Test func repairAcceptsTheTunnelResolverSurfaceCapturedBeforeNetworkMutation() throws {
+        let dir = try temporaryDirectory()
+        let ledger = dir.appendingPathComponent("nonceabc123.ledger")
+        let tools = TunnelSurfaceNetworkTools()
+        let upstream = TunnelSurfaceApplyingUpstream(tools: tools)
+        let paths = RuntimePaths(
+            ledgerRoot: dir,
+            upstream: dir.appendingPathComponent("vpnc-script"),
+            route: dir.appendingPathComponent("route"),
+            scutil: dir.appendingPathComponent("scutil"),
+            sysctl: dir.appendingPathComponent("sysctl"),
+            networksetup: dir.appendingPathComponent("networksetup")
+        )
+        let runner = NetworkWrapperRunner(
+            paths: paths,
+            expectedOwnerUID: UInt32(getuid()),
+            tools: tools,
+            upstream: upstream
+        )
+
+        try runner.run(
+            reason: "connect",
+            nonce: "nonceabc123",
+            environment: round10ValidEnv(ledger: ledger),
+            suppliedLedgerPath: ledger
+        )
+
+        let recorded = try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: "nonceabc123")
+        #expect(recorded.status == "recorded")
+        #expect(recorded.dnsBefore?.surfaces["State:/Network/Interface/utun7/DNS"]?.keyPresent == false)
+        #expect(recorded.dnsApplied?.surfaces["State:/Network/Interface/utun7/DNS"]?.keyPresent == false)
+        #expect(recorded.dnsBefore?.activeInterface == "en0")
+        #expect(recorded.dnsApplied?.activeInterface == "utun7")
+
+        try runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: ledger)
+
+        #expect(!FileManager.default.fileExists(atPath: ledger.path))
+        #expect(tools.routes.isEmpty)
     }
 
     @Test func sanitizedEnvironmentPreservesNumericVPNPIDAndSynthesizesIPv4Mask() {
@@ -314,18 +376,38 @@ esac
         let dir = try temporaryDirectory()
         let ledger = dir.appendingPathComponent("nonceabc123.ledger")
         let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
-        let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: Round10DriftTools(), upstream: Round10CountingUpstream())
         for mutation in [
             { (env: inout [String: String]) in env["CISCO_SPLIT_INC_0_ADDR"] = "010.0.0.1" },
             { (env: inout [String: String]) in env["CISCO_SPLIT_INC_0_ADDR"] = "-net" },
             { (env: inout [String: String]) in env["VPNGATEWAY"] = "198.051.100.9" },
-            { (env: inout [String: String]) in env["CISCO_SPLIT_INC_0_MASK"] = "255.0.255.0" }
+            { (env: inout [String: String]) in env["CISCO_SPLIT_INC_0_MASK"] = "255.0.255.0" },
+            { (env: inout [String: String]) in env["TUNDEV"] = "utun7\nremove State:/Network/Global/DNS" }
         ] {
+            let upstream = Round10CountingUpstream()
+            let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: Round10DriftTools(), upstream: upstream)
             var env = round10ValidEnv(ledger: ledger)
             mutation(&env)
             #expect(throws: (any Error).self) { try runner.run(reason: "connect", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger) }
+            #expect(upstream.calls == 0)
             try? FileManager.default.removeItem(at: ledger)
         }
+    }
+
+    @Test func invalidTunnelIsRejectedBeforePreInitUpstream() throws {
+        let dir = try temporaryDirectory()
+        let ledger = dir.appendingPathComponent("nonceabc123.ledger")
+        let upstream = Round10CountingUpstream()
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
+        let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: Round10DriftTools(), upstream: upstream)
+        let env = [
+            "HYU_SESSION_LEDGER": ledger.path,
+            "TUNDEV": "utun7\nremove State:/Network/Global/DNS",
+        ]
+
+        #expect(throws: (any Error).self) {
+            try runner.run(reason: "pre-init", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger)
+        }
+        #expect(upstream.calls == 0)
     }
 
 }
@@ -393,6 +475,45 @@ private final class Round10DriftTools: NetworkTooling {
     func serviceName(for serviceID: String) throws -> String { "Wi-Fi" }
     func deleteRoute(_ delta: RouteDelta) throws {}
     func restoreRoute(_ route: RouteSnapshot) throws {}
+    func restoreResolver(serviceID: String, snapshot: ResolverSnapshot) throws {}
+}
+
+private final class TunnelSurfaceApplyingUpstream: VpncUpstreamRunning {
+    let tools: TunnelSurfaceNetworkTools
+    init(tools: TunnelSurfaceNetworkTools) { self.tools = tools }
+    func run(reason: String, environment: [String: String]) throws -> Int32 {
+        guard reason == "connect" else { return 0 }
+        tools.routes = [
+            RouteSnapshot(destination: "10.0.0.0", gateway: "10.10.0.1", interface: "utun7", netmask: "255.0.0.0", protocol: "ipv4"),
+            RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4"),
+        ]
+        return 0
+    }
+}
+
+private final class TunnelSurfaceNetworkTools: NetworkTooling {
+    var routes: [RouteSnapshot] = []
+    func rebootIdentity() throws -> UInt64 { 4242 }
+    func primaryServiceID() throws -> String { "service-wifi" }
+    func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: "0.0.0.0", protocol: "ipv4") }
+    func route(destination: String, netmask: String?) throws -> RouteSnapshot? { routes.first { $0.destination == destination && (netmask == nil || $0.netmask == netmask) } }
+    func resolver(serviceID: String, baselineInterface: String, tunnelInterface: String?) throws -> ResolverSnapshot {
+        let setup = ResolverFieldSnapshot(servers: ["9.9.9.9"], searchDomains: ["home.example"])
+        var surfaces = ["setup": setup]
+        if let tunnelInterface {
+            surfaces["State:/Network/Interface/\(tunnelInterface)/DNS"] = ResolverFieldSnapshot(
+                servers: [],
+                searchDomains: [],
+                serversPresent: false,
+                searchDomainsPresent: false,
+                keyPresent: false
+            )
+        }
+        return ResolverSnapshot(serviceID: serviceID, servers: ["9.9.9.9"], searchDomains: ["home.example"], activeInterface: tunnelInterface ?? baselineInterface, surfaces: surfaces)
+    }
+    func serviceName(for serviceID: String) throws -> String { "Wi-Fi" }
+    func deleteRoute(_ delta: RouteDelta) throws { routes.removeAll { $0.destination == delta.destination && $0.netmask == delta.netmask } }
+    func restoreRoute(_ route: RouteSnapshot) throws { routes.append(route) }
     func restoreResolver(serviceID: String, snapshot: ResolverSnapshot) throws {}
 }
 

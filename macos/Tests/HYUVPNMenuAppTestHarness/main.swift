@@ -56,7 +56,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         return current.appendingPathComponent("macos")
     }
 
-    static func statusData(state: VPNConnectionState = .connected, expiry: String? = "2026-08-04T12:59:30Z", connectedAt: String? = "2026-08-04T12:00:00Z", automatic: Bool = true) -> Data {
+    static func statusData(state: VPNConnectionState = .connected, expiry: String? = "2026-08-04T12:59:30Z", connectedAt: String? = "2026-08-04T12:00:00Z", automatic: Bool = true, error: String? = nil) -> Data {
         let fields: [String] = [
             "\"schema_version\":1",
             "\"state\":\"\(state.rawValue)\"",
@@ -66,7 +66,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
             "\"last_successful_hip_at\":\"2026-08-04T11:59:00Z\"",
             "\"tunnel_interface\":\"utun7\"",
             "\"next_retry_at\":null",
-            "\"error_code\":null",
+            "\"error_code\":\(error.map { "\"\($0)\"" } ?? "null")",
             "\"last_transition_at\":\"2026-08-04T12:00:01Z\"",
             "\"backend_build_version\":\"2026.08.04+menubar\""
         ]
@@ -126,6 +126,10 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try expect(menu[.expiryNotifications]?.isChecked == true, "notifications checked")
         try expect(menu[.diagnostics]?.title.contains("password") == false, "diagnostics sanitized")
         try expect(menu[.quit]?.command == nil, "quit has no vpn command")
+        let error = try VPNStatusDecoder.decode(statusData(state: .error, expiry: nil, connectedAt: nil, automatic: false, error: "NETWORK_SCRIPT_POSTCONDITION_FAILED"))
+        let errorMenu = MenuModel.make(status: error, notificationsEnabled: false, diagnostics: "")
+        try expect(errorMenu[.disconnect]?.isEnabled == true, "error repair action enabled")
+        try expect(errorMenu[.disconnect]?.title == "Repair and Disable", "error repair action title")
     }
 
     static func watcherInitialEventAndTick() throws {

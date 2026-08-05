@@ -750,7 +750,11 @@ class SupervisorControlTests(unittest.TestCase):
 
             self.assertLess(elapsed, 1.0)
             self.assertEqual(helper_calls, [("/usr/bin/sudo", "-n", "/helper", "stop")])
-            self.assertEqual(supervisor.handle_control_command("connect"), (False, "REPAIR_REQUIRED"))
+            self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
+            self.assertEqual(helper_calls, [
+                ("/usr/bin/sudo", "-n", "/helper", "stop"),
+                ("/usr/bin/sudo", "-n", "/helper", "repair"),
+            ])
 
     def test_disconnect_orders_post_publication_helper_stop_before_reap_and_response(self):
         with tempfile.TemporaryDirectory() as td:
@@ -930,6 +934,7 @@ class SupervisorControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"
             process = FakeProcess(returncode=None, wait_side_effect=[subprocess.TimeoutExpired(["child"], 0.1), 0])
+            helper_calls = []
             supervisor = Supervisor(
                 isolated_supervisor_config(self,
                     lock_path=str(Path(td) / "lock"),
@@ -940,7 +945,7 @@ class SupervisorControlTests(unittest.TestCase):
                     stop_timeout=0.1,
                 ),
                 conflict_detector=mock.Mock(conflict_active=lambda: False),
-                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, "", ""),
+                command_runner=lambda argv, timeout: helper_calls.append(tuple(argv)) or CommandResult(tuple(argv), 0, "", ""),
             )
             supervisor._child = process
             killed = []
@@ -951,7 +956,11 @@ class SupervisorControlTests(unittest.TestCase):
             self.assertEqual(killed, [(4321, signal.SIGKILL)])
             self.assertEqual(read_status(status_path).state, "error")
             self.assertEqual(read_status(status_path).error_code, "REPAIR_REQUIRED")
-            self.assertEqual(supervisor.handle_control_command("connect"), (False, "REPAIR_REQUIRED"))
+            self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
+            self.assertEqual(helper_calls, [
+                ("/usr/bin/sudo", "-n", "/helper", "stop"),
+                ("/usr/bin/sudo", "-n", "/helper", "repair"),
+            ])
 
     def test_disconnect_waits_for_helper_child_reap_and_reader_before_ok(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1263,6 +1272,74 @@ class SupervisorControlTests(unittest.TestCase):
             self.assertEqual(status.error_code, "REPAIR_REQUIRED")
             self.assertNotIn("SECRET", status_path.read_text(encoding="utf-8"))
 
+    def test_explicit_connect_repairs_idle_sticky_state_before_starting(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            calls = []
+
+            def runner(argv, timeout):
+                calls.append((tuple(argv), timeout))
+                return CommandResult(tuple(argv), 0, "", "")
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    helper_path="/helper",
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                command_runner=runner,
+            )
+            supervisor._repair_required = True
+            supervisor._connector_failure_code = "NETWORK_SCRIPT_POSTCONDITION_FAILED"
+            supervisor._write_current_status(state="error", automatic=False, error_code="NETWORK_SCRIPT_POSTCONDITION_FAILED")
+
+            self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
+
+            from hyu_vpn.status import read_status
+            self.assertEqual(calls, [(('/usr/bin/sudo', '-n', '/helper', 'repair'), 5.0)])
+            self.assertFalse(supervisor._repair_required)
+            self.assertIsNone(supervisor._connector_failure_code)
+            self.assertEqual(read_status(status_path).state, "connecting")
+            self.assertTrue(read_status(status_path).automatic_reconnect_enabled)
+
+    def test_enable_and_reconnect_commands_repair_idle_sticky_state_once(self):
+        for command, expected_state in (("automatic-on", "disabled"), ("reconnect", "connecting")):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as td:
+                status_path = Path(td) / "status.json"
+                pref_path = Path(td) / "auto.json"
+                calls = []
+
+                def runner(argv, timeout):
+                    calls.append((tuple(argv), timeout))
+                    return CommandResult(tuple(argv), 0, "", "")
+
+                supervisor = Supervisor(
+                    isolated_supervisor_config(
+                        self,
+                        status_path=str(status_path),
+                        preference_path=str(pref_path),
+                        helper_path="/helper",
+                    ),
+                    conflict_detector=mock.Mock(conflict_active=lambda: False),
+                    command_runner=runner,
+                )
+                supervisor._repair_required = True
+                supervisor._connector_failure_code = "NETWORK_SCRIPT_POSTCONDITION_FAILED"
+                supervisor._write_current_status(state="error", automatic=False, error_code="NETWORK_SCRIPT_POSTCONDITION_FAILED")
+
+                self.assertEqual(supervisor.handle_control_command(command), (True, None))
+
+                from hyu_vpn.status import read_status
+                status = read_status(status_path)
+                self.assertEqual(calls, [(("/usr/bin/sudo", "-n", "/helper", "repair"), 5.0)])
+                self.assertFalse(supervisor._repair_required)
+                self.assertIsNone(supervisor._connector_failure_code)
+                self.assertEqual(status.state, expected_state)
+                self.assertTrue(status.automatic_reconnect_enabled)
+
     def test_second_disconnect_repairs_inactive_repair_required_state_and_clears_sticky_error(self):
         with tempfile.TemporaryDirectory() as td:
             calls = []
@@ -1477,9 +1554,10 @@ class SupervisorControlTests(unittest.TestCase):
             status = read_status(status_path)
             self.assertEqual(commands, [("/usr/bin/sudo", "-n", "/helper", "repair")])
             self.assertEqual(status.state, "error")
-            self.assertEqual(status.error_code, "REPAIR_REQUIRED")
+            self.assertEqual(status.error_code, "NETWORK_SCRIPT_UPSTREAM_FAILED")
             self.assertFalse(status.automatic_reconnect_enabled)
             self.assertIsNone(status.next_retry_at)
+            self.assertEqual(supervisor.handle_control_command("connect"), (False, "REPAIR_REQUIRED"))
 
     def test_explicit_connect_after_fatal_event_cannot_skip_post_child_repair(self):
         with tempfile.TemporaryDirectory() as td:

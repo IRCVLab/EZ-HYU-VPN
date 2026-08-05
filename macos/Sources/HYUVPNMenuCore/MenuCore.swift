@@ -525,7 +525,8 @@ public enum MenuModel {
             model[.connectedDuration] = MenuItemModel(title: "", isEnabled: false, isChecked: false, command: nil)
         }
         model[.connect] = MenuItemModel(title: "Connect", isEnabled: [.disabled, .error, .waitingForNetwork, .backoff].contains(status.state), isChecked: false, command: .connect)
-        model[.disconnect] = MenuItemModel(title: "Disconnect", isEnabled: [.connected, .connecting, .backoff].contains(status.state), isChecked: false, command: .disconnect)
+        let disconnectTitle = status.state == .error ? "Repair and Disable" : "Disconnect"
+        model[.disconnect] = MenuItemModel(title: disconnectTitle, isEnabled: [.connected, .connecting, .backoff, .error].contains(status.state), isChecked: false, command: .disconnect)
         model[.reconnect] = MenuItemModel(title: "Reconnect", isEnabled: status.state == .connected, isChecked: false, command: .reconnect)
         model[.automaticReconnect] = MenuItemModel(title: "Automatic Reconnect", isEnabled: true, isChecked: status.automaticReconnectEnabled, command: .setAutomaticReconnect(!status.automaticReconnectEnabled))
         model[.expiryNotifications] = MenuItemModel(title: "Notify before expiry", isEnabled: true, isChecked: notificationsEnabled, command: nil)

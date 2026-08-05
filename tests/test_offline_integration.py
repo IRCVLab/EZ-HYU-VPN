@@ -132,7 +132,7 @@ class OfflineEndToEndTests(unittest.TestCase):
                 root = ET.fromstring(completed.stdout)
                 established = completed.returncode == 0 and root.tag == "hip-report"
                 snapshot(wrapper_rc=completed.returncode, wrapper_stdout_len=len(completed.stdout))
-                os.write(sys.stdout.fileno(), b"HIP report submitted successfully\nconnected\n")
+                os.write(sys.stdout.fileno(), b"HIP report submitted successfully.\nconnected\n")
                 while True:
                     time.sleep(0.1)
             ''')

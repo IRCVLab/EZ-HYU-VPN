@@ -49,9 +49,12 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-preinit-without-splits-records-baseline", testPreInitWithoutSplitsRecordsBaseline),
                 ("network-connect-expands-preinit-route-intent", testConnectExpandsPreInitRouteIntent),
                 ("network-zero-exit-without-routes-fails-postcondition", testZeroExitWithoutRoutesFailsPostcondition),
+                ("network-no-route-failure-retains-resolver-probe-for-repair", testNoRouteFailureRetainsResolverProbeForRepair),
+                ("network-repair-captures-tunnel-resolver-before-mutation", testRepairCapturesTunnelResolverBeforeMutation),
                 ("network-sanitized-env-preserves-vpnpid-and-mask", testSanitizedEnvironmentPreservesVPNPIDAndMask),
                 ("network-preinit-ledger-drift-blocks-upstream", testPreInitLedgerDriftBlocksUpstream),
                 ("network-strict-ipv4-split-inputs", testStrictIPv4SplitInputs),
+                ("network-invalid-tunnel-rejected-before-preinit", testInvalidTunnelRejectedBeforePreInit),
                 ("ledger-schema-route-records-and-resolver-order", testLedgerSchemaRouteRecordsAndResolverOrder),
                 ("fake-lock-concurrent-rejection", testFakeLockConcurrentRejection),
                 ("system-child-birthtime-monitor", testSystemChildBirthtimeMonitor),
@@ -403,7 +406,51 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(fixture.upstream.calls == 1, "upstream called once")
         let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
         try expect(saved.status == "repair-required", "missing routes require repair")
-        try expect(saved.tunnelInterface == nil, "missing tunnel not recorded as success")
+        try expect(saved.tunnelInterface == "utun7", "failed connect retains the validated repair probe without claiming success")
+    }
+
+    static func testNoRouteFailureRetainsResolverProbeForRepair() throws {
+        let fixture = try HarnessNetworkFixture()
+        fixture.tools.includeTunnelSurface = true
+
+        do {
+            try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: fixture.validEnv(), suppliedLedgerPath: fixture.ledger)
+            throw HarnessFailure(description: "missing routes were accepted")
+        } catch let error as HelperError {
+            try expect(error == .networkPostconditionFailed, "missing routes preserve postcondition failure")
+        }
+
+        let failed = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+        try expect(failed.status == "repair-required", "failed connect requires repair")
+        try expect(failed.tunnelInterface == "utun7", "failed connect retains validated resolver probe tunnel")
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "repair removes failed no-route ledger")
+    }
+
+    static func testRepairCapturesTunnelResolverBeforeMutation() throws {
+        let fixture = try HarnessNetworkFixture()
+        fixture.tools.includeTunnelSurface = true
+        fixture.upstream.onRun = { reason, _ in
+            guard reason == "connect" else { return }
+            let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+            fixture.tools.routes = saved.routeRecords.map(\.applied.routeSnapshot)
+        }
+
+        try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: fixture.validEnv(), suppliedLedgerPath: fixture.ledger)
+
+        let recorded = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+        let tunnelSurface = "State:/Network/Interface/utun7/DNS"
+        try expect(recorded.dnsBefore?.surfaces[tunnelSurface]?.keyPresent == false, "baseline records missing tunnel DNS surface")
+        try expect(recorded.dnsApplied?.surfaces[tunnelSurface]?.keyPresent == false, "applied snapshot records tunnel DNS surface")
+        try expect(recorded.dnsBefore?.activeInterface == "en0", "baseline keeps the physical interface active")
+        try expect(recorded.dnsApplied?.activeInterface == "utun7", "applied snapshot records the actual tunnel interface")
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "repair removes clean ledger")
+        try expect(fixture.tools.routes.isEmpty, "repair removes applied routes")
     }
 
     static func testSanitizedEnvironmentPreservesVPNPIDAndMask() throws {
@@ -439,13 +486,28 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
             { (env: inout [String: String]) in env["CISCO_SPLIT_INC_0_ADDR"] = "010.0.0.1" },
             { (env: inout [String: String]) in env["CISCO_SPLIT_INC_0_ADDR"] = "-net" },
             { (env: inout [String: String]) in env["VPNGATEWAY"] = "198.051.100.9" },
-            { (env: inout [String: String]) in env["CISCO_SPLIT_INC_0_MASK"] = "255.0.255.0" }
+            { (env: inout [String: String]) in env["CISCO_SPLIT_INC_0_MASK"] = "255.0.255.0" },
+            { (env: inout [String: String]) in env["TUNDEV"] = "utun7\nremove State:/Network/Global/DNS" }
         ] {
             let fixture = try HarnessNetworkFixture()
             var env = fixture.validEnv()
             mutate(&env)
             try expectThrows("bad split input") { try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: env, suppliedLedgerPath: fixture.ledger) }
+            try expect(fixture.upstream.calls == 0, "invalid network input rejected before upstream mutation")
         }
+    }
+
+    static func testInvalidTunnelRejectedBeforePreInit() throws {
+        let fixture = try HarnessNetworkFixture()
+        let env = [
+            "HYU_SESSION_LEDGER": fixture.ledger.path,
+            "TUNDEV": "utun7\nremove State:/Network/Global/DNS",
+        ]
+
+        try expectThrows("invalid pre-init tunnel") {
+            try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: env, suppliedLedgerPath: fixture.ledger)
+        }
+        try expect(fixture.upstream.calls == 0, "invalid tunnel rejected before pre-init upstream")
     }
 
     static func testLedgerSchemaRouteRecordsAndResolverOrder() throws {
@@ -584,13 +646,28 @@ final class FakeProcessController: ProcessControlling {
 final class HarnessNetworkTools: NetworkTooling {
     var defaultGateway = "192.0.2.1"
     var routes: [RouteSnapshot] = []
+    var includeTunnelSurface = false
     func rebootIdentity() throws -> UInt64 { 4242 }
     func primaryServiceID() throws -> String { "service-wifi" }
     func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: defaultGateway, interface: "en0", netmask: "0.0.0.0", protocol: "ipv4") }
     func route(destination: String, netmask: String?) throws -> RouteSnapshot? { routes.first { $0.destination == destination && (netmask == nil || $0.netmask == netmask) } }
-    func resolver(serviceID: String, baselineInterface: String, tunnelInterface: String?) throws -> ResolverSnapshot { ResolverSnapshot(serviceID: serviceID, servers: ["9.9.9.9"], searchDomains: ["home.example"], activeInterface: baselineInterface) }
+    func resolver(serviceID: String, baselineInterface: String, tunnelInterface: String?) throws -> ResolverSnapshot {
+        var surfaces = ["setup": ResolverFieldSnapshot(servers: ["9.9.9.9"], searchDomains: ["home.example"])]
+        if includeTunnelSurface, let tunnelInterface {
+            surfaces["State:/Network/Interface/\(tunnelInterface)/DNS"] = ResolverFieldSnapshot(
+                servers: [],
+                searchDomains: [],
+                serversPresent: false,
+                searchDomainsPresent: false,
+                keyPresent: false
+            )
+        }
+        return ResolverSnapshot(serviceID: serviceID, servers: ["9.9.9.9"], searchDomains: ["home.example"], activeInterface: tunnelInterface ?? baselineInterface, surfaces: surfaces)
+    }
     func serviceName(for serviceID: String) throws -> String { "Wi-Fi" }
-    func deleteRoute(_ delta: RouteDelta) throws {}
+    func deleteRoute(_ delta: RouteDelta) throws {
+        routes.removeAll { $0.destination == delta.destination && $0.netmask == delta.netmask }
+    }
     func restoreRoute(_ route: RouteSnapshot) throws {}
     func restoreResolver(serviceID: String, snapshot: ResolverSnapshot) throws {}
 }
