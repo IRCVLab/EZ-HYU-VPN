@@ -56,6 +56,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-captures-tunnel-resolver-before-mutation", testRepairCapturesTunnelResolverBeforeMutation),
                 ("system-network-tools-accepts-dhcp-missing-setup-dns", testSystemNetworkToolsAcceptsDHCPMissingSetupDNS),
                 ("system-network-tools-normalizes-static-host-route-mask", testSystemNetworkToolsNormalizesStaticHostRouteMask),
+                ("system-network-tools-resolves-explicit-network-host-route", testSystemNetworkToolsResolvesExplicitNetworkHostRoute),
                 ("system-network-tools-rejects-cloned-host-route-as-static", testSystemNetworkToolsRejectsClonedHostRouteAsStatic),
                 ("system-network-tools-rejects-default-route-for-host-query", testSystemNetworkToolsRejectsDefaultRouteForHostQuery),
                 ("network-sanitized-env-preserves-vpnpid-and-mask", testSanitizedEnvironmentPreservesVPNPIDAndMask),
@@ -451,6 +452,41 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(route?.netmask == "255.255.255.255", "missing Darwin host mask normalized to IPv4 /32")
     }
 
+    static func testSystemNetworkToolsResolvesExplicitNetworkHostRoute() throws {
+        let tools = try systemNetworkToolsWithRouteScript("""
+        #!/bin/sh
+        case "$*" in
+          "-n get 198.51.100.9")
+            cat <<'HYU_ROUTE_OUTPUT'
+           route to: 198.51.100.9
+        destination: 198.51.100.9
+            gateway: 10.200.200.44
+          interface: utun10
+              flags: <UP,GATEWAY,HOST,DONE,WASCLONED,IFSCOPE,IFREF>
+        HYU_ROUTE_OUTPUT
+            ;;
+          "-n get -net 198.51.100.9 -netmask 255.255.255.255")
+            cat <<'HYU_ROUTE_OUTPUT'
+           route to: 198.51.100.9
+        destination: 198.51.100.9
+               mask: 255.255.255.255
+            gateway: 10.200.200.44
+          interface: utun10
+              flags: <UP,GATEWAY,DONE,STATIC,PRCLONING>
+        HYU_ROUTE_OUTPUT
+            ;;
+          *) exit 64 ;;
+        esac
+        """)
+
+        let route = try tools.route(destination: "198.51.100.9", netmask: "255.255.255.255")
+
+        try expect(route?.destination == "198.51.100.9", "explicit /32 network route destination preserved")
+        try expect(route?.gateway == "10.200.200.44", "explicit /32 network route gateway preserved")
+        try expect(route?.interface == "utun10", "explicit /32 network route interface preserved")
+        try expect(route?.netmask == "255.255.255.255", "explicit /32 network route mask preserved")
+    }
+
     static func testSystemNetworkToolsRejectsClonedHostRouteAsStatic() throws {
         let tools = try systemNetworkToolsWithRouteOutput("""
            route to: 198.51.100.9
@@ -842,14 +878,18 @@ struct HarnessNetworkFixture {
 func harnessTempDir() throws -> URL { let url = FileManager.default.temporaryDirectory.appendingPathComponent("hyu-helper-harness-\(UUID().uuidString)"); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url }
 
 func systemNetworkToolsWithRouteOutput(_ output: String) throws -> SystemNetworkTools {
-    let dir = try harnessTempDir()
-    let route = dir.appendingPathComponent("route")
-    try """
+    try systemNetworkToolsWithRouteScript("""
     #!/bin/sh
     cat <<'HYU_ROUTE_OUTPUT'
     \(output)
     HYU_ROUTE_OUTPUT
-    """.write(to: route, atomically: true, encoding: .utf8)
+    """)
+}
+
+func systemNetworkToolsWithRouteScript(_ script: String) throws -> SystemNetworkTools {
+    let dir = try harnessTempDir()
+    let route = dir.appendingPathComponent("route")
+    try script.write(to: route, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: route.path)
     let paths = RuntimePaths(
         ledgerRoot: dir,

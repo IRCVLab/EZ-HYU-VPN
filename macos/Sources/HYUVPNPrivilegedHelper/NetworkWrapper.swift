@@ -308,25 +308,51 @@ public struct SystemNetworkTools: NetworkTooling {
         let result = try runner.run(paths.route, ["-n", "get", requestedDestination], environment: NetworkWrapperRunner.sanitizedEnvironment([:]))
         if result.status != 0, requestedDestination != "default" { return nil }
         guard result.status == 0 else { throw HelperError.processMismatch }
-        let actualDestination = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*destination:\s*(\S+)"#) ?? (requestedDestination == "default" ? "default" : "")
-        let gateway = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*gateway:\s*(\S+)"#) ?? ""
-        let interface = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*interface:\s*(\S+)"#) ?? ""
-        let flags = Set((firstMatch(result.stdout, pattern: #"(?:^|\n)\s*flags:\s*<([^>]+)>"#) ?? "")
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() })
-        let parsedNetmask = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*mask:\s*(\S+)"#) ?? firstMatch(result.stdout, pattern: #"(?:^|\n)\s*netmask:\s*(\S+)"#)
+        if let route = parsedRouteGet(result.stdout, requestedDestination: requestedDestination, requestedNetmask: requestedNetmask, allowStaticHostMaskNormalization: true) {
+            return route
+        }
+        if requestedDestination == "default" { throw HelperError.processMismatch }
+        guard requestedNetmask == "255.255.255.255" else { return nil }
+
+        // Darwin may return a WASCLONED host lookup for an explicit /32 route
+        // installed with `route add -net ... -netmask 255.255.255.255`. Query
+        // the exact network form before deciding that the parent route is absent.
+        let exact = try runner.run(
+            paths.route,
+            ["-n", "get", "-net", requestedDestination, "-netmask", "255.255.255.255"],
+            environment: NetworkWrapperRunner.sanitizedEnvironment([:])
+        )
+        guard exact.status == 0 else { return nil }
+        let exactFlags = routeFlags(exact.stdout)
+        guard exactFlags.contains("STATIC"), exactFlags.contains("GATEWAY"), !exactFlags.contains("WASCLONED") else { return nil }
+        return parsedRouteGet(exact.stdout, requestedDestination: requestedDestination, requestedNetmask: requestedNetmask, allowStaticHostMaskNormalization: false)
+    }
+
+    private func parsedRouteGet(_ output: String, requestedDestination: String, requestedNetmask: String?, allowStaticHostMaskNormalization: Bool) -> RouteSnapshot? {
+        let actualDestination = firstMatch(output, pattern: #"(?:^|\n)\s*destination:\s*(\S+)"#) ?? (requestedDestination == "default" ? "default" : "")
+        let gateway = firstMatch(output, pattern: #"(?:^|\n)\s*gateway:\s*(\S+)"#) ?? ""
+        let interface = firstMatch(output, pattern: #"(?:^|\n)\s*interface:\s*(\S+)"#) ?? ""
+        let flags = routeFlags(output)
+        let parsedNetmask = firstMatch(output, pattern: #"(?:^|\n)\s*mask:\s*(\S+)"#) ?? firstMatch(output, pattern: #"(?:^|\n)\s*netmask:\s*(\S+)"#)
         let isOwnedStaticHostRoute = requestedNetmask == "255.255.255.255"
+            && allowStaticHostMaskNormalization
             && actualDestination == requestedDestination
             && flags.contains("HOST")
             && flags.contains("STATIC")
             && !flags.contains("WASCLONED")
         let netmask = parsedNetmask ?? (requestedDestination == "default" ? "0.0.0.0" : (isOwnedStaticHostRoute ? "255.255.255.255" : ""))
-        guard !gateway.isEmpty, !interface.isEmpty else { if requestedDestination == "default" { throw HelperError.processMismatch }; return nil }
+        guard !gateway.isEmpty, !interface.isEmpty else { return nil }
         if requestedDestination != "default" {
             guard actualDestination == requestedDestination else { return nil }
             if let requestedNetmask, !requestedNetmask.isEmpty, netmask != requestedNetmask { return nil }
         }
         return RouteSnapshot(destination: requestedDestination == "default" ? "default" : actualDestination, gateway: gateway, interface: interface, netmask: netmask, protocol: "ipv4")
+    }
+
+    private func routeFlags(_ output: String) -> Set<String> {
+        Set((firstMatch(output, pattern: #"(?:^|\n)\s*flags:\s*<([^>]+)>"#) ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() })
     }
 
     private func checked(_ executable: URL, _ arguments: [String], stdin: String? = nil) throws -> String {
