@@ -417,6 +417,72 @@ class SupervisorLoopTests(unittest.TestCase):
             self.assertFalse(run_thread.is_alive())
             self.assertEqual(len(starts), 2)
 
+    def test_connecting_without_connected_event_times_out_stops_helper_and_reports_no_tunnel(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            clock = FakeClock()
+            wait_timeouts = []
+            killed = []
+
+            class StalledAuthenticatedProcess:
+                pid = 6789
+                returncode = None
+                stdout = io.StringIO(
+                    '{"schema_version":1,"event":"hip-succeeded","timestamp":"2026-08-06T05:27:01Z"}\n'
+                    '{"schema_version":1,"event":"session-expiry","timestamp":"2026-08-06T09:27:00Z"}\n'
+                )
+
+                def wait(self, timeout=None):
+                    wait_timeouts.append(timeout)
+                    if timeout is None:
+                        raise AssertionError("supervisor must not wait forever before tunnel establishment")
+                    if killed:
+                        self.returncode = 0
+                        return 0
+                    clock.now += timeout
+                    raise subprocess.TimeoutExpired(["child"], timeout)
+
+                def poll(self):
+                    return self.returncode
+
+            process = StalledAuthenticatedProcess()
+            commands = []
+
+            def runner(argv, timeout):
+                commands.append((tuple(argv), timeout))
+                return CommandResult(tuple(argv), 0, "", "")
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    helper_path="/helper",
+                    max_iterations=1,
+                    stop_timeout=0.5,
+                    connect_establish_timeout=2.0,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+                command_runner=runner,
+                monotonic=clock.monotonic,
+                sleep=clock.sleep,
+            )
+
+            with mock.patch("hyu_vpn.supervisor.os.killpg", side_effect=lambda pid, sig: killed.append((pid, sig))):
+                self.assertEqual(supervisor.run(), 1)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(status.state, "error")
+            self.assertEqual(status.error_code, "CONNECT_TIMEOUT_NO_TUNNEL")
+            self.assertFalse(status.automatic_reconnect_enabled)
+            self.assertEqual(commands, [(("/usr/bin/sudo", "-n", "/helper", "stop"), 5.0)])
+            self.assertNotIn(None, wait_timeouts)
+            self.assertEqual(killed, [(6789, signal.SIGKILL)])
+
     def test_failed_child_writes_backoff_status_with_next_retry(self):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"

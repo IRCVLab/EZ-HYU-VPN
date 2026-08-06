@@ -34,6 +34,8 @@ _NETWORK_SCRIPT_ERROR_CODES = {
     "network-script-postcondition-failed": "NETWORK_SCRIPT_POSTCONDITION_FAILED",
     "network-script-failed": "NETWORK_SCRIPT_FAILED",
 }
+_CONNECT_TIMEOUT_ERROR_CODE = "CONNECT_TIMEOUT_NO_TUNNEL"
+_CONNECT_WAIT_SLICE_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -135,6 +137,7 @@ class SupervisorConfig:
     control_socket_path: str = str(Path.home() / "Library" / "Application Support" / "hyu-openconnect" / "control.sock")
     helper_path: str = "/Library/PrivilegedHelperTools/com.hyu.vpn.helper"
     helper_timeout: float = 5.0
+    connect_establish_timeout: float = 150.0
 
 
 class Supervisor:
@@ -509,7 +512,7 @@ class Supervisor:
                     self._wait_for_control_or_stop(delay)
                     continue
 
-                last_returncode = self._wait_for_child()
+                last_returncode, connect_timed_out = self._wait_for_child_or_connect_timeout(started_at=started_at)
                 if not self._join_stdout_reader():
                     last_returncode = 1
                 self._invalidate_active_generation()
@@ -520,6 +523,11 @@ class Supervisor:
                     self._state_changed.notify_all()
                 if self._stop_requested:
                     break
+                if connect_timed_out:
+                    if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
+                        break
+                    self._wait_for_control_or_stop(self.config.conflict_poll_interval)
+                    continue
                 with self._state_lock:
                     connector_repair_pending = self._connector_repair_pending
                     connector_failure_code = self._connector_failure_code
@@ -695,6 +703,49 @@ class Supervisor:
         if child is None:
             return 0
         return child.wait() or 0
+
+    def _wait_for_child_or_connect_timeout(self, *, started_at: float) -> tuple[int, bool]:
+        with self._state_lock:
+            child = self._child
+        if child is None:
+            return 0, False
+        timeout = self.config.connect_establish_timeout
+        deadline = started_at + timeout
+        while True:
+            with self._state_lock:
+                established = self._status.state == "connected"
+                child = self._child
+            if child is None:
+                return 0, False
+            if established:
+                return child.wait() or 0, False
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                return self._handle_connect_establish_timeout(), True
+            try:
+                wait_slice = min(_CONNECT_WAIT_SLICE_SECONDS, remaining)
+                return child.wait(timeout=wait_slice) or 0, False
+            except subprocess.TimeoutExpired:
+                continue
+
+    def _handle_connect_establish_timeout(self) -> int:
+        with self._state_lock:
+            last_successful_hip_at = self._status.last_successful_hip_at
+            session_expires_at = self._status.session_expires_at
+        self.preference.write(False)
+        self._connector_failure_code = _CONNECT_TIMEOUT_ERROR_CODE
+        stopped = self._stop_helper_and_teardown_user_connector(automatic=False)
+        if stopped:
+            self._write_current_status(
+                state="error",
+                automatic=False,
+                error_code=_CONNECT_TIMEOUT_ERROR_CODE,
+                last_successful_hip_at=last_successful_hip_at,
+                session_expires_at=session_expires_at,
+            )
+        else:
+            self._enter_repair_required(automatic=False)
+        return 1
 
     def _stop_child(self, signum: int = signal.SIGTERM) -> None:
         child = self._child
