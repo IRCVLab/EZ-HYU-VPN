@@ -343,6 +343,83 @@ esac
         #expect(tools.routes.isEmpty)
     }
 
+    @Test func repairRestoresRemovedGatewayBaselineRoute() throws {
+        let dir = try temporaryDirectory()
+        let ledger = dir.appendingPathComponent("nonceabc123.ledger")
+        let tools = TunnelSurfaceNetworkTools()
+        let gatewayBypass = RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4")
+        tools.routes = [gatewayBypass]
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
+        let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: tools, upstream: TunnelSurfaceApplyingUpstream(tools: tools))
+
+        try runner.run(reason: "connect", nonce: "nonceabc123", environment: round10ValidEnv(ledger: ledger), suppliedLedgerPath: ledger)
+
+        let recorded = try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: "nonceabc123")
+        let bypassRecord = try #require(recorded.routeRecords.first { $0.applied.destination == gatewayBypass.destination })
+        #expect(bypassRecord.before == gatewayBypass)
+        #expect(bypassRecord.applied.routeSnapshot == gatewayBypass)
+        tools.routes = []
+        try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).save(recorded.withStatus("repair-required"))
+
+        try runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: ledger)
+
+        #expect(!FileManager.default.fileExists(atPath: ledger.path))
+        #expect(tools.restoredRoutes == [gatewayBypass])
+        #expect(tools.routes == [gatewayBypass])
+    }
+
+    @Test func repairStillRestoresMissingForeignBaselineHostRoute() throws {
+        let dir = try temporaryDirectory()
+        let ledger = dir.appendingPathComponent("nonceabc123.ledger")
+        let tools = TunnelSurfaceNetworkTools()
+        let foreignRoute = RouteSnapshot(destination: "203.0.113.77", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4")
+        tools.routes = [foreignRoute]
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
+        let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: tools, upstream: TunnelSurfaceApplyingUpstream(tools: tools))
+
+        var environment = round10ValidEnv(ledger: ledger)
+        environment["CISCO_SPLIT_INC_0_ADDR"] = foreignRoute.destination
+        environment["CISCO_SPLIT_INC_0_MASK"] = foreignRoute.netmask
+        try runner.run(reason: "connect", nonce: "nonceabc123", environment: environment, suppliedLedgerPath: ledger)
+
+        let recorded = try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: "nonceabc123")
+        tools.routes = []
+        try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).save(recorded.withStatus("repair-required"))
+
+        try runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: ledger)
+
+        #expect(!FileManager.default.fileExists(atPath: ledger.path))
+        #expect(tools.restoredRoutes == [foreignRoute])
+        #expect(tools.routes == [foreignRoute])
+    }
+
+    @Test func systemNetworkToolsRestoresGatewayRouteWithoutDirectInterfaceModifier() throws {
+        let dir = try temporaryDirectory()
+        let route = dir.appendingPathComponent("route")
+        let log = dir.appendingPathComponent("route-argv.log")
+        try writeExecutable(route, """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> '\(log.path)'
+        if [ "$1" = "-n" ] && [ "$2" = "get" ]; then
+          cat <<'ROUTE'
+           route to: 198.51.100.9
+        destination: 198.51.100.9
+            gateway: 192.0.2.1
+          interface: en0
+              flags: <UP,GATEWAY,HOST,DONE,STATIC>
+        ROUTE
+        fi
+        """)
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: route, scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
+        let tools = SystemNetworkTools(paths: paths)
+        let baseline = RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4")
+
+        try tools.restoreRoute(baseline)
+
+        let calls = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
+        #expect(calls.first == "-n add -net 198.51.100.9 -netmask 255.255.255.255 192.0.2.1")
+    }
+
     @Test func sanitizedEnvironmentPreservesNumericVPNPIDAndSynthesizesIPv4Mask() {
         let sanitized = NetworkWrapperRunner.sanitizedEnvironment([
             "VPNPID": "12345",
@@ -513,6 +590,7 @@ private final class TunnelSurfaceApplyingUpstream: VpncUpstreamRunning {
 
 private final class TunnelSurfaceNetworkTools: NetworkTooling {
     var routes: [RouteSnapshot] = []
+    var restoredRoutes: [RouteSnapshot] = []
     func rebootIdentity() throws -> UInt64 { 4242 }
     func primaryServiceID() throws -> String { "service-wifi" }
     func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: "0.0.0.0", protocol: "ipv4") }
@@ -533,7 +611,11 @@ private final class TunnelSurfaceNetworkTools: NetworkTooling {
     }
     func serviceName(for serviceID: String) throws -> String { "Wi-Fi" }
     func deleteRoute(_ delta: RouteDelta) throws { routes.removeAll { $0.destination == delta.destination && $0.netmask == delta.netmask } }
-    func restoreRoute(_ route: RouteSnapshot) throws { routes.append(route) }
+    func restoreRoute(_ route: RouteSnapshot) throws {
+        restoredRoutes.append(route)
+        routes.removeAll { $0.destination == route.destination && $0.netmask == route.netmask }
+        routes.append(route)
+    }
     func restoreResolver(serviceID: String, snapshot: ResolverSnapshot) throws {}
 }
 

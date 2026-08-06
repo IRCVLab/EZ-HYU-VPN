@@ -54,11 +54,14 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-zero-exit-without-routes-fails-postcondition", testZeroExitWithoutRoutesFailsPostcondition),
                 ("network-no-route-failure-retains-resolver-probe-for-repair", testNoRouteFailureRetainsResolverProbeForRepair),
                 ("network-repair-captures-tunnel-resolver-before-mutation", testRepairCapturesTunnelResolverBeforeMutation),
+                ("network-repair-restores-removed-gateway-baseline-route", testRepairRestoresRemovedGatewayBaselineRoute),
+                ("network-repair-restores-missing-foreign-baseline-host-route", testRepairRestoresMissingForeignBaselineHostRoute),
                 ("system-network-tools-accepts-dhcp-missing-setup-dns", testSystemNetworkToolsAcceptsDHCPMissingSetupDNS),
                 ("system-network-tools-normalizes-static-host-route-mask", testSystemNetworkToolsNormalizesStaticHostRouteMask),
                 ("system-network-tools-resolves-explicit-network-host-route", testSystemNetworkToolsResolvesExplicitNetworkHostRoute),
                 ("system-network-tools-rejects-cloned-host-route-as-static", testSystemNetworkToolsRejectsClonedHostRouteAsStatic),
                 ("system-network-tools-rejects-default-route-for-host-query", testSystemNetworkToolsRejectsDefaultRouteForHostQuery),
+                ("system-network-tools-restores-gateway-route-without-interface-modifier", testSystemNetworkToolsRestoresGatewayRouteWithoutInterfaceModifier),
                 ("network-sanitized-env-preserves-vpnpid-and-mask", testSanitizedEnvironmentPreservesVPNPIDAndMask),
                 ("network-preinit-ledger-drift-blocks-upstream", testPreInitLedgerDriftBlocksUpstream),
                 ("network-strict-ipv4-split-inputs", testStrictIPv4SplitInputs),
@@ -633,6 +636,104 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(fixture.tools.routes.isEmpty, "repair removes applied routes")
     }
 
+    static func testRepairRestoresRemovedGatewayBaselineRoute() throws {
+        let fixture = try HarnessNetworkFixture()
+        let gatewayBypass = RouteSnapshot(
+            destination: "198.51.100.9",
+            gateway: "192.0.2.1",
+            interface: "en0",
+            netmask: "255.255.255.255",
+            protocol: "ipv4"
+        )
+        fixture.tools.routes = [gatewayBypass]
+        fixture.upstream.onRun = { reason, _ in
+            guard reason == "connect" else { return }
+            let intent = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+            fixture.tools.routes = intent.routeRecords.map(\.applied.routeSnapshot)
+        }
+
+        try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: fixture.validEnv(), suppliedLedgerPath: fixture.ledger)
+
+        let recorded = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+        guard let bypassRecord = recorded.routeRecords.first(where: { $0.applied.destination == gatewayBypass.destination }) else {
+            throw HarnessFailure(description: "missing gateway bypass record")
+        }
+        try expect(bypassRecord.before == gatewayBypass, "OpenConnect gateway bypass captured before wrapper mutation")
+        try expect(bypassRecord.applied.routeSnapshot == gatewayBypass, "gateway bypass intent is idempotent")
+
+        // OpenConnect may remove the portal-bypass route when the child exits.
+        // The wrapper recorded it as part of the exact pre-mutation baseline,
+        // so repair must restore it rather than silently accepting route loss.
+        fixture.tools.routes = []
+        try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).save(recorded.withStatus("repair-required"))
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "restored gateway baseline removes stale ledger")
+        try expect(fixture.tools.restoredRoutes == [gatewayBypass], "repair restores the missing gateway baseline route")
+        try expect(fixture.tools.routes == [gatewayBypass], "gateway baseline route is present after repair")
+    }
+
+    static func testRepairRestoresMissingForeignBaselineHostRoute() throws {
+        let fixture = try HarnessNetworkFixture()
+        let foreignRoute = RouteSnapshot(
+            destination: "203.0.113.77",
+            gateway: "192.0.2.1",
+            interface: "en0",
+            netmask: "255.255.255.255",
+            protocol: "ipv4"
+        )
+        fixture.tools.routes = [foreignRoute]
+        fixture.upstream.onRun = { reason, _ in
+            guard reason == "connect" else { return }
+            let intent = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+            fixture.tools.routes = intent.routeRecords.map(\.applied.routeSnapshot)
+        }
+
+        var environment = fixture.validEnv()
+        environment["CISCO_SPLIT_INC_0_ADDR"] = foreignRoute.destination
+        environment["CISCO_SPLIT_INC_0_MASK"] = foreignRoute.netmask
+        try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: environment, suppliedLedgerPath: fixture.ledger)
+
+        let recorded = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
+        fixture.tools.routes = []
+        try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).save(recorded.withStatus("repair-required"))
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "successful foreign-route restore removes ledger")
+        try expect(fixture.tools.restoredRoutes == [foreignRoute], "repair restores only the missing foreign baseline route")
+        try expect(fixture.tools.routes == [foreignRoute], "foreign route is present after repair")
+    }
+
+    static func testSystemNetworkToolsRestoresGatewayRouteWithoutInterfaceModifier() throws {
+        let dir = try harnessTempDir()
+        let route = dir.appendingPathComponent("route")
+        let log = dir.appendingPathComponent("route-argv.log")
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> '\(log.path)'
+        if [ "$1" = "-n" ] && [ "$2" = "get" ]; then
+          cat <<'ROUTE'
+           route to: 198.51.100.9
+        destination: 198.51.100.9
+            gateway: 192.0.2.1
+          interface: en0
+              flags: <UP,GATEWAY,HOST,DONE,STATIC>
+        ROUTE
+        fi
+        """.write(to: route, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: route.path)
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: route, scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
+        let tools = SystemNetworkTools(paths: paths)
+        let baseline = RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4")
+
+        try tools.restoreRoute(baseline)
+
+        let calls = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
+        try expect(calls.first == "-n add -net 198.51.100.9 -netmask 255.255.255.255 192.0.2.1", "gateway route restore does not misuse the direct-interface modifier")
+    }
+
     static func testSanitizedEnvironmentPreservesVPNPIDAndMask() throws {
         let sanitized = NetworkWrapperRunner.sanitizedEnvironment([
             "VPNPID": "12345",
@@ -826,6 +927,7 @@ final class FakeProcessController: ProcessControlling {
 final class HarnessNetworkTools: NetworkTooling {
     var defaultGateway = "192.0.2.1"
     var routes: [RouteSnapshot] = []
+    var restoredRoutes: [RouteSnapshot] = []
     var includeTunnelSurface = false
     func rebootIdentity() throws -> UInt64 { 4242 }
     func primaryServiceID() throws -> String { "service-wifi" }
@@ -848,7 +950,11 @@ final class HarnessNetworkTools: NetworkTooling {
     func deleteRoute(_ delta: RouteDelta) throws {
         routes.removeAll { $0.destination == delta.destination && $0.netmask == delta.netmask }
     }
-    func restoreRoute(_ route: RouteSnapshot) throws {}
+    func restoreRoute(_ route: RouteSnapshot) throws {
+        restoredRoutes.append(route)
+        routes.removeAll { $0.destination == route.destination && $0.netmask == route.netmask }
+        routes.append(route)
+    }
     func restoreResolver(serviceID: String, snapshot: ResolverSnapshot) throws {}
 }
 final class HarnessCountingUpstream: VpncUpstreamRunning {

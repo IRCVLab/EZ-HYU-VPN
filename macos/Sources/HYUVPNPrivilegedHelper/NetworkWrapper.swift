@@ -246,7 +246,10 @@ public struct SystemNetworkTools: NetworkTooling {
         var args = ["-n", "add", route.destination == "default" ? "default" : "-net", route.destination]
         if let netmask = route.netmask, !netmask.isEmpty, route.destination != "default" { args += ["-netmask", netmask] }
         args.append(gateway)
-        if let interface = route.interface, !interface.isEmpty { args += ["-interface", interface] }
+        // Darwin's `-interface` marks a directly reachable (non-gateway)
+        // route; appending it to a gateway route produces an invalid restore
+        // command. Let the kernel resolve the interface from the gateway and
+        // then fail closed if the exact recorded interface is not observed.
         _ = try checked(paths.route, args)
         guard try self.route(destination: route.destination, netmask: route.netmask) == route else { throw HelperError.processMismatch }
     }
@@ -792,7 +795,6 @@ public struct NetworkWrapperRunner {
         }
         return (true, actions, serversApplied, searchApplied, surfacesApplied)
     }
-
 
     private func exactIntentRouteOwned(ledger: NetworkLedger, record: RouteRecord, current: RouteSnapshot) -> Bool {
         guard current.protocol == "ipv4", routeKey(current) == routeKey(record.applied), let gateway = current.gateway, !gateway.isEmpty else { return false }
