@@ -655,6 +655,9 @@ class ReleaseCliTests(PackagingTestCase):
             source_compliance_bundle=bundle, closure_runner=FakeOtoolRunner({str(oc.resolve()): f"{oc}:\n", str(oath.resolve()): f"{oath}:\n"}),
         )
         self.assertEqual((payload / "SOURCE-COMPLIANCE-BUNDLE.tar.gz").read_bytes(), bundle.read_bytes())
+        for launcher, script in [("Install HYU VPN.command", "install.sh"), ("Uninstall HYU VPN.command", "uninstall.sh")]:
+            self.assertTrue((payload / "installer" / script).is_file())
+            self.assertIn(f'exec "$SCRIPT_DIR/installer/{script}" "$@"', (payload / launcher).read_text(encoding="utf-8"))
 
     def test_non_fake_release_requires_source_compliance_bundle_before_real_tools(self):
         src = self.make_payload_source()
