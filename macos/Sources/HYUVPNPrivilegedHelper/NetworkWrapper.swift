@@ -204,7 +204,11 @@ public struct SystemNetworkTools: NetworkTooling {
         let globalKey = "State:/Network/Global/DNS"
         let physicalKey = "State:/Network/Interface/\(baselineInterface)/DNS"
         let tunnelKey = tunnelInterface.map { "State:/Network/Interface/\($0)/DNS" }
-        let setup = try dnsState(for: setupKey, required: true)
+        // DHCP-provided DNS commonly has no persistent Setup:/.../DNS key.
+        // Treat that absence as a valid baseline surface rather than a process
+        // mismatch; the State:/Global/effective surfaces below still capture
+        // the live DNS values needed for drift detection and repair.
+        let setup = try dnsState(for: setupKey, required: false)
         let state = try dnsState(for: stateKey, required: false)
         let global = try dnsState(for: globalKey, required: false)
         let physical = try dnsState(for: physicalKey, required: false)

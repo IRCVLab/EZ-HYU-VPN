@@ -54,6 +54,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-zero-exit-without-routes-fails-postcondition", testZeroExitWithoutRoutesFailsPostcondition),
                 ("network-no-route-failure-retains-resolver-probe-for-repair", testNoRouteFailureRetainsResolverProbeForRepair),
                 ("network-repair-captures-tunnel-resolver-before-mutation", testRepairCapturesTunnelResolverBeforeMutation),
+                ("system-network-tools-accepts-dhcp-missing-setup-dns", testSystemNetworkToolsAcceptsDHCPMissingSetupDNS),
                 ("network-sanitized-env-preserves-vpnpid-and-mask", testSanitizedEnvironmentPreservesVPNPIDAndMask),
                 ("network-preinit-ledger-drift-blocks-upstream", testPreInitLedgerDriftBlocksUpstream),
                 ("network-strict-ipv4-split-inputs", testStrictIPv4SplitInputs),
@@ -374,6 +375,60 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expectThrows("foreign mismatch") { _ = try harness.run(command: .repair) }
         try expect(harness.store.record != nil, "foreign repair mismatch preserves evidence")
         try expect(harness.ledgerCoordinator.repairedNonces == ["nonce12345"], "repair attempted exact nonce")
+    }
+
+    static func testSystemNetworkToolsAcceptsDHCPMissingSetupDNS() throws {
+        let dir = try harnessTempDir()
+        let scutil = dir.appendingPathComponent("scutil")
+        try """
+        #!/bin/sh
+        input="$(cat)"
+        case "$1:$input" in
+          "--dns:"*)
+            printf '%s\\n' 'DNS configuration'
+            printf '%s\\n' 'resolver #1'
+            printf '%s\\n' '  nameserver[0] : 9.9.9.9'
+            ;;
+          *"Setup:/Network/Service/service-wifi/DNS"*)
+            printf '%s\\n' '  No such key'
+            ;;
+          *"State:/Network/Service/service-wifi/DNS"*)
+            printf '%s\\n' '<dictionary> {'
+            printf '%s\\n' '  ServerAddresses : <array> {'
+            printf '%s\\n' '    0 : 9.9.9.9'
+            printf '%s\\n' '  }'
+            printf '%s\\n' '}'
+            ;;
+          *"State:/Network/Global/DNS"*)
+            printf '%s\\n' '<dictionary> {'
+            printf '%s\\n' '  ServerAddresses : <array> {'
+            printf '%s\\n' '    0 : 9.9.9.9'
+            printf '%s\\n' '  }'
+            printf '%s\\n' '}'
+            ;;
+          *)
+            printf '%s\\n' '  No such key'
+            ;;
+        esac
+        """.write(to: scutil, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scutil.path)
+        let paths = RuntimePaths(
+            ledgerRoot: dir,
+            upstream: dir.appendingPathComponent("vpnc-script"),
+            route: dir.appendingPathComponent("route"),
+            scutil: scutil,
+            sysctl: dir.appendingPathComponent("sysctl"),
+            networksetup: dir.appendingPathComponent("networksetup")
+        )
+
+        let snapshot = try SystemNetworkTools(paths: paths).resolver(serviceID: "service-wifi", baselineInterface: "en0", tunnelInterface: nil)
+
+        let setupKey = "Setup:/Network/Service/service-wifi/DNS"
+        let stateKey = "State:/Network/Service/service-wifi/DNS"
+        try expect(snapshot.servers.isEmpty, "missing setup DNS records no manual DNS servers")
+        try expect(snapshot.serversPresent == false, "missing setup DNS preserves absent ServerAddresses")
+        try expect(snapshot.surfaces[setupKey]?.keyPresent == false, "missing setup DNS key recorded as absent")
+        try expect(snapshot.surfaces[stateKey]?.servers == ["9.9.9.9"], "DHCP state DNS still captured for drift and repair")
     }
 
 
