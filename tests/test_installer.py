@@ -53,7 +53,33 @@ class InstallerTestCase(unittest.TestCase):
             self._script(rel)
         (self.payload / "runtime/openconnect/lib").mkdir(parents=True)
         self._script("runtime/openconnect/lib/libvpn.dylib", "lib")
-        self._script("com.hyu.vpn.helper", "helper")
+        self._script(
+            "com.hyu.vpn.helper",
+            """#!/bin/sh
+root=${0%%/Library/PrivilegedHelperTools/com.hyu.vpn.helper}
+state="$root/private/var/db/hyu-vpn/fake-helper-state"
+mkdir -p "$(dirname "$state")"
+current=$(cat "$state" 2>/dev/null || printf stopped)
+case "${1:-}" in
+  status)
+    case "$current" in
+      stopped) printf '%s\\n' '{"schema_version":1,"state":"stopped"}' ;;
+      running) printf '%s\\n' '{"schema_version":1,"state":"running","pid":123,"session_nonce":"fake","tunnel_interface":"utun7"}' ;;
+      repair-required) printf '%s\\n' '{"schema_version":1,"state":"repair-required","session_nonce":"fake"}' ;;
+      *) exit 65 ;;
+    esac
+    ;;
+  stop)
+    printf stopped > "$state"
+    ;;
+  repair)
+    [ "${HYU_FAKE_NEW_HELPER_REPAIR_FAIL:-0}" = 1 ] && exit 42
+    printf stopped > "$state"
+    ;;
+  *) exit 64 ;;
+esac
+""",
+        )
         (self.payload / "config").mkdir()
         (self.payload / "config/final-runtime-manifest.json").write_text('{"schema":1,"release_gate":"non_release_task8_placeholder"}\n', encoding="utf-8")
         (self.payload / "installer").mkdir()
@@ -321,6 +347,61 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertNotIn("suppress-auto-launch", commands)
         self.assertIn("verify-suppressed", commands)
         self.assertIn("native-suppression-preserved", (state / "install-transaction.log").read_text(encoding="utf-8"))
+
+    def _inject_stale_old_helper_during_quarantine(self, env, tools):
+        helper = env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper"
+        state = env.root / "private/var/db/hyu-vpn/fake-helper-state"
+        launchctl = tools / "bin/launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\n"
+            f"mkdir -p {str(helper.parent)!r} {str(state.parent)!r}\n"
+            f"if [ ! -e {str(helper)!r} ]; then\n"
+            f"  cat > {str(helper)!r} <<'OLD_HELPER'\n"
+            "#!/bin/sh\n"
+            f"state={str(state)!r}\n"
+            "case \"${1:-}\" in\n"
+            "  status) printf '%s\\n' '{\"schema_version\":1,\"state\":\"repair-required\",\"session_nonce\":\"old\"}' ;;\n"
+            "  repair) exit 42 ;;\n"
+            "  stop) exit 42 ;;\n"
+            "  *) exit 64 ;;\n"
+            "esac\n"
+            "OLD_HELPER\n"
+            f"  chmod 755 {str(helper)!r}\n"
+            f"  printf repair-required > {str(state)!r}\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+        return helper, state
+
+    def test_upgrade_defers_old_repair_bug_then_new_helper_repairs_and_verifies_stopped(self):
+        env = DryRunEnvironment(root=self.root / "dry helper repair upgrade", payload=self.payload, home=self.root / "home helper repair upgrade", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        _, state = self._inject_stale_old_helper_during_quarantine(env, tools)
+
+        proc = self.run_root_admin(env, stage, tools_root=tools)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertEqual(state.read_text(encoding="utf-8"), "stopped")
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        self.assertLess(journal.index("old-helper-repair-deferred"), journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"))
+        self.assertLess(journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"), journal.index("installed-helper-stopped"))
+
+    def test_upgrade_rolls_back_if_new_helper_cannot_clear_deferred_repair(self):
+        env = DryRunEnvironment(root=self.root / "dry helper repair rollback", payload=self.payload, home=self.root / "home helper repair rollback", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        old_helper, _ = self._inject_stale_old_helper_during_quarantine(env, tools)
+
+        proc = self.run_root_admin(env, stage, tools_root=tools, extra_env={"HYU_FAKE_NEW_HELPER_REPAIR_FAIL": "1"})
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertTrue(old_helper.exists())
+        self.assertIn("repair) exit 42", old_helper.read_text(encoding="utf-8"))
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        self.assertIn("rollback-complete", journal)
 
     def test_malicious_stage_with_regenerated_digest_cannot_override_verified_package(self):
         env = self.env()

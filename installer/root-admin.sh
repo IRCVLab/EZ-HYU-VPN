@@ -107,6 +107,58 @@ run_optional_cmd(){ local exe="$(tool_path "$1")"; shift; record_cmd "$exe $*"; 
 record_path(){ rel_path "$1" >> "$TXN_PATHS"; durable_flush "$TXN_PATHS"; }
 
 capture_cmd(){ local exe="$(tool_path "$1")"; shift; record_cmd "$exe $*"; [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0; "$exe" "$@" 2>/dev/null || true; }
+helper_state(){
+  local raw
+  raw="$(capture_cmd "$HELPER_DST" status)"
+  print -r -- "$raw" | /usr/bin/python3 -I -c 'import json,sys
+try: data=json.load(sys.stdin)
+except Exception: raise SystemExit(1)
+if not isinstance(data,dict) or data.get("schema_version") != 1: raise SystemExit(1)
+state=data.get("state")
+if state not in {"stopped","running","repair-required"}: raise SystemExit(1)
+print(state)
+' 2>/dev/null
+}
+drain_existing_helper(){
+  [[ -x "$HELPER_DST" ]] || return 0
+  [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0
+  local state after
+  state="$(helper_state)" || { print -u2 "existing HYU VPN helper status is invalid"; return 1; }
+  case "$state" in
+    stopped)
+      log "old-helper-stopped"
+      ;;
+    running)
+      run_cmd "$HELPER_DST" stop || { print -u2 "existing HYU VPN session could not be stopped safely"; return 1; }
+      [[ "$(helper_state)" == stopped ]] || { print -u2 "existing HYU VPN helper did not stop"; return 1; }
+      log "old-helper-drained"
+      ;;
+    repair-required)
+      if run_cmd "$HELPER_DST" repair; then
+        [[ "$(helper_state)" == stopped ]] || { print -u2 "existing HYU VPN helper repair did not reach stopped"; return 1; }
+        log "old-helper-repaired"
+      else
+        after="$(helper_state)" || { print -u2 "existing HYU VPN helper state became unreadable"; return 1; }
+        case "$after" in
+          stopped) log "old-helper-repaired-after-nonzero" ;;
+          repair-required) log "old-helper-repair-deferred" ;;
+          *) print -u2 "existing HYU VPN helper changed state during failed repair"; return 1 ;;
+        esac
+      fi
+      ;;
+  esac
+}
+verify_installed_helper_stopped(){
+  [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0
+  local state
+  state="$(helper_state)" || { print -u2 "installed HYU VPN helper status is invalid"; return 1; }
+  if [[ "$state" == repair-required ]]; then
+    run_cmd "$HELPER_DST" repair || { print -u2 "installed HYU VPN helper could not repair retained state"; return 1; }
+    state="$(helper_state)" || { print -u2 "installed HYU VPN helper status is invalid after repair"; return 1; }
+  fi
+  [[ "$state" == stopped ]] || { print -u2 "installed HYU VPN helper is not stopped"; return 1; }
+  log "installed-helper-stopped"
+}
 has_legacy_tunnel_route(){
   print -r -- "$1" | /usr/bin/awk '
     $1 ~ /^166[.]104([.]|\/|$)/ {
@@ -319,6 +371,7 @@ write_installed_manifest(){ local tmp="$INSTALLED_MANIFEST.tmp" paths_tmp="$INST
 install_phase(){
   print in_progress >| "$TX_STATE"; durable_flush "$TX_STATE"; log "before-snapshot"; copy_snapshot; fail_after snapshot
   quarantine_legacy
+  drain_existing_helper
   copy_file "$TXN_SNAPSHOT/com.hyu.vpn.helper" "$HELPER_DST" 755; fail_after helper
   /bin/mkdir -p "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime/openconnect" "$APP_SUPPORT/runtime/vpnc" "$STATE_DIR/ledger"
   /bin/chmod 755 "$APP_SUPPORT" "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime" "$APP_SUPPORT/runtime/openconnect" "$APP_SUPPORT/runtime/vpnc"; /bin/chmod 700 "$STATE_DIR" "$STATE_DIR/ledger"
@@ -330,6 +383,7 @@ install_phase(){
   WRAPPERD_HASH="$(sha256 "$APP_SUPPORT/runtime/vpnc/hyu-vpnc-wrapperd")"; write_file "$APP_SUPPORT/runtime/vpnc/hyu-vpnc-wrapperd.sha256" 644 "$WRAPPERD_HASH"; OATH_HASH="$(sha256 "$RUNTIME_DIR/bin/oathtool")"; write_file "$APP_SUPPORT/connector-config.json" 644 "{\"schema_version\":1,\"oathtool_path\":\"/Library/Application Support/HYU VPN/runtime/current/bin/oathtool\",\"oathtool_sha256\":\"$OATH_HASH\"}"
   OC_ABS="/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"; VPNC_ABS="/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"; HIP_ABS="/Library/Application Support/HYU VPN/runtime/gp-hip-report"; OC_HASH="$(sha256 "$RUNTIME_DIR/bin/openconnect")"; VPNC_HASH="$(sha256 "$VPNC_WRAPPER_DST")"; HIP_HASH="$(sha256 "$APP_SUPPORT/runtime/gp-hip-report")"; cfg="{\"openConnectExecutable\":\"$OC_ABS\",\"vpncScript\":\"$VPNC_ABS\",\"hipWrapper\":\"$HIP_ABS\",\"stateDirectory\":\"/private/var/db/hyu-vpn\",\"ledgerDirectory\":\"/private/var/db/hyu-vpn/ledger\",\"openConnectExecutableSHA256\":\"$OC_HASH\",\"vpncScriptSHA256\":\"$VPNC_HASH\",\"hipWrapperSHA256\":\"$HIP_HASH\"}"
   write_file "$APP_SUPPORT/helper-config.json" 600 "$cfg"; fail_after app
+  verify_installed_helper_stopped
   /bin/mkdir -p "$(/usr/bin/dirname "$SUDOERS_DST")"; print -- "$ADMIN_USER ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/com.hyu.vpn.helper start, /Library/PrivilegedHelperTools/com.hyu.vpn.helper stop, /Library/PrivilegedHelperTools/com.hyu.vpn.helper status, /Library/PrivilegedHelperTools/com.hyu.vpn.helper repair" > "$SUDOERS_TMP"; /bin/chmod 440 "$SUDOERS_TMP"; run_cmd /usr/sbin/visudo -c -f "$SUDOERS_TMP"; backup_target "$SUDOERS_DST"; record_path "$SUDOERS_DST"; run_cmd /bin/mv "$SUDOERS_TMP" "$SUDOERS_DST"; [[ -e "$SUDOERS_TMP" ]] && /bin/mv "$SUDOERS_TMP" "$SUDOERS_DST"; /bin/chmod 440 "$SUDOERS_DST"; run_cmd /usr/sbin/visudo -c -f "$SUDOERS_DST"; run_cmd /usr/sbin/visudo -c; backup_target "$LEGACY_SUDOERS_DST"; fail_after sudoers
   if [[ -f "$STATE_DIR/native-suppression.json" ]]; then
     validate_native_snapshot
@@ -342,7 +396,7 @@ install_phase(){
   fi
   fail_after native-suppression
   render_plists; run_cmd /usr/sbin/chown "${ADMIN_USER}:staff" "$SERVICE_PLIST" "$MENUBAR_PLIST"; fail_after launchagent
-  write_file "$STATE_DIR/migration.json" 600 '{"liveHelper":"drain-old-before-replace"}'; write_installed_manifest; /bin/rm -rf "$PACKAGE_SNAPSHOT" "$TXN_SNAPSHOT"; /bin/rm -f "$STATE_DIR/native-suppression-transaction"; print complete >| "$TX_STATE"; durable_flush "$TX_STATE"; log "install-complete"
+  write_file "$STATE_DIR/migration.json" 600 '{"liveHelper":"drained-before-replace-and-verified-stopped"}'; write_installed_manifest; /bin/rm -rf "$PACKAGE_SNAPSHOT" "$TXN_SNAPSHOT"; /bin/rm -f "$STATE_DIR/native-suppression-transaction"; print complete >| "$TX_STATE"; durable_flush "$TX_STATE"; log "install-complete"
 }
 uninstall_phase(){
   [[ -x "$HELPER_DST" ]] && { run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper status; run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper stop; run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper repair; }
