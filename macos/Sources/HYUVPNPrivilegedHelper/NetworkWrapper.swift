@@ -311,7 +311,16 @@ public struct SystemNetworkTools: NetworkTooling {
         let actualDestination = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*destination:\s*(\S+)"#) ?? (requestedDestination == "default" ? "default" : "")
         let gateway = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*gateway:\s*(\S+)"#) ?? ""
         let interface = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*interface:\s*(\S+)"#) ?? ""
-        let netmask = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*mask:\s*(\S+)"#) ?? firstMatch(result.stdout, pattern: #"(?:^|\n)\s*netmask:\s*(\S+)"#) ?? (requestedDestination == "default" ? "0.0.0.0" : "")
+        let flags = Set((firstMatch(result.stdout, pattern: #"(?:^|\n)\s*flags:\s*<([^>]+)>"#) ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() })
+        let parsedNetmask = firstMatch(result.stdout, pattern: #"(?:^|\n)\s*mask:\s*(\S+)"#) ?? firstMatch(result.stdout, pattern: #"(?:^|\n)\s*netmask:\s*(\S+)"#)
+        let isOwnedStaticHostRoute = requestedNetmask == "255.255.255.255"
+            && actualDestination == requestedDestination
+            && flags.contains("HOST")
+            && flags.contains("STATIC")
+            && !flags.contains("WASCLONED")
+        let netmask = parsedNetmask ?? (requestedDestination == "default" ? "0.0.0.0" : (isOwnedStaticHostRoute ? "255.255.255.255" : ""))
         guard !gateway.isEmpty, !interface.isEmpty else { if requestedDestination == "default" { throw HelperError.processMismatch }; return nil }
         if requestedDestination != "default" {
             guard actualDestination == requestedDestination else { return nil }

@@ -106,7 +106,33 @@ run_cmd(){ local exe="$(tool_path "$1")"; shift; record_cmd "$exe $*"; if [[ -z 
 run_optional_cmd(){ local exe="$(tool_path "$1")"; shift; record_cmd "$exe $*"; if [[ -z "$DRY_RUN_ROOT" || -n "$TOOLS_ROOT" ]]; then "$exe" "$@" || true; fi; }
 record_path(){ rel_path "$1" >> "$TXN_PATHS"; durable_flush "$TXN_PATHS"; }
 
-capture_cmd(){ local exe="$(tool_path "$1")"; shift; record_cmd "$exe $*"; if [[ -n "$TOOLS_ROOT" ]]; then "$exe" "$@" 2>/dev/null || true; else "$exe" "$@" 2>/dev/null || true; fi; }
+capture_cmd(){ local exe="$(tool_path "$1")"; shift; record_cmd "$exe $*"; [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0; "$exe" "$@" 2>/dev/null || true; }
+has_legacy_tunnel_route(){
+  print -r -- "$1" | /usr/bin/awk '
+    $1 ~ /^166[.]104([.]|\/|$)/ {
+      for (i = 2; i <= NF; i++) {
+        if ($i ~ /^(utun|ppp|ipsec|tap|tun)[0-9]*$/) found = 1
+      }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+has_legacy_vpn_resolver(){
+  print -r -- "$1" | /usr/bin/awk '
+    function finish_resolver() {
+      if (has_hanyang && has_tunnel) found = 1
+      has_hanyang = 0
+      has_tunnel = 0
+    }
+    /^[[:space:]]*resolver #[0-9]+/ { finish_resolver(); next }
+    {
+      line = tolower($0)
+      if (line ~ /(166[.]104[.]|hanyang)/) has_hanyang = 1
+      if (line ~ /\((utun|ppp|ipsec|tap|tun)[0-9]*\)/ || line ~ /(if_index|interface)[^[:alnum:]_]+(utun|ppp|ipsec|tap|tun)[0-9]*/) has_tunnel = 1
+    }
+    END { finish_resolver(); exit found ? 0 : 1 }
+  '
+}
 validate_native_snapshot(){
   [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0
   local snapshot="$STATE_DIR/native-suppression.json"
@@ -154,9 +180,9 @@ quarantine_legacy(){
   proc_out="$(capture_cmd /usr/bin/pgrep -fl 'openconnect.*secure\.hanyang\.ac\.kr|local\.hyu-openconnect|hyu-vpn-connect')"
   [[ -z "$proc_out" ]] || { print -u2 "legacy process remains: $LEGACY_LABEL"; return 1; }
   net_out="$(capture_cmd /usr/sbin/netstat -rn -f inet)"
-  [[ "$net_out" != *166.104.* && "$net_out" != *secure.hanyang.ac.kr* ]] || { print -u2 "legacy tunnel route remains"; return 1; }
+  ! has_legacy_tunnel_route "$net_out" || { print -u2 "legacy tunnel route remains"; return 1; }
   dns_out="$(capture_cmd /usr/sbin/scutil --dns)"
-  [[ "$dns_out" != *166.104.* && "$dns_out" != *hanyang* ]] || { print -u2 "legacy VPN resolver remains"; return 1; }
+  ! has_legacy_vpn_resolver "$dns_out" || { print -u2 "legacy VPN resolver remains"; return 1; }
   log "legacy-quarantined-never-restore $LEGACY_LABEL"
 }
 sha256(){ /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'; }

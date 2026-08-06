@@ -202,7 +202,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
             proc_env.update(env)
         return subprocess.run(["/bin/zsh", str(REPO / "installer/root-admin.sh"), *args], cwd=str(REPO), env=proc_env, text=True, capture_output=True)
 
-    def make_fake_tools_for(self, env, failing_tool=None, route_output=""):
+    def make_fake_tools_for(self, env, failing_tool=None, route_output="", dns_output=""):
         tools = env.root / "Users" / ".fake-tools"
         for tool in ["/usr/sbin/visudo", "/usr/sbin/chown", "/usr/bin/pgrep", "/usr/sbin/netstat", "/usr/sbin/scutil", "/usr/bin/env", "/bin/launchctl", "/bin/mv"]:
             path = tools / tool.lstrip("/")
@@ -214,6 +214,8 @@ class RootAdminShellHarnessTests(InstallerTestCase):
                 body = "#!/bin/sh\n/bin/mv \"$@\"\n"
             elif name == "netstat" and route_output:
                 body = f"#!/bin/sh\nprintf '%s\\n' {route_output!r}\n"
+            elif name == "scutil" and dns_output:
+                body = f"#!/bin/sh\nprintf '%s\\n' {dns_output!r}\n"
             elif name == "env":
                 body = '#!/bin/sh\nroot=""\nfor arg in "$@"; do\n  case "$arg" in */Library/Application\\ Support/HYU\\ VPN/*) root=${arg%%/Library/Application\\ Support/HYU\\ VPN/*};; esac\ndone\nstate="$root/private/var/db/hyu-vpn"\nmkdir -p "$state"\ncase " $* " in\n  *" verify-suppressed "*) exit 0 ;;\n  *" suppress-auto-launch "*) printf \'%s\n\' \'{"schema_version":1,"console_uid":501,"mechanisms":[{"identifier":"com.paloaltonetworks.gp.pangps","kind":"launchd-gui","enabled":true,"exact_target":"/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist","running":false}]}\' > "$state/native-suppression.json"; chmod 600 "$state/native-suppression.json"; exit 0 ;;\n  *" restore-auto-launch "*) rm -f "$state/native-suppression.json"; exit 0 ;;\nesac\nexit 99\n'
             else:
@@ -222,8 +224,8 @@ class RootAdminShellHarnessTests(InstallerTestCase):
             path.chmod(0o755)
         return tools
 
-    def make_fake_tools(self, failing_tool=None, route_output=""):
-        return self.make_fake_tools_for(self.env(), failing_tool=failing_tool, route_output=route_output)
+    def make_fake_tools(self, failing_tool=None, route_output="", dns_output=""):
+        return self.make_fake_tools_for(self.env(), failing_tool=failing_tool, route_output=route_output, dns_output=dns_output)
 
     def test_root_admin_installs_complete_payload_without_bootstrap_or_autostart(self):
         env = self.env()
@@ -539,9 +541,49 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         env3 = DryRunEnvironment(root=self.root / "dry legacy", payload=self.payload, home=self.root / "home legacy", manifest=self.manifest_path)
         stage3 = stage_user_payload(env3)
-        proc = self.run_root_admin(env3, stage3, tools_root=self.make_fake_tools_for(env3, route_output="166.104.0.0/16 link#1"))
+        proc = self.run_root_admin(env3, stage3, tools_root=self.make_fake_tools_for(env3, route_output="166.104.0.0/16 link#42 UCS utun7"))
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("legacy tunnel route remains", proc.stderr)
+
+    def test_root_admin_allows_hyu_gateway_host_route_on_physical_interface(self):
+        env = DryRunEnvironment(root=self.root / "dry physical hanyang route", payload=self.payload, home=self.root / "home physical hanyang route", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        route_output = """Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            172.16.65.254      UGScg                 en0
+166.104.0.17       172.16.65.254      UGHS                  en0
+"""
+        proc = self.run_root_admin(env, stage, tools_root=self.make_fake_tools_for(env, route_output=route_output))
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+
+    def test_root_admin_allows_hanyang_resolver_bound_to_physical_interface(self):
+        env = DryRunEnvironment(root=self.root / "dry physical hanyang dns", payload=self.payload, home=self.root / "home physical hanyang dns", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        dns_output = """DNS configuration
+
+resolver #1
+  search domain[0] : hanyang.ac.kr
+  nameserver[0] : 166.104.1.1
+  if_index : 12 (en0)
+"""
+        proc = self.run_root_admin(env, stage, tools_root=self.make_fake_tools_for(env, dns_output=dns_output))
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+
+    def test_root_admin_blocks_hanyang_resolver_bound_to_tunnel_interface(self):
+        env = DryRunEnvironment(root=self.root / "dry tunnel dns", payload=self.payload, home=self.root / "home tunnel dns", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        dns_output = """DNS configuration
+
+resolver #1
+  search domain[0] : hanyang.ac.kr
+  nameserver[0] : 166.104.1.1
+  if_index : 23 (utun7)
+"""
+        proc = self.run_root_admin(env, stage, tools_root=self.make_fake_tools_for(env, dns_output=dns_output))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("legacy VPN resolver remains", proc.stderr)
 
     def test_sudoers_candidate_is_outside_includedir_and_removed_when_validation_fails(self):
         env = DryRunEnvironment(root=self.root / "dry visudo failure", payload=self.payload, home=self.root / "home visudo failure", manifest=self.manifest_path)
@@ -622,7 +664,8 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertIn('backup_target "$LEGACY_SUDOERS_DST"', text)
         self.assertIn("etc/sudoers.d/hyu-vpn|etc/sudoers.d/com.hyu.vpn", text)
         self.assertIn('capture_cmd(){', text)
-        self.assertIn('else "$exe" "$@"', text)
+        capture_line = next(line for line in text.splitlines() if line.startswith("capture_cmd(){"))
+        self.assertIn('[[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0', capture_line)
         self.assertIn("validate_native_snapshot", text)
         self.assertIn('SUDO_UID="$ADMIN_UID"', text)
         self.assertIn("print-disabled", text)

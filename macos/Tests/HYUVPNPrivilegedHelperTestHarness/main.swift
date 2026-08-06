@@ -55,6 +55,9 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-no-route-failure-retains-resolver-probe-for-repair", testNoRouteFailureRetainsResolverProbeForRepair),
                 ("network-repair-captures-tunnel-resolver-before-mutation", testRepairCapturesTunnelResolverBeforeMutation),
                 ("system-network-tools-accepts-dhcp-missing-setup-dns", testSystemNetworkToolsAcceptsDHCPMissingSetupDNS),
+                ("system-network-tools-normalizes-static-host-route-mask", testSystemNetworkToolsNormalizesStaticHostRouteMask),
+                ("system-network-tools-rejects-cloned-host-route-as-static", testSystemNetworkToolsRejectsClonedHostRouteAsStatic),
+                ("system-network-tools-rejects-default-route-for-host-query", testSystemNetworkToolsRejectsDefaultRouteForHostQuery),
                 ("network-sanitized-env-preserves-vpnpid-and-mask", testSanitizedEnvironmentPreservesVPNPIDAndMask),
                 ("network-preinit-ledger-drift-blocks-upstream", testPreInitLedgerDriftBlocksUpstream),
                 ("network-strict-ipv4-split-inputs", testStrictIPv4SplitInputs),
@@ -431,6 +434,52 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(snapshot.surfaces[stateKey]?.servers == ["9.9.9.9"], "DHCP state DNS still captured for drift and repair")
     }
 
+    static func testSystemNetworkToolsNormalizesStaticHostRouteMask() throws {
+        let tools = try systemNetworkToolsWithRouteOutput("""
+           route to: 198.51.100.9
+        destination: 198.51.100.9
+            gateway: 192.0.2.1
+          interface: en0
+              flags: <UP,GATEWAY,HOST,DONE,STATIC>
+        """)
+
+        let route = try tools.route(destination: "198.51.100.9", netmask: "255.255.255.255")
+
+        try expect(route?.destination == "198.51.100.9", "static host route destination preserved")
+        try expect(route?.gateway == "192.0.2.1", "static host route gateway preserved")
+        try expect(route?.interface == "en0", "static host route interface preserved")
+        try expect(route?.netmask == "255.255.255.255", "missing Darwin host mask normalized to IPv4 /32")
+    }
+
+    static func testSystemNetworkToolsRejectsClonedHostRouteAsStatic() throws {
+        let tools = try systemNetworkToolsWithRouteOutput("""
+           route to: 198.51.100.9
+        destination: 198.51.100.9
+            gateway: 192.0.2.1
+          interface: en0
+              flags: <UP,GATEWAY,HOST,DONE,WASCLONED>
+        """)
+
+        let route = try tools.route(destination: "198.51.100.9", netmask: "255.255.255.255")
+
+        try expect(route == nil, "kernel-cloned host route is not accepted as wrapper-owned static route")
+    }
+
+    static func testSystemNetworkToolsRejectsDefaultRouteForHostQuery() throws {
+        let tools = try systemNetworkToolsWithRouteOutput("""
+           route to: 198.51.100.9
+        destination: default
+               mask: default
+            gateway: 192.0.2.1
+          interface: en0
+              flags: <UP,GATEWAY,DONE,STATIC,GLOBAL>
+        """)
+
+        let route = try tools.route(destination: "198.51.100.9", netmask: "255.255.255.255")
+
+        try expect(route == nil, "default route lookup result is not accepted as an explicit host route")
+    }
+
 
     static func testPreInitLedgerDriftBlocksUpstream() throws {
         let fixture = try HarnessNetworkFixture()
@@ -791,6 +840,27 @@ struct HarnessNetworkFixture {
     func validEnv() -> [String: String] { ["HYU_SESSION_LEDGER": ledger.path, "TUNDEV": "utun7", "INTERNAL_IP4_ADDRESS": "10.10.0.1", "VPNGATEWAY": "198.51.100.9", "CISCO_SPLIT_INC": "1", "CISCO_SPLIT_INC_0_ADDR": "10.0.0.0", "CISCO_SPLIT_INC_0_MASK": "255.0.0.0", "CISCO_SPLIT_EXC": "0", "CISCO_IPV6_SPLIT_INC": "0", "CISCO_IPV6_SPLIT_EXC": "0"] }
 }
 func harnessTempDir() throws -> URL { let url = FileManager.default.temporaryDirectory.appendingPathComponent("hyu-helper-harness-\(UUID().uuidString)"); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url }
+
+func systemNetworkToolsWithRouteOutput(_ output: String) throws -> SystemNetworkTools {
+    let dir = try harnessTempDir()
+    let route = dir.appendingPathComponent("route")
+    try """
+    #!/bin/sh
+    cat <<'HYU_ROUTE_OUTPUT'
+    \(output)
+    HYU_ROUTE_OUTPUT
+    """.write(to: route, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: route.path)
+    let paths = RuntimePaths(
+        ledgerRoot: dir,
+        upstream: dir.appendingPathComponent("vpnc-script"),
+        route: route,
+        scutil: dir.appendingPathComponent("scutil"),
+        sysctl: dir.appendingPathComponent("sysctl"),
+        networksetup: dir.appendingPathComponent("networksetup")
+    )
+    return SystemNetworkTools(paths: paths)
+}
 
 func helperHarnessWithRecordedLedger(status: String, tunnel: String) throws -> (HelperHarness, URL) {
     let root = try harnessTempDir()
