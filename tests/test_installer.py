@@ -232,8 +232,14 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         root = env.root
         self.assertTrue((root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper").exists())
+        wrapper = root / "Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"
+        self.assertTrue(wrapper.exists())
         app_support = root / "Library/Application Support/HYU VPN"
         self.assertTrue((app_support / "helper-config.json").exists())
+        helper_config = json.loads((app_support / "helper-config.json").read_text(encoding="utf-8"))
+        self.assertEqual(helper_config["vpncScript"], "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper")
+        self.assertNotIn(" ", helper_config["vpncScript"])
+        self.assertEqual(helper_config["vpncScriptSHA256"], hashlib.sha256(wrapper.read_bytes()).hexdigest())
         self.assertTrue((app_support / "runtime/current/bin/openconnect").exists())
         self.assertTrue((app_support / "runtime/vpnc/hyu-vpnc-wrapperd.sha256").exists())
         self.assertTrue((app_support / "bin/hyu-vpn-service").exists())
@@ -575,6 +581,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertEqual(proc2.returncode, 0, proc2.stderr + proc2.stdout)
         self.assertTrue(unrelated.exists())
         self.assertFalse((env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper").exists())
+        self.assertFalse((env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper").exists())
         uninstall = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
         for item in ["gp-vpn-username", "gp-vpn-password", "gp-vpn-totp"]:
             self.assertIn(f"delete-generic-password -s {item} -a hyu-vpn", uninstall)

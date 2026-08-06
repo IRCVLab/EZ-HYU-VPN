@@ -130,6 +130,9 @@ class HelperOwnedSessionProviderTests(unittest.TestCase):
         self.assertTrue(evidence.owns_interface("utun4"))
         self.assertEqual(calls, [(("/usr/bin/sudo", "-n", "/Library/PrivilegedHelperTools/com.hyu.vpn.helper", "status"), 1.5)])
 
+        max_width = HelperOwnedSessionProvider(command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"abc","tunnel_interface":"utun12345678"}\n', "")).evidence()
+        self.assertTrue(max_width.owns_interface("utun12345678"))
+
     def test_helper_status_provider_rejects_malformed_nonzero_or_unsafe_fields(self):
         from hyu_vpn.network import HelperOwnedSessionProvider
         bad_outputs = [
@@ -139,6 +142,7 @@ class HelperOwnedSessionProviderTests(unittest.TestCase):
             (0, '{"schema_version":1,"state":"running","pid":0,"session_nonce":"abc","tunnel_interface":"utun4"}\n'),
             (0, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"bad space","tunnel_interface":"utun4"}\n'),
             (0, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"abc","tunnel_interface":"en0"}\n'),
+            (0, '{"schema_version":1,"state":"running","pid":123,"session_nonce":"abc","tunnel_interface":"utun123456789"}\n'),
         ]
         for returncode, stdout in bad_outputs:
             with self.subTest(stdout=stdout):

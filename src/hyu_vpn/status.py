@@ -33,7 +33,7 @@ SESSION_EXPIRY_LINE = "Session authentication will expire at Tue, 04 Aug 2026 21
 _SECRET_FIELD_NAMES = frozenset(("username", "password", "otp", "cookie", "authcookie", "seed", "portal"))
 _SECRET_TEXT_RE = re.compile(r"(?i)(password|otp|cookie|authcookie|seed|username|portal)\s*[:=]")
 _TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-_TUNNEL_INTERFACE_RE = re.compile(r"^utun[0-9]{1,3}$")
+_TUNNEL_INTERFACE_RE = re.compile(r"^utun[0-9]{1,8}$")
 _BUILD_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$")
 _EXPIRY_RE = re.compile(
     r"Session authentication will expire at "

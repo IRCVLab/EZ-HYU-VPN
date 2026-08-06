@@ -483,6 +483,61 @@ class SupervisorLoopTests(unittest.TestCase):
             self.assertNotIn(None, wait_timeouts)
             self.assertEqual(killed, [(6789, signal.SIGKILL)])
 
+    def test_connect_timeout_handler_does_not_tear_down_a_session_that_connected_at_deadline(self):
+        status_path = managed_temp_path(self, "status.json")
+        pref_path = managed_temp_path(self, "auto.json")
+        enable_auto_reconnect(pref_path)
+        commands = []
+        child = FakeProcess(returncode=None)
+        supervisor = Supervisor(
+            isolated_supervisor_config(self, status_path=str(status_path), preference_path=str(pref_path), helper_path="/helper"),
+            conflict_detector=mock.Mock(conflict_active=lambda: False),
+            command_runner=lambda argv, timeout: commands.append((tuple(argv), timeout)) or CommandResult(tuple(argv), 0, "", ""),
+        )
+        supervisor._child = child
+        supervisor._active_generation = 1
+        supervisor._write_current_status(state="connecting", automatic=True)
+        supervisor.apply_connector_event_line(
+            '{"schema_version":1,"event":"connected","timestamp":"2026-08-06T06:00:00Z","tunnel_interface":"utun7"}',
+            generation=1,
+        )
+
+        result = supervisor._handle_connect_establish_timeout(expected_child=child, expected_generation=1)
+
+        from hyu_vpn.status import read_status
+        status = read_status(status_path)
+        self.assertIsNone(result)
+        self.assertEqual(commands, [])
+        self.assertEqual(status.state, "connected")
+        self.assertEqual(status.tunnel_interface, "utun7")
+
+    def test_connect_timeout_handler_does_not_overwrite_concurrent_disconnect(self):
+        status_path = managed_temp_path(self, "status.json")
+        pref_path = managed_temp_path(self, "auto.json")
+        enable_auto_reconnect(pref_path)
+        commands = []
+        child = FakeProcess(returncode=None)
+        supervisor = Supervisor(
+            isolated_supervisor_config(self, status_path=str(status_path), preference_path=str(pref_path), helper_path="/helper"),
+            conflict_detector=mock.Mock(conflict_active=lambda: False),
+            command_runner=lambda argv, timeout: commands.append((tuple(argv), timeout)) or CommandResult(tuple(argv), 0, "", ""),
+        )
+        supervisor._child = child
+        supervisor._active_generation = 1
+        supervisor._write_current_status(state="connecting", automatic=True)
+        supervisor._disconnect_in_progress = True
+        supervisor._active_generation = None
+        supervisor._write_current_status(state="disconnecting", automatic=False)
+
+        result = supervisor._handle_connect_establish_timeout(expected_child=child, expected_generation=1)
+
+        from hyu_vpn.status import read_status
+        status = read_status(status_path)
+        self.assertIsNone(result)
+        self.assertEqual(commands, [])
+        self.assertEqual(status.state, "disconnecting")
+        self.assertFalse(status.automatic_reconnect_enabled)
+
     def test_failed_child_writes_backoff_status_with_next_retry(self):
         with tempfile.TemporaryDirectory() as td:
             status_path = Path(td) / "status.json"
@@ -516,7 +571,7 @@ class SupervisorLoopTests(unittest.TestCase):
             stdout = io.StringIO(
                 '{"schema_version":1,"event":"hip-succeeded","timestamp":"2026-08-04T12:00:00Z"}\n'
                 '{"schema_version":1,"event":"session-expiry","timestamp":"2026-08-04T12:59:30Z"}\n'
-                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z"}\n'
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","tunnel_interface":"utun7"}\n'
                 '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","password":"CANARY"}\n'
             )
             process = FakeProcess(returncode=0)
@@ -1098,17 +1153,17 @@ class SupervisorControlTests(unittest.TestCase):
             supervisor._write_current_status(state="connecting", automatic=True)
             self.assertEqual(supervisor.handle_control_command("disconnect"), (True, None))
             supervisor.apply_connector_event_line(
-                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z"}',
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","tunnel_interface":"utun7"}',
                 generation=1,
             )
             supervisor._write_current_status(state="connecting", automatic=True)
             supervisor._active_generation = 2
             supervisor.apply_connector_event_line(
-                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:02:00Z"}',
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:02:00Z","tunnel_interface":"utun7"}',
                 generation=1,
             )
             supervisor.apply_connector_event_line(
-                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:03:00Z"}',
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:03:00Z","tunnel_interface":"utun7"}',
                 generation=2,
             )
 
@@ -1245,7 +1300,7 @@ class SupervisorControlTests(unittest.TestCase):
                 '{"schema_version":1,"event":"session-expiry","timestamp":"2026-08-04T12:59:30Z"}'
             )
             supervisor.apply_connector_event_line(
-                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z"}'
+                '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","tunnel_interface":"utun7"}'
             )
 
             supervisor.handle_control_command("connect")
@@ -1470,7 +1525,7 @@ class SupervisorControlTests(unittest.TestCase):
 
             supervisor.apply_connector_event_line('{"schema_version":1,"event":"hip-succeeded","timestamp":"2026-08-04T12:00:00Z"}')
             supervisor.apply_connector_event_line('{"schema_version":1,"event":"session-expiry","timestamp":"2026-08-04T12:59:30Z"}')
-            supervisor.apply_connector_event_line('{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z"}')
+            supervisor.apply_connector_event_line('{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","tunnel_interface":"utun7"}')
             supervisor.apply_connector_event_line('{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","password":"CANARY"}')
             supervisor.apply_connector_event_line('x' * 2048)
 
@@ -1478,6 +1533,7 @@ class SupervisorControlTests(unittest.TestCase):
             status = read_status(status_path)
             raw = status_path.read_text(encoding="utf-8")
             self.assertEqual(status.state, "connected")
+            self.assertEqual(status.tunnel_interface, "utun7")
             self.assertEqual(status.last_successful_hip_at.isoformat(), "2026-08-04T12:00:00+00:00")
             self.assertEqual(status.session_expires_at.isoformat(), "2026-08-04T12:59:30+00:00")
             self.assertNotIn("CANARY", raw)
@@ -1494,7 +1550,7 @@ class SupervisorControlTests(unittest.TestCase):
             )
 
             supervisor.apply_connector_event_line('{"schema_version":1,"event":"network-script-state-mismatch","timestamp":"2026-08-05T01:00:00Z"}')
-            supervisor.apply_connector_event_line('{"schema_version":1,"event":"connected","timestamp":"2026-08-05T01:00:01Z"}')
+            supervisor.apply_connector_event_line('{"schema_version":1,"event":"connected","timestamp":"2026-08-05T01:00:01Z","tunnel_interface":"utun7"}')
 
             from hyu_vpn.status import read_status
             status = read_status(status_path)

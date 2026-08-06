@@ -131,7 +131,7 @@ class ConnectorTests(unittest.TestCase):
         second = parser.feed(
             "ire at Tue, 04 Aug 2026 21:59:30 KST\n"
             "ESP session established with server\n"
-            "hyu-vpnc-wrapperd-event: network configuration verified\n"
+            "hyu-vpnc-wrapperd-event: network configuration verified tunnel=utun7\n"
         )
 
         self.assertEqual([event.kind for event in first + second], ["hip-succeeded", "session-expiry", "connected"])
@@ -140,6 +140,8 @@ class ConnectorTests(unittest.TestCase):
             self.assertNotIn(secret, serialized)
         expiry_event = next(event for event in second if event.kind == "session-expiry")
         self.assertEqual(expiry_event.timestamp.isoformat(), "2026-08-04T12:59:30+00:00")
+        connected_event = next(event for event in second if event.kind == "connected")
+        self.assertEqual(connected_event.tunnel_interface, "utun7")
 
     def test_connector_event_wire_format_is_exact_bounded_and_rejects_secrets(self):
         event = ConnectorEvent("session-expiry", __import__("datetime").datetime(2026, 8, 4, 12, 59, 30, tzinfo=__import__("datetime").timezone.utc))
@@ -150,7 +152,17 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(parse_connector_event_line(line), event)
         document = json.loads(line)
         self.assertEqual(set(document), {"schema_version", "event", "timestamp"})
+        connected = ConnectorEvent(
+            "connected",
+            __import__("datetime").datetime(2026, 8, 4, 12, 59, 30, tzinfo=__import__("datetime").timezone.utc),
+            tunnel_interface="utun7",
+        )
+        connected_line = connected.to_json_line()
+        self.assertEqual(parse_connector_event_line(connected_line), connected)
+        self.assertEqual(set(json.loads(connected_line)), {"schema_version", "event", "timestamp", "tunnel_interface"})
         for malformed in (
+            '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:59:30Z"}',
+            '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:59:30Z","tunnel_interface":"en0"}',
             '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:59:30Z","password":"CANARY"}',
             '{"schema_version":1,"event":"raw-output","timestamp":"2026-08-04T12:59:30Z"}',
             '{"schema_version":true,"event":"connected","timestamp":"2026-08-04T12:59:30Z"}',
@@ -168,9 +180,10 @@ class ConnectorTests(unittest.TestCase):
 
         self.assertEqual(parser.feed("connected\n"), [])
         self.assertEqual(parser.feed("ESP session established with server\n"), [])
+        self.assertEqual(parser.feed("hyu-vpnc-wrapperd-event: network configuration verified\n"), [])
         self.assertEqual(
-            [event.kind for event in parser.feed("hyu-vpnc-wrapperd-event: network configuration verified\n")],
-            ["connected"],
+            parser.feed("hyu-vpnc-wrapperd-event: network configuration verified tunnel=utun12\n")[0].tunnel_interface,
+            "utun12",
         )
 
     def test_wrapper_error_becomes_one_sanitized_fatal_event_and_suppresses_connected(self):
@@ -179,11 +192,11 @@ class ConnectorTests(unittest.TestCase):
         events = parser.feed(
             "PASSWORD-CANARY authcookie=COOKIE-CANARY\n"
             "hyu-vpnc-wrapperd: bad helper configuration\n"
-            "hyu-vpnc-wrapperd-event: network configuration verified\n"
+            "hyu-vpnc-wrapperd-event: network configuration verified tunnel=utun7\n"
         )
 
         self.assertEqual([event.kind for event in events], ["network-script-bad-configuration"])
-        self.assertEqual(parser.feed("hyu-vpnc-wrapperd-event: network configuration verified\n"), [])
+        self.assertEqual(parser.feed("hyu-vpnc-wrapperd-event: network configuration verified tunnel=utun7\n"), [])
         serialized = repr(events) + events[0].to_json_line()
         self.assertNotIn("PASSWORD-CANARY", serialized)
         self.assertNotIn("COOKIE-CANARY", serialized)

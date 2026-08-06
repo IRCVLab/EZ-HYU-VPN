@@ -85,7 +85,7 @@ public enum VPNStatusDecoder {
         let retryAt = try optionalDate("next_retry_at", document["next_retry_at"])
         let transitionAt = try requiredDate("last_transition_at", document["last_transition_at"])
         let tunnel = try optionalString("tunnel_interface", document["tunnel_interface"])
-        if let tunnel, tunnel.range(of: #"^utun[0-9]{1,3}$"#, options: .regularExpression) == nil { throw StatusProtocolError.invalid("invalid tunnel_interface") }
+        if let tunnel, tunnel.range(of: #"^utun[0-9]{1,8}$"#, options: .regularExpression) == nil { throw StatusProtocolError.invalid("invalid tunnel_interface") }
         let error = try optionalString("error_code", document["error_code"])
         if let error, error.range(of: #"^[A-Z][A-Z0-9_]{0,63}$"#, options: .regularExpression) == nil { throw StatusProtocolError.invalid("invalid error_code") }
         let build = try optionalString("backend_build_version", document["backend_build_version"])

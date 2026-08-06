@@ -120,7 +120,7 @@ class NetworkReadiness:
 
 _HELPER_STATUS_ARGV = ["/usr/bin/sudo", "-n", "/Library/PrivilegedHelperTools/com.hyu.vpn.helper", "status"]
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{3,128}$")
-_UTUN_RE = re.compile(r"^utun[0-9]+$")
+_UTUN_RE = re.compile(r"^utun[0-9]{1,8}$")
 
 
 class HelperOwnedSessionProvider:

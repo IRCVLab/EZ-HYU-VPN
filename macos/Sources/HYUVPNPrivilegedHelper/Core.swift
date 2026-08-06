@@ -244,7 +244,7 @@ public struct HelperConfiguration: Equatable {
     public static func fallbackProduction() -> HelperConfiguration {
         HelperConfiguration(
             openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"),
-            vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"),
+            vpncScript: URL(fileURLWithPath: "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"),
             hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"),
             stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"),
             ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger")
@@ -278,10 +278,10 @@ public struct HelperConfiguration: Equatable {
         for url in requiredSecurePaths {
             let path = url.path
             guard !path.contains("/../"), !path.hasSuffix("/..") else { throw HelperError.forbiddenPath(path) }
-            guard path.hasPrefix("/Library/Application Support/HYU VPN/runtime/") || path.hasPrefix("/private/var/db/hyu-vpn") || path.hasPrefix("/rooted/") else { throw HelperError.forbiddenPath(path) }
+            guard path.hasPrefix("/Library/Application Support/HYU VPN/runtime/") || path == "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper" || path.hasPrefix("/private/var/db/hyu-vpn") || path.hasPrefix("/rooted/") else { throw HelperError.forbiddenPath(path) }
         }
         guard openConnectExecutable.path == "/rooted/openconnect" || openConnectExecutable.path == "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect" else { throw HelperError.forbiddenPath(openConnectExecutable.path) }
-        guard vpncScript.path == "/rooted/vpnc-script" || vpncScript.path == "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper" else { throw HelperError.forbiddenPath(vpncScript.path) }
+        guard vpncScript.path == "/rooted/vpnc-script" || vpncScript.path == "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper" else { throw HelperError.forbiddenPath(vpncScript.path) }
         guard hipWrapper.path == "/rooted/gp-hip-report" || hipWrapper.path.hasPrefix("/Library/Application Support/HYU VPN/runtime/") else { throw HelperError.forbiddenPath(hipWrapper.path) }
         guard stateDirectory.path == "/private/var/db/hyu-vpn" || stateDirectory.path == "/rooted/state" else { throw HelperError.forbiddenPath(stateDirectory.path) }
         guard ledgerDirectory.path == stateDirectory.appendingPathComponent("ledger").path || ledgerDirectory.path == "/rooted/ledger" else { throw HelperError.forbiddenPath(ledgerDirectory.path) }
@@ -1096,7 +1096,7 @@ public struct PrivilegedHelper {
         do {
             try record.validateForUse(configuration: configuration)
             try validateLive(record: record)
-            let document = HelperStatusDocument(state: "running", pid: Int(record.pid), session_nonce: record.sessionNonce, tunnel_interface: validatedTunnelInterface(record.tunnelInterface))
+            let document = HelperStatusDocument(state: "running", pid: Int(record.pid), session_nonce: record.sessionNonce, tunnel_interface: try liveTunnelInterface(record: record))
             return HelperResult(status: .running, username: nil, ledger: record.ledger, statusDocument: document)
         } catch {
             let document = HelperStatusDocument(state: "repair-required", pid: nil, session_nonce: record.sessionNonce, tunnel_interface: nil)
@@ -1140,9 +1140,26 @@ public struct PrivilegedHelper {
         }
     }
 
+    private func liveTunnelInterface(record: SessionRecord) throws -> String? {
+        if let recorded = record.tunnelInterface {
+            guard let tunnel = validatedTunnelInterface(recorded) else { throw HelperError.processMismatch }
+            return tunnel
+        }
+        var item = stat()
+        if lstat(record.ledger.path.path, &item) != 0 {
+            if errno == ENOENT { return nil }
+            throw HelperError.insecurePath(record.ledger.path.path)
+        }
+        let ledger = try NetworkLedgerStore(path: record.ledger.path, expectedOwnerUID: UInt32(geteuid())).load(expectedNonce: record.sessionNonce)
+        guard ledger.status == "recorded" else { throw HelperError.teardownIncomplete("ledger is not active") }
+        guard let recorded = ledger.tunnelInterface else { return nil }
+        guard let tunnel = validatedTunnelInterface(recorded) else { throw HelperError.processMismatch }
+        return tunnel
+    }
+
     private func validatedTunnelInterface(_ value: String?) -> String? {
         guard let value else { return nil }
-        guard value.hasPrefix("utun"), value.dropFirst(4).allSatisfy(\.isNumber), value.count <= 12 else { return nil }
+        guard value.range(of: "^utun[0-9]{1,8}$", options: .regularExpression) != nil else { return nil }
         return value
     }
 }

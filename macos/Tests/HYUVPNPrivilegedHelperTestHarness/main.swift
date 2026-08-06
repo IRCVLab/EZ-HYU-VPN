@@ -43,6 +43,8 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("stop-ledger-repair-required-preserves-evidence", testStopLedgerRepairRequiredPreservesEvidence),
                 ("stop-mismatch-does-not-signal", testStopMismatchNoSignal),
                 ("status-json", testStatusJSON),
+                ("status-loads-tunnel-from-recorded-ledger", testStatusLoadsTunnelFromRecordedLedger),
+                ("status-rejects-repair-required-ledger-tunnel", testStatusRejectsRepairRequiredLedgerTunnel),
                 ("status-repair-required-on-mismatch", testStatusRepairRequired),
                 ("repair-invokes-ledger-and-cleans-session", testRepairInvokesLedgerAndCleansSession),
                 ("repair-foreign-mismatch-preserves-evidence", testRepairForeignMismatchPreservesEvidence),
@@ -113,7 +115,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         [
             "/",
             "/Library", "/Library/Application Support", "/Library/Application Support/HYU VPN", "/Library/Application Support/HYU VPN/runtime", "/Library/Application Support/HYU VPN/runtime/current", "/Library/Application Support/HYU VPN/runtime/current/bin", "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect",
-            "/Library/Application Support/HYU VPN/runtime/vpnc", "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper",
+            "/Library/Application Support/HYU VPN/runtime/vpnc", "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper",
             "/Library/Application Support/HYU VPN/runtime/gp-hip-report",
             "/private", "/private/var", "/private/var/db", "/private/var/db/hyu-vpn", "/private/var/db/hyu-vpn/ledger"
         ]
@@ -140,13 +142,15 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
     }
 
     static func testConfigRejectsHomebrewFrontDoor() throws {
-        let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: "/opt/homebrew/bin/openconnect"), vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
+        let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: "/opt/homebrew/bin/openconnect"), vpncScript: URL(fileURLWithPath: "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
         try expectThrows("front door rejected") { try config.validateStaticShape() }
     }
 
     static func testConfigAcceptsRuntimeShape() throws {
-        let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"), vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
+        let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"), vpncScript: URL(fileURLWithPath: "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
         try config.validateStaticShape()
+        try expect(config.vpncScript.path == HelperConfiguration.fallbackProduction().vpncScript.path, "production wrapper path bound")
+        try expect(!config.vpncScript.path.contains(" "), "vpnc shell command path has no whitespace")
     }
 
     static func testConfigRejectsUnboundRuntimeShapes() throws {
@@ -155,7 +159,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
             "/Library/Application Support/HYU VPN/runtime/current/openconnect",
             "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect2"
         ] {
-            let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: path), vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
+            let config = HelperConfiguration(openConnectExecutable: URL(fileURLWithPath: path), vpncScript: URL(fileURLWithPath: "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"), hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"), stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"), ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"), executableSHA256: String(repeating: "a", count: 64), vpncScriptSHA256: String(repeating: "b", count: 64), hipWrapperSHA256: String(repeating: "c", count: 64))
             try expectThrows("unbound runtime rejected: \(path)") { try config.validateStaticShape() }
         }
     }
@@ -233,6 +237,22 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(doc.tunnel_interface == "utun9", "interface")
         let line = try doc.singleLineJSON()
         try expect(!line.contains("\n"), "single line")
+    }
+
+    static func testStatusLoadsTunnelFromRecordedLedger() throws {
+        var (harness, root) = try helperHarnessWithRecordedLedger(status: "recorded", tunnel: "utun7")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let result = try harness.run(command: .status)
+        try expect(result.status == .running, "recorded live ledger remains running")
+        try expect(result.statusDocument?.tunnel_interface == "utun7", "status derives owned tunnel from ledger")
+    }
+
+    static func testStatusRejectsRepairRequiredLedgerTunnel() throws {
+        var (harness, root) = try helperHarnessWithRecordedLedger(status: "repair-required", tunnel: "utun7")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let result = try harness.run(command: .status)
+        try expect(result.status == .repairRequired, "repair-required ledger is not reported as owned running tunnel")
+        try expect(result.statusDocument?.tunnel_interface == nil, "repair-required tunnel remains unowned")
     }
 
 
@@ -697,12 +717,46 @@ struct HarnessNetworkFixture {
 }
 func harnessTempDir() throws -> URL { let url = FileManager.default.temporaryDirectory.appendingPathComponent("hyu-helper-harness-\(UUID().uuidString)"); try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url }
 
+func helperHarnessWithRecordedLedger(status: String, tunnel: String) throws -> (HelperHarness, URL) {
+    let root = try harnessTempDir()
+    let ledgerDirectory = root.appendingPathComponent("ledger")
+    let nonce = "nonce12345"
+    let ledger = ledgerDirectory.appendingPathComponent("\(nonce).ledger")
+    var harness = HelperHarness()
+    harness.config = HelperConfiguration(
+        openConnectExecutable: root.appendingPathComponent("openconnect"),
+        vpncScript: root.appendingPathComponent("vpnc-wrapper"),
+        hipWrapper: root.appendingPathComponent("hip-report"),
+        stateDirectory: root,
+        ledgerDirectory: ledgerDirectory
+    )
+    harness.metadata = FakeMetadata.secure(paths: harness.config.requiredSecurePaths.map(\.path) + [root.path])
+    try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(geteuid())).save(
+        NetworkLedger(
+            sessionNonce: nonce,
+            rebootIdentity: 42,
+            serviceIDBefore: "service-wifi",
+            defaultInterfaceBefore: "en0",
+            defaultRouteBefore: RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: nil, protocol: "ipv4"),
+            tunnelInterface: tunnel,
+            routeDeltasApplied: [],
+            dnsBefore: nil,
+            dnsApplied: nil,
+            status: status,
+            timestamp: Date(timeIntervalSince1970: 123)
+        )
+    )
+    try harness.installRecord(ledgerPath: ledger)
+    harness.process.liveIdentity = .matching(pid: 2222, pgid: 3333, birth: 77, executable: harness.config.openConnectExecutable.path)
+    return (harness, root)
+}
+
 
 func writeHelperConfigFixture(extra: String?) throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("hyu-helper-config-fixture-\(UUID().uuidString).json")
     var object: [String: String] = [
         "openConnectExecutable": "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect",
-        "vpncScript": "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper",
+        "vpncScript": "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper",
         "hipWrapper": "/Library/Application Support/HYU VPN/runtime/gp-hip-report",
         "stateDirectory": "/private/var/db/hyu-vpn",
         "ledgerDirectory": "/private/var/db/hyu-vpn/ledger",

@@ -38,6 +38,7 @@ TOTP_STATE_PATH = Path.home() / "Library" / "Application Support" / "hyu-opencon
 _PROMPT_RE = re.compile(rb"(?:Password|Challenge):\s*$", re.IGNORECASE)
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._@-]{1,128}$")
 _EVENT_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_TUNNEL_INTERFACE_RE = re.compile(r"^utun[0-9]{1,8}$")
 
 NETWORK_SCRIPT_EVENT_KINDS = frozenset(
     {
@@ -83,6 +84,7 @@ class ConnectorConfig:
 class ConnectorEvent:
     kind: str
     timestamp: Optional[datetime] = None
+    tunnel_interface: Optional[str] = None
 
     def to_json_line(self) -> str:
         if self.kind not in CONNECTOR_EVENT_KINDS:
@@ -90,11 +92,14 @@ class ConnectorEvent:
         if self.timestamp is None or self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
             raise ValueError("connector event timestamp is required")
         timestamp = self.timestamp.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        line = json.dumps(
-            {"schema_version": 1, "event": self.kind, "timestamp": timestamp},
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        document = {"schema_version": 1, "event": self.kind, "timestamp": timestamp}
+        if self.kind == "connected":
+            if not isinstance(self.tunnel_interface, str) or _TUNNEL_INTERFACE_RE.fullmatch(self.tunnel_interface) is None:
+                raise ValueError("connected event tunnel interface is required")
+            document["tunnel_interface"] = self.tunnel_interface
+        elif self.tunnel_interface is not None:
+            raise ValueError("tunnel interface is allowed only for connected events")
+        line = json.dumps(document, separators=(",", ":"), sort_keys=True)
         if len(line.encode("utf-8")) > 512 or "\n" in line:
             raise ValueError("oversized connector event")
         return line
@@ -107,13 +112,18 @@ def parse_connector_event_line(line: str) -> ConnectorEvent:
         document = json.loads(line)
     except json.JSONDecodeError as exc:
         raise ValueError("invalid connector event line") from exc
-    if not isinstance(document, dict) or set(document) != {"schema_version", "event", "timestamp"}:
+    if not isinstance(document, dict):
         raise ValueError("invalid connector event schema")
     schema_version = document.get("schema_version")
     event_name = document.get("event")
     if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
         raise ValueError("invalid connector event schema")
     if not isinstance(event_name, str) or event_name not in CONNECTOR_EVENT_KINDS:
+        raise ValueError("invalid connector event schema")
+    expected_keys = {"schema_version", "event", "timestamp"}
+    if event_name == "connected":
+        expected_keys.add("tunnel_interface")
+    if set(document) != expected_keys:
         raise ValueError("invalid connector event schema")
     raw_timestamp = document.get("timestamp")
     if not isinstance(raw_timestamp, str):
@@ -126,7 +136,13 @@ def parse_connector_event_line(line: str) -> ConnectorEvent:
         raise ValueError("invalid connector event timestamp") from exc
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("invalid connector event timestamp")
-    return ConnectorEvent(event_name, timestamp.astimezone(timezone.utc).replace(microsecond=0))
+    tunnel_interface = document.get("tunnel_interface")
+    if event_name == "connected":
+        if not isinstance(tunnel_interface, str) or _TUNNEL_INTERFACE_RE.fullmatch(tunnel_interface) is None:
+            raise ValueError("invalid connector event tunnel interface")
+    elif tunnel_interface is not None:
+        raise ValueError("invalid connector event tunnel interface")
+    return ConnectorEvent(event_name, timestamp.astimezone(timezone.utc).replace(microsecond=0), tunnel_interface)
 
 
 def write_connector_event(event: ConnectorEvent, *, stream: TextIO = sys.stdout) -> None:
@@ -138,7 +154,7 @@ class ConnectorEventParser:
     """Extract only fixed, non-secret lifecycle events from bounded progress text."""
 
     _HIP_SUCCESS = "HIP report submitted successfully"
-    _CONNECTED = ("hyu-vpnc-wrapperd-event: network configuration verified",)
+    _CONNECTED_RE = re.compile(r"^hyu-vpnc-wrapperd-event: network configuration verified tunnel=(utun[0-9]{1,8})$")
 
     def __init__(self, *, now=lambda: datetime.now(timezone.utc), max_buffer_bytes: int = 4096) -> None:
         if isinstance(max_buffer_bytes, bool) or not isinstance(max_buffer_bytes, int) or max_buffer_bytes <= 0 or max_buffer_bytes > 65536:
@@ -175,9 +191,10 @@ class ConnectorEventParser:
             events.append(ConnectorEvent("session-expiry", expiry))
         for line in lines:
             normalized = " ".join(line.strip().split())
-            if not self._connected_emitted and normalized in self._CONNECTED:
+            match = self._CONNECTED_RE.fullmatch(normalized)
+            if not self._connected_emitted and match is not None:
                 self._connected_emitted = True
-                events.append(ConnectorEvent("connected", self.now()))
+                events.append(ConnectorEvent("connected", self.now(), match.group(1)))
         return events
 
     @staticmethod

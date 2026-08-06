@@ -56,7 +56,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         return current.appendingPathComponent("macos")
     }
 
-    static func statusData(state: VPNConnectionState = .connected, expiry: String? = "2026-08-04T12:59:30Z", connectedAt: String? = "2026-08-04T12:00:00Z", automatic: Bool = true, error: String? = nil) -> Data {
+    static func statusData(state: VPNConnectionState = .connected, expiry: String? = "2026-08-04T12:59:30Z", connectedAt: String? = "2026-08-04T12:00:00Z", automatic: Bool = true, error: String? = nil, tunnel: String = "utun7") -> Data {
         let fields: [String] = [
             "\"schema_version\":1",
             "\"state\":\"\(state.rawValue)\"",
@@ -64,7 +64,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
             "\"connected_at\":\(connectedAt.map { "\"\($0)\"" } ?? "null")",
             "\"session_expires_at\":\(expiry.map { "\"\($0)\"" } ?? "null")",
             "\"last_successful_hip_at\":\"2026-08-04T11:59:00Z\"",
-            "\"tunnel_interface\":\"utun7\"",
+            "\"tunnel_interface\":\"\(tunnel)\"",
             "\"next_retry_at\":null",
             "\"error_code\":\(error.map { "\"\($0)\"" } ?? "null")",
             "\"last_transition_at\":\"2026-08-04T12:00:01Z\"",
@@ -76,6 +76,9 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
 
     static func strictStatusAllStates() throws {
         for state in VPNConnectionState.allCases { let decoded = try VPNStatusDecoder.decode(statusData(state: state)); try expect(decoded.state == state, "state \(state.rawValue)") }
+        let maxWidth = try VPNStatusDecoder.decode(statusData(tunnel: "utun12345678"))
+        try expect(maxWidth.tunnelInterface == "utun12345678", "shared maximum-width utun accepted")
+        try expectThrows("over-width utun") { _ = try VPNStatusDecoder.decode(statusData(tunnel: "utun123456789")) }
         for bad in [Data("{not-json".utf8), Data(repeating: 0x78, count: VPNStatusDecoder.maxBytes + 1), Data("{\"schema_version\":true}".utf8), Data("{\"schema_version\":1,\"password\":\"CANARY\"}".utf8)] { try expectThrows("bad status") { _ = try VPNStatusDecoder.decode(bad) } }
     }
 

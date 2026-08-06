@@ -28,6 +28,9 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(status.automaticReconnectEnabled)
         #expect(status.tunnelInterface == "utun7")
         #expect(status.backendBuildVersion == "2026.08.04+menubar")
+        var maxWidthInterface = sampleDocument(); maxWidthInterface["tunnel_interface"] = "utun12345678"
+        #expect(try VPNStatusDecoder.decode(try json(maxWidthInterface)).tunnelInterface == "utun12345678")
+        var overWidthInterface = sampleDocument(); overWidthInterface["tunnel_interface"] = "utun123456789"
         var boolSchema = sampleDocument(); boolSchema["schema_version"] = true
         var boolAsInt = sampleDocument(); boolAsInt["automatic_reconnect_enabled"] = 1
         var unknown = sampleDocument(); unknown["updated_at"] = "2026-08-04T12:00:00Z"
@@ -38,7 +41,7 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         var badError = sampleDocument(); badError["error_code"] = "portal password leaked"
         var badBuild = sampleDocument(); badBuild["backend_build_version"] = "bad version!"
         var badTime = sampleDocument(); badTime["last_transition_at"] = "2026-08-04T12:00:00"
-        for object in [boolSchema, boolAsInt, unknown, secret, missing, badState, badInterface, badError, badBuild, badTime] {
+        for object in [boolSchema, boolAsInt, unknown, secret, missing, badState, badInterface, overWidthInterface, badError, badBuild, badTime] {
             #expect(throws: StatusProtocolError.self) { try VPNStatusDecoder.decode(try json(object)) }
         }
         #expect(throws: StatusProtocolError.self) { try VPNStatusDecoder.decode(Data(repeating: 0x78, count: VPNStatusDecoder.maxBytes + 1)) }

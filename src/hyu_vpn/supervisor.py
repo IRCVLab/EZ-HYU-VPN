@@ -374,7 +374,7 @@ class Supervisor:
             elif event.kind == "session-expiry":
                 self._write_current_status(session_expires_at=event.timestamp)
             elif event.kind == "connected":
-                self._write_current_status(state="connected", connected_at=event.timestamp)
+                self._write_current_status(state="connected", connected_at=event.timestamp, tunnel_interface=event.tunnel_interface)
 
     def _base_status(self, state: str) -> VpnStatus:
         return VpnStatus(state=state, automatic_reconnect_enabled=self.preference.read(default=False), last_transition_at=self.now())
@@ -707,6 +707,7 @@ class Supervisor:
     def _wait_for_child_or_connect_timeout(self, *, started_at: float) -> tuple[int, bool]:
         with self._state_lock:
             child = self._child
+            generation = self._active_generation
         if child is None:
             return 0, False
         timeout = self.config.connect_establish_timeout
@@ -721,19 +722,37 @@ class Supervisor:
                 return child.wait() or 0, False
             remaining = deadline - self.monotonic()
             if remaining <= 0:
-                return self._handle_connect_establish_timeout(), True
+                timeout_result = self._handle_connect_establish_timeout(expected_child=child, expected_generation=generation)
+                if timeout_result is None:
+                    return child.wait() or 0, False
+                return timeout_result, True
             try:
                 wait_slice = min(_CONNECT_WAIT_SLICE_SECONDS, remaining)
                 return child.wait(timeout=wait_slice) or 0, False
             except subprocess.TimeoutExpired:
                 continue
 
-    def _handle_connect_establish_timeout(self) -> int:
-        with self._state_lock:
+    def _handle_connect_establish_timeout(
+        self,
+        *,
+        expected_child: subprocess.Popen,
+        expected_generation: Optional[int],
+    ) -> Optional[int]:
+        with self._state_changed:
+            if (
+                expected_generation is None
+                or self._child is not expected_child
+                or self._active_generation != expected_generation
+                or self._disconnect_in_progress
+                or self._status.state != "connecting"
+            ):
+                return None
             last_successful_hip_at = self._status.last_successful_hip_at
             session_expires_at = self._status.session_expires_at
-        self.preference.write(False)
-        self._connector_failure_code = _CONNECT_TIMEOUT_ERROR_CODE
+            self.preference.write(False)
+            self._connector_failure_code = _CONNECT_TIMEOUT_ERROR_CODE
+            self._active_generation = None
+            self._state_changed.notify_all()
         stopped = self._stop_helper_and_teardown_user_connector(automatic=False)
         if stopped:
             self._write_current_status(

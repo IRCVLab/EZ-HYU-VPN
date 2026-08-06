@@ -128,6 +128,11 @@ class StatusProtocolTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaisesRegex(StatusProtocolError, pattern):
                 VpnStatus.from_dict(sample_document(**{key: value}))
 
+    def test_status_uses_the_shared_bounded_utun_contract(self):
+        self.assertEqual(VpnStatus.from_dict(sample_document(tunnel_interface="utun12345678")).tunnel_interface, "utun12345678")
+        with self.assertRaisesRegex(StatusProtocolError, "tunnel_interface"):
+            VpnStatus.from_dict(sample_document(tunnel_interface="utun123456789"))
+
     def test_status_roundtrip_preserves_null_optional_fields_and_rejects_malformed_or_oversized_documents(self):
         status = VpnStatus.from_dict(sample_document(
             connected_at=None,

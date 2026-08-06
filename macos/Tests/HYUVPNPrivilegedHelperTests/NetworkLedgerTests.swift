@@ -80,11 +80,12 @@ import Testing
         #expect(source.contains("/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapperd"))
         #expect(!source.contains("/Library/Application Support/HYU VPN/runtime/hyu-vpnc-wrapperd"))
         #expect(RuntimePaths.production.upstream.path == "/Library/Application Support/HYU VPN/runtime/vpnc/vpnc-script")
-        #expect(HelperConfiguration.fallbackProduction().vpncScript.path == "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper")
+        #expect(HelperConfiguration.fallbackProduction().vpncScript.path == "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper")
+        #expect(!HelperConfiguration.fallbackProduction().vpncScript.path.contains(" "))
         #expect(HelperConfiguration.fallbackProduction().openConnectExecutable.path == "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect")
         let good = HelperConfiguration(
             openConnectExecutable: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"),
-            vpncScript: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/vpnc/hyu-vpnc-wrapper"),
+            vpncScript: URL(fileURLWithPath: "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"),
             hipWrapper: URL(fileURLWithPath: "/Library/Application Support/HYU VPN/runtime/gp-hip-report"),
             stateDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn"),
             ledgerDirectory: URL(fileURLWithPath: "/private/var/db/hyu-vpn/ledger"),
