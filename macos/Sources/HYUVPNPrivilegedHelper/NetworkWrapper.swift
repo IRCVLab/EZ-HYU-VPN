@@ -591,6 +591,10 @@ public struct NetworkWrapperRunner {
             snapshotEnvironment["TUNDEV"] = tunnelInterface
         }
         let preflight = try snapshot(destinations: destinations, environment: snapshotEnvironment)
+        if reason == "repair", staleNetworkLedgerRetirementSafe(ledger: ledger, current: preflight) {
+            try removeLedgerAndSyncDirectory(ledgerPath)
+            return
+        }
         guard preflightSafe(ledger: ledger, current: preflight, allowRepairRequired: reason == "repair") else { try store.save(ledger.withStatus("repair-required")); throw HelperError.processMismatch }
         if reason == "disconnect" {
             let code = try upstream.run(reason: reason, environment: Self.sanitizedEnvironment(environment))
@@ -759,6 +763,45 @@ public struct NetworkWrapperRunner {
             if currentRoute != record.before { return false }
         }
         return true
+    }
+
+    private func staleNetworkLedgerRetirementSafe(ledger: NetworkLedger, current: NetworkSnapshotData) -> Bool {
+        guard ledger.status == "repair-required",
+              ledger.rebootIdentity == current.rebootIdentity,
+              ledger.serviceIDBefore == current.serviceID,
+              ledger.defaultInterfaceBefore == current.defaultInterface,
+              let defaultBefore = ledger.defaultRouteBefore,
+              let resolverBefore = ledger.dnsBefore,
+              current.defaultRoute != defaultBefore || current.resolver != resolverBefore,
+              current.routes.isEmpty,
+              current.tunnelInterface.isEmpty,
+              current.resolver.activeInterface == current.defaultInterface,
+              let tunnelInterface = ledger.tunnelInterface,
+              let tunnelSurface = current.resolver.surfaces["State:/Network/Interface/\(tunnelInterface)/DNS"],
+              !tunnelSurface.keyPresent
+        else { return false }
+        guard let resolverApplied = ledger.dnsApplied else { return true }
+        return !resolverRetainsAppliedMutation(before: resolverBefore, applied: resolverApplied, current: current.resolver)
+    }
+
+    private func resolverRetainsAppliedMutation(before: ResolverSnapshot, applied: ResolverSnapshot, current: ResolverSnapshot) -> Bool {
+        if applied.activeInterface != before.activeInterface, current.activeInterface == applied.activeInterface { return true }
+        if appliedCollectionRetained(before: before.servers, beforePresent: before.serversPresent, applied: applied.servers, appliedPresent: applied.serversPresent, current: current.servers, currentPresent: current.serversPresent) { return true }
+        if appliedCollectionRetained(before: before.searchDomains, beforePresent: before.searchDomainsPresent, applied: applied.searchDomains, appliedPresent: applied.searchDomainsPresent, current: current.searchDomains, currentPresent: current.searchDomainsPresent) { return true }
+        for (key, appliedSurface) in applied.surfaces {
+            guard let currentSurface = current.surfaces[key] else { continue }
+            let beforeSurface = before.surfaces[key]
+            if appliedCollectionRetained(before: beforeSurface?.servers ?? [], beforePresent: beforeSurface?.serversPresent ?? false, applied: appliedSurface.servers, appliedPresent: appliedSurface.serversPresent, current: currentSurface.servers, currentPresent: currentSurface.serversPresent) { return true }
+            if appliedCollectionRetained(before: beforeSurface?.searchDomains ?? [], beforePresent: beforeSurface?.searchDomainsPresent ?? false, applied: appliedSurface.searchDomains, appliedPresent: appliedSurface.searchDomainsPresent, current: currentSurface.searchDomains, currentPresent: currentSurface.searchDomainsPresent) { return true }
+        }
+        return false
+    }
+
+    private func appliedCollectionRetained(before: [String], beforePresent: Bool, applied: [String], appliedPresent: Bool, current: [String], currentPresent: Bool) -> Bool {
+        guard before != applied || beforePresent != appliedPresent else { return false }
+        if current == applied, currentPresent == appliedPresent { return true }
+        let appliedAdditions = Set(applied).subtracting(before)
+        return !appliedAdditions.isDisjoint(with: current)
     }
 
     private func removeLedgerAndSyncDirectory(_ ledgerPath: URL) throws {
