@@ -57,6 +57,11 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-restores-removed-gateway-baseline-route", testRepairRestoresRemovedGatewayBaselineRoute),
                 ("network-repair-restores-missing-foreign-baseline-host-route", testRepairRestoresMissingForeignBaselineHostRoute),
                 ("network-repair-retires-clean-ledger-after-default-network-change", testRepairRetiresCleanLedgerAfterDefaultNetworkChange),
+                ("network-repair-restores-exact-retained-setup-dns-after-default-network-change", testRepairRestoresExactRetainedSetupDNSAfterDefaultNetworkChange),
+                ("network-repair-keeps-stale-ledger-when-applied-route-remains", testRepairKeepsStaleLedgerWhenAppliedRouteRemains),
+                ("network-repair-keeps-stale-ledger-on-mixed-setup-dns", testRepairKeepsStaleLedgerOnMixedSetupDNS),
+                ("network-repair-keeps-stale-ledger-on-route-key-collision", testRepairKeepsStaleLedgerOnRouteKeyCollision),
+                ("network-repair-keeps-stale-ledger-on-network-identity-change", testRepairKeepsStaleLedgerOnNetworkIdentityChange),
                 ("system-network-tools-accepts-dhcp-missing-setup-dns", testSystemNetworkToolsAcceptsDHCPMissingSetupDNS),
                 ("system-network-tools-normalizes-static-host-route-mask", testSystemNetworkToolsNormalizesStaticHostRouteMask),
                 ("system-network-tools-resolves-explicit-network-host-route", testSystemNetworkToolsResolvesExplicitNetworkHostRoute),
@@ -708,6 +713,72 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
     }
 
     static func testRepairRetiresCleanLedgerAfterDefaultNetworkChange() throws {
+        let (fixture, _, _) = try staleNetworkLedgerFixture()
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "clean stale ledger is retired after the physical network changes")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "repair never restores a route through the obsolete gateway")
+        try expect(fixture.tools.restoredResolvers.isEmpty, "repair never overwrites resolver state from the new network")
+    }
+
+    static func testRepairKeepsStaleLedgerWhenAppliedRouteRemains() throws {
+        let (fixture, tunnelRoute, _) = try staleNetworkLedgerFixture()
+        fixture.tools.routes = [tunnelRoute]
+
+        try expectThrows("applied tunnel route blocks stale ledger retirement") {
+            try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "route residue keeps repair evidence")
+        try expect(fixture.tools.routes == [tunnelRoute], "foreign or owned route is not mutated by stale retirement")
+    }
+
+    static func testRepairKeepsStaleLedgerOnMixedSetupDNS() throws {
+        let (fixture, _, _) = try staleNetworkLedgerFixture()
+        fixture.tools.resolverServers = ["166.104.100.100", "203.0.113.53"]
+        fixture.tools.resolverServersPresent = true
+
+        try expectThrows("mixed Setup DNS is ambiguous and blocks stale ledger repair") {
+            try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "ambiguous DNS keeps repair evidence")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "ambiguous DNS is not overwritten")
+    }
+
+    static func testRepairKeepsStaleLedgerOnRouteKeyCollision() throws {
+        let (fixture, tunnelRoute, _) = try staleNetworkLedgerFixture()
+        let foreign = RouteSnapshot(destination: tunnelRoute.destination, gateway: "192.0.2.254", interface: "en0", netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol)
+        fixture.tools.routes = [foreign]
+
+        try expectThrows("foreign route with the same key blocks stale ledger retirement") {
+            try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "route-key collision keeps repair evidence")
+        try expect(fixture.tools.routes == [foreign], "foreign route collision is left untouched")
+    }
+
+    static func testRepairKeepsStaleLedgerOnNetworkIdentityChange() throws {
+        let mutations: [(HarnessNetworkTools) -> Void] = [
+            { $0.rebootIdentityValue = 4243 },
+            { $0.primaryServiceIDValue = "service-other" },
+            { $0.defaultInterface = "en1" },
+        ]
+        for mutate in mutations {
+            let (fixture, _, _) = try staleNetworkLedgerFixture()
+            mutate(fixture.tools)
+
+            try expectThrows("boot, service, or interface drift blocks stale ledger retirement") {
+                try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+            }
+
+            try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "identity drift keeps repair evidence")
+        }
+    }
+
+    static func staleNetworkLedgerFixture() throws -> (HarnessNetworkFixture, RouteSnapshot, ResolverSnapshot) {
         let fixture = try HarnessNetworkFixture()
         let oldDefault = RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: "0.0.0.0", protocol: "ipv4")
         let oldBypass = RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4")
@@ -716,8 +787,25 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
             RouteRecord(before: nil, applied: RouteDelta(operation: "add", destination: tunnelRoute.destination, gateway: tunnelRoute.gateway, interface: tunnelRoute.interface, netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol), after: tunnelRoute),
             RouteRecord(before: oldBypass, applied: RouteDelta(operation: "add", destination: oldBypass.destination, gateway: oldBypass.gateway, interface: oldBypass.interface, netmask: oldBypass.netmask, protocol: oldBypass.protocol), after: oldBypass),
         ]
-        let beforeDNS = ResolverSnapshot(serviceID: "service-wifi", servers: ["9.9.9.9"], searchDomains: ["old.example"], activeInterface: "en0")
-        let appliedDNS = ResolverSnapshot(serviceID: "service-wifi", servers: ["166.104.100.100"], searchDomains: ["hanyang.ac.kr"], activeInterface: "utun7")
+        let setupKey = "Setup:/Network/Service/service-wifi/DNS"
+        let stateKey = "State:/Network/Service/service-wifi/DNS"
+        let missing = ResolverFieldSnapshot(servers: [], searchDomains: [], serversPresent: false, searchDomainsPresent: false, keyPresent: false)
+        let beforeDNS = ResolverSnapshot(
+            serviceID: "service-wifi",
+            servers: [],
+            searchDomains: [],
+            activeInterface: "en0",
+            serversPresent: false,
+            searchDomainsPresent: false,
+            surfaces: [setupKey: missing, stateKey: ResolverFieldSnapshot(servers: ["9.9.9.9"], searchDomains: [])]
+        )
+        let appliedDNS = ResolverSnapshot(
+            serviceID: "service-wifi",
+            servers: ["166.104.100.100"],
+            searchDomains: [],
+            activeInterface: "utun7",
+            surfaces: [setupKey: ResolverFieldSnapshot(servers: ["166.104.100.100"], searchDomains: []), stateKey: ResolverFieldSnapshot(servers: ["166.104.100.100", "9.9.9.9"], searchDomains: [])]
+        )
         try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).save(
             NetworkLedger(
                 sessionNonce: fixture.nonce,
@@ -735,16 +823,59 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
             )
         )
         fixture.tools.defaultGateway = "192.0.2.254"
-        fixture.tools.resolverServers = ["1.1.1.1"]
-        fixture.tools.resolverSearchDomains = ["new.example"]
+        fixture.tools.resolverServers = []
+        fixture.tools.resolverSearchDomains = []
+        fixture.tools.resolverServersPresent = false
+        fixture.tools.resolverSearchDomainsPresent = false
+        fixture.tools.resolverSurfaces = [
+            setupKey: missing,
+            stateKey: ResolverFieldSnapshot(servers: ["166.104.100.100", "166.104.100.200"], searchDomains: []),
+        ]
+        fixture.tools.includeTunnelSurface = true
+        fixture.tools.routes = []
+        return (fixture, tunnelRoute, appliedDNS)
+    }
+
+    static func testRepairRestoresExactRetainedSetupDNSAfterDefaultNetworkChange() throws {
+        let fixture = try HarnessNetworkFixture()
+        let oldDefault = RouteSnapshot(destination: "default", gateway: "172.16.65.254", interface: "en0", netmask: "default", protocol: "ipv4")
+        let tunnelRoute = RouteSnapshot(destination: "166.104.100.100", gateway: "10.200.200.61", interface: "utun10", netmask: "255.255.255.255", protocol: "ipv4")
+        let records = [
+            RouteRecord(before: nil, applied: RouteDelta(operation: "add", destination: tunnelRoute.destination, gateway: tunnelRoute.gateway, interface: tunnelRoute.interface, netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol), after: tunnelRoute),
+        ]
+        let beforeDNS = ResolverSnapshot(serviceID: "service-wifi", servers: [], searchDomains: [], activeInterface: "en0", serversPresent: false, searchDomainsPresent: false)
+        let appliedDNS = ResolverSnapshot(serviceID: "service-wifi", servers: ["166.104.100.100"], searchDomains: [], activeInterface: "utun10", serversPresent: true, searchDomainsPresent: false)
+        try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).save(
+            NetworkLedger(
+                sessionNonce: fixture.nonce,
+                rebootIdentity: 4242,
+                serviceIDBefore: "service-wifi",
+                defaultInterfaceBefore: "en0",
+                defaultRouteBefore: oldDefault,
+                tunnelInterface: "utun10",
+                routeDeltasApplied: records.map(\.applied),
+                routeRecords: records,
+                dnsBefore: beforeDNS,
+                dnsApplied: appliedDNS,
+                status: "repair-required",
+                timestamp: Date(timeIntervalSince1970: 1)
+            )
+        )
+        fixture.tools.defaultGateway = "192.168.0.1"
+        fixture.tools.resolverServers = appliedDNS.servers
+        fixture.tools.resolverSearchDomains = []
+        fixture.tools.resolverServersPresent = true
+        fixture.tools.resolverSearchDomainsPresent = false
         fixture.tools.includeTunnelSurface = true
         fixture.tools.routes = []
 
         try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
 
-        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "clean stale ledger is retired after the physical network changes")
-        try expect(fixture.tools.restoredRoutes.isEmpty, "repair never restores a route through the obsolete gateway")
-        try expect(fixture.tools.restoredResolvers.isEmpty, "repair never overwrites resolver state from the new network")
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "DNS-only stale repair removes ledger after clearing retained VPN DNS")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "DNS-only stale repair does not restore obsolete routes")
+        try expect(fixture.tools.restoredDNSServers == [beforeDNS], "DNS-only stale repair restores the exact recorded Setup DNS field once")
+        try expect(fixture.tools.restoredSearchDomains.isEmpty, "unchanged search domains are not overwritten")
+        try expect(fixture.tools.resolverServers.isEmpty, "DNS-only stale repair clears retained VPN DNS servers")
     }
 
     static func testSystemNetworkToolsRestoresGatewayRouteWithoutInterfaceModifier() throws {
@@ -966,19 +1097,27 @@ final class FakeProcessController: ProcessControlling {
 
 
 final class HarnessNetworkTools: NetworkTooling {
+    var rebootIdentityValue: UInt64 = 4242
+    var primaryServiceIDValue = "service-wifi"
+    var defaultInterface = "en0"
     var defaultGateway = "192.0.2.1"
     var routes: [RouteSnapshot] = []
     var restoredRoutes: [RouteSnapshot] = []
     var resolverServers = ["9.9.9.9"]
     var resolverSearchDomains = ["home.example"]
+    var resolverServersPresent = true
+    var resolverSearchDomainsPresent = true
+    var resolverSurfaces: [String: ResolverFieldSnapshot]?
     var restoredResolvers: [ResolverSnapshot] = []
+    var restoredDNSServers: [ResolverSnapshot] = []
+    var restoredSearchDomains: [ResolverSnapshot] = []
     var includeTunnelSurface = false
-    func rebootIdentity() throws -> UInt64 { 4242 }
-    func primaryServiceID() throws -> String { "service-wifi" }
-    func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: defaultGateway, interface: "en0", netmask: "0.0.0.0", protocol: "ipv4") }
+    func rebootIdentity() throws -> UInt64 { rebootIdentityValue }
+    func primaryServiceID() throws -> String { primaryServiceIDValue }
+    func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: defaultGateway, interface: defaultInterface, netmask: "0.0.0.0", protocol: "ipv4") }
     func route(destination: String, netmask: String?) throws -> RouteSnapshot? { routes.first { $0.destination == destination && (netmask == nil || $0.netmask == netmask) } }
     func resolver(serviceID: String, baselineInterface: String, tunnelInterface: String?) throws -> ResolverSnapshot {
-        var surfaces = ["setup": ResolverFieldSnapshot(servers: resolverServers, searchDomains: resolverSearchDomains)]
+        var surfaces = resolverSurfaces ?? ["setup": ResolverFieldSnapshot(servers: resolverServers, searchDomains: resolverSearchDomains, serversPresent: resolverServersPresent, searchDomainsPresent: resolverSearchDomainsPresent)]
         if includeTunnelSurface, let tunnelInterface {
             surfaces["State:/Network/Interface/\(tunnelInterface)/DNS"] = ResolverFieldSnapshot(
                 servers: [],
@@ -988,7 +1127,7 @@ final class HarnessNetworkTools: NetworkTooling {
                 keyPresent: false
             )
         }
-        return ResolverSnapshot(serviceID: serviceID, servers: resolverServers, searchDomains: resolverSearchDomains, activeInterface: tunnelInterface ?? baselineInterface, surfaces: surfaces)
+        return ResolverSnapshot(serviceID: serviceID, servers: resolverServers, searchDomains: resolverSearchDomains, activeInterface: tunnelInterface ?? baselineInterface, serversPresent: resolverServersPresent, searchDomainsPresent: resolverSearchDomainsPresent, surfaces: surfaces)
     }
     func serviceName(for serviceID: String) throws -> String { "Wi-Fi" }
     func deleteRoute(_ delta: RouteDelta) throws {
@@ -999,7 +1138,24 @@ final class HarnessNetworkTools: NetworkTooling {
         routes.removeAll { $0.destination == route.destination && $0.netmask == route.netmask }
         routes.append(route)
     }
-    func restoreResolver(serviceID: String, snapshot: ResolverSnapshot) throws { restoredResolvers.append(snapshot) }
+    func restoreResolver(serviceID: String, snapshot: ResolverSnapshot) throws {
+        restoredResolvers.append(snapshot)
+        try restoreDNSServers(serviceID: serviceID, snapshot: snapshot)
+        try restoreSearchDomains(serviceID: serviceID, snapshot: snapshot)
+    }
+    func restoreDNSServers(serviceID: String, snapshot: ResolverSnapshot) throws {
+        restoredDNSServers.append(snapshot)
+        resolverServers = snapshot.servers
+        resolverServersPresent = snapshot.serversPresent
+    }
+    func restoreSearchDomains(serviceID: String, snapshot: ResolverSnapshot) throws {
+        restoredSearchDomains.append(snapshot)
+        resolverSearchDomains = snapshot.searchDomains
+        resolverSearchDomainsPresent = snapshot.searchDomainsPresent
+    }
+    func restoreResolverSurfaces(serviceID: String, snapshot: ResolverSnapshot, current: ResolverSnapshot) throws {
+        try restoreResolver(serviceID: serviceID, snapshot: snapshot)
+    }
 }
 final class HarnessCountingUpstream: VpncUpstreamRunning {
     var calls = 0
