@@ -36,6 +36,23 @@ rollback_keychain() {
     [[ -n "$item" ]] && /usr/bin/security delete-generic-password -s "$item" -a hyu-vpn >/dev/null 2>&1 || true
   done < "$KEYCHAIN_CREATED_FILE"
 }
+wait_for_menubar_exit() {
+  local attempt=0
+  while /usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp >/dev/null 2>&1 && [[ $attempt -lt 50 ]]; do
+    /bin/sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  ! /usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp >/dev/null 2>&1
+}
+stop_existing_menubar() {
+  /usr/bin/pkill -TERM -u "$USER_UID" -x HYUVPNMenuApp >/dev/null 2>&1 || true
+  wait_for_menubar_exit && return 0
+  /usr/bin/pkill -KILL -u "$USER_UID" -x HYUVPNMenuApp >/dev/null 2>&1 || true
+  wait_for_menubar_exit || {
+    print -u2 "could not stop existing HYU VPN menu process"
+    return 1
+  }
+}
 run_root_admin_live() {
   /usr/bin/sudo -v || return $?
   local LIVE_NONCE="hyu-install-mutation-$(/bin/date +%s)"
@@ -105,11 +122,13 @@ PREF_PATH="$HOME/Library/Application Support/hyu-openconnect/auto-reconnect.json
 /usr/bin/python3 -I -c 'import sys; sys.path.insert(0,"/Library/Application Support/HYU VPN/src"); from hyu_vpn.control import AutoReconnectPreference; AutoReconnectPreference(sys.argv[1], owner_uid=int(sys.argv[2])).write(False)' "$PREF_PATH" "$USER_UID"
 [[ -f "$SERVICE_PLIST" ]] || { print -u2 "missing installed service LaunchAgent"; exit 1; }
 [[ -f "$MENUBAR_PLIST" ]] || { print -u2 "missing installed menu LaunchAgent"; exit 1; }
+# Upgrades may inherit a LaunchServices-owned menu process from older installers.
+# Stop every same-user exact-name instance before launchd becomes the sole owner.
+stop_existing_menubar
 /bin/launchctl bootstrap "gui/$USER_UID" "$SERVICE_PLIST" >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
 /bin/launchctl bootstrap "gui/$USER_UID" "$MENUBAR_PLIST" >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
 /bin/launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
 /bin/launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
 /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
 /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
-[[ -d "/Applications/HYU VPN.app" ]] && /usr/bin/open -a "/Applications/HYU VPN.app" >/dev/null 2>&1 || true
 exit 0

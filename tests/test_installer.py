@@ -751,7 +751,19 @@ class LauncherAndTemplateTests(InstallerTestCase):
         self.assertIn('launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.menubar"', install)
         self.assertIn("launchctl print", install)
         self.assertIn("missing installed service LaunchAgent", install)
-        self.assertIn("/usr/bin/open -a", install)
+        self.assertNotIn("/usr/bin/open -a", install)
+        self.assertIn('/usr/bin/pkill -TERM -u "$USER_UID" -x HYUVPNMenuApp', install)
+        self.assertIn('/usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp', install)
+        self.assertIn('/usr/bin/pkill -KILL -u "$USER_UID" -x HYUVPNMenuApp', install)
+        self.assertEqual(install.count("wait_for_menubar_exit"), 3)
+        self.assertLess(
+            install.index('/usr/bin/pkill -KILL -u "$USER_UID" -x HYUVPNMenuApp'),
+            install.rindex("wait_for_menubar_exit"),
+        )
+        self.assertLess(
+            install.index('/usr/bin/pkill -TERM -u "$USER_UID" -x HYUVPNMenuApp'),
+            install.index("launchctl bootstrap"),
+        )
         self.assertLess(install.index("AutoReconnectPreference"), install.index("launchctl bootstrap"))
         activation = install[install.index("AutoReconnectPreference"):]
         self.assertNotIn("/opt/homebrew/bin/openconnect", activation)
@@ -780,6 +792,11 @@ class LauncherAndTemplateTests(InstallerTestCase):
             self.assertFalse(plist["KeepAlive"])
         service = plistlib.loads((REPO / "launchd/com.hyu.vpn.service.plist.in").read_text().replace("@USER_HOME@", "/Users/tester").replace("@SERVICE_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service").encode())
         self.assertEqual(service["ProgramArguments"], ["/usr/bin/python3", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service"])
+
+    def test_production_menu_bundle_uses_canonical_single_instance_identity(self):
+        plist = plistlib.loads((REPO / "macos/Resources/HYUVPNMenuApp/Info.plist").read_bytes())
+        self.assertEqual(plist["CFBundleIdentifier"], "com.hyu.vpn.menubar")
+        self.assertIs(plist["LSMultipleInstancesProhibited"], True)
 
 
 if __name__ == "__main__":
