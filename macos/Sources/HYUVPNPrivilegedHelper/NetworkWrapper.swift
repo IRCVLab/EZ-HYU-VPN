@@ -452,8 +452,13 @@ public struct NetworkWrapperRunner {
 
     private func connectLike(reason: String, nonce: String, ledgerPath: URL, environment: [String: String]) throws {
         let store = NetworkLedgerStore(path: ledgerPath, expectedOwnerUID: expectedOwnerUID)
-        let tunnelInterface = try validatedTunnelInterface(environment["TUNDEV"])
         if reason == "pre-init" {
+            // OpenConnect calls pre-init before os_setup_tun(). Unless -i forced
+            // an interface name, it deliberately unsets TUNDEV for this phase.
+            // Validate a supplied value, but do not require one until connect.
+            if let suppliedTunnel = environment["TUNDEV"] {
+                _ = try validatedTunnelInterface(suppliedTunnel)
+            }
             let baseline: NetworkLedger
             if FileManager.default.fileExists(atPath: ledgerPath.path) {
                 baseline = try store.load(expectedNonce: nonce)
@@ -483,6 +488,7 @@ public struct NetworkWrapperRunner {
             guard baselineRestored(ledger: baseline, current: after) else { try store.save(baseline.withStatus("repair-required")); throw HelperError.networkPostconditionFailed }
             return
         }
+        let tunnelInterface = try validatedTunnelInterface(environment["TUNDEV"])
         let destinations = try splitDestinations(environment)
         var baseline: NetworkLedger
         if FileManager.default.fileExists(atPath: ledgerPath.path) {

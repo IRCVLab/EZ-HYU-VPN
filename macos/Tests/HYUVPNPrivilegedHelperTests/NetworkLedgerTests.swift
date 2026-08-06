@@ -251,7 +251,9 @@ esac
         let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
         let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: tools, upstream: upstream)
         let env = round10ValidEnv(ledger: ledger)
-        try runner.run(reason: "pre-init", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger)
+        var preInitEnv = env
+        preInitEnv.removeValue(forKey: "TUNDEV")
+        try runner.run(reason: "pre-init", nonce: "nonceabc123", environment: preInitEnv, suppliedLedgerPath: ledger)
         tools.defaultGateway = "192.0.2.254"
         #expect(throws: (any Error).self) { try runner.run(reason: "connect", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger) }
         #expect(upstream.calls == 1)
@@ -409,6 +411,23 @@ esac
             try runner.run(reason: "pre-init", nonce: "nonceabc123", environment: env, suppliedLedgerPath: ledger)
         }
         #expect(upstream.calls == 0)
+    }
+
+    @Test func connectWithoutTunnelIsRejectedAfterPreInitBeforeUpstream() throws {
+        let dir = try temporaryDirectory()
+        let ledger = dir.appendingPathComponent("nonceabc123.ledger")
+        let upstream = Round10CountingUpstream()
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: dir.appendingPathComponent("sysctl"), networksetup: dir.appendingPathComponent("networksetup"))
+        let runner = NetworkWrapperRunner(paths: paths, expectedOwnerUID: UInt32(getuid()), tools: Round10DriftTools(), upstream: upstream)
+        let preInitEnv = ["HYU_SESSION_LEDGER": ledger.path]
+        try runner.run(reason: "pre-init", nonce: "nonceabc123", environment: preInitEnv, suppliedLedgerPath: ledger)
+        var connectEnv = round10ValidEnv(ledger: ledger)
+        connectEnv.removeValue(forKey: "TUNDEV")
+
+        #expect(throws: (any Error).self) {
+            try runner.run(reason: "connect", nonce: "nonceabc123", environment: connectEnv, suppliedLedgerPath: ledger)
+        }
+        #expect(upstream.calls == 1)
     }
 
 }

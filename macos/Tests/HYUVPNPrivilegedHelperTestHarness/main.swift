@@ -48,8 +48,9 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("status-repair-required-on-mismatch", testStatusRepairRequired),
                 ("repair-invokes-ledger-and-cleans-session", testRepairInvokesLedgerAndCleansSession),
                 ("repair-foreign-mismatch-preserves-evidence", testRepairForeignMismatchPreservesEvidence),
-                ("network-preinit-without-splits-records-baseline", testPreInitWithoutSplitsRecordsBaseline),
+                ("network-preinit-allows-absent-tundev", testPreInitWithoutTunnelDeviceRecordsBaseline),
                 ("network-connect-expands-preinit-route-intent", testConnectExpandsPreInitRouteIntent),
+                ("network-connect-requires-tundev-after-preinit", testConnectRequiresTunnelAfterPreInit),
                 ("network-zero-exit-without-routes-fails-postcondition", testZeroExitWithoutRoutesFailsPostcondition),
                 ("network-no-route-failure-retains-resolver-probe-for-repair", testNoRouteFailureRetainsResolverProbeForRepair),
                 ("network-repair-captures-tunnel-resolver-before-mutation", testRepairCapturesTunnelResolverBeforeMutation),
@@ -387,9 +388,11 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(saved.status == "repair-required", "ledger marked repair-required")
     }
 
-    static func testPreInitWithoutSplitsRecordsBaseline() throws {
+    static func testPreInitWithoutTunnelDeviceRecordsBaseline() throws {
         let fixture = try HarnessNetworkFixture()
-        let env = ["HYU_SESSION_LEDGER": fixture.ledger.path, "TUNDEV": "utun7"]
+        // OpenConnect 9.21 invokes pre-init before os_setup_tun() and therefore
+        // explicitly unsets TUNDEV when no interface was forced with -i.
+        let env = ["HYU_SESSION_LEDGER": fixture.ledger.path]
         try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: env, suppliedLedgerPath: fixture.ledger)
         try expect(fixture.upstream.reasons == ["pre-init"], "pre-init upstream called once")
         let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
@@ -399,7 +402,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
 
     static func testConnectExpandsPreInitRouteIntent() throws {
         let fixture = try HarnessNetworkFixture()
-        let preInitEnv = ["HYU_SESSION_LEDGER": fixture.ledger.path, "TUNDEV": "utun7"]
+        let preInitEnv = ["HYU_SESSION_LEDGER": fixture.ledger.path]
         try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: preInitEnv, suppliedLedgerPath: fixture.ledger)
         fixture.upstream.onRun = { reason, _ in
             guard reason == "connect" else { return }
@@ -413,6 +416,23 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
         try expect(saved.routeRecords.count == 2, "connect expanded protected and gateway routes")
         try expect(saved.tunnelInterface == "utun7", "connect recorded tunnel interface")
+    }
+
+    static func testConnectRequiresTunnelAfterPreInit() throws {
+        let fixture = try HarnessNetworkFixture()
+        try fixture.runner.run(
+            reason: "pre-init",
+            nonce: fixture.nonce,
+            environment: ["HYU_SESSION_LEDGER": fixture.ledger.path],
+            suppliedLedgerPath: fixture.ledger
+        )
+        var connectEnv = fixture.validEnv()
+        connectEnv.removeValue(forKey: "TUNDEV")
+
+        try expectThrows("connect requires TUNDEV") {
+            try fixture.runner.run(reason: "connect", nonce: fixture.nonce, environment: connectEnv, suppliedLedgerPath: fixture.ledger)
+        }
+        try expect(fixture.upstream.reasons == ["pre-init"], "missing connect tunnel rejected before upstream mutation")
     }
 
     static func testZeroExitWithoutRoutesFailsPostcondition() throws {
