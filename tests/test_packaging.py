@@ -127,9 +127,13 @@ class PackagingTestCase(unittest.TestCase):
         (src / "HYU VPN.app" / "Contents" / "MacOS" / "HYUVPNMenuApp").write_text("menu", encoding="utf-8")
         (src / "HYU VPN.app" / "Contents" / "MacOS" / "HYUVPNCredentialReader").write_text("reader", encoding="utf-8")
         (src / "HYU VPN.app" / "Contents" / "Info.plist").write_text("plist", encoding="utf-8")
+        (src / "HYU VPN.app" / "Contents" / "Resources").mkdir()
+        (src / "HYU VPN.app" / "Contents" / "Resources" / "AppIcon.icns").write_bytes(b"menu icon")
         (src / "Install HYU VPN.app" / "Contents" / "MacOS").mkdir(parents=True)
         (src / "Install HYU VPN.app" / "Contents" / "MacOS" / "HYUVPNInstallerApp").write_text("installer", encoding="utf-8")
         (src / "Install HYU VPN.app" / "Contents" / "Info.plist").write_text("installer plist", encoding="utf-8")
+        (src / "Install HYU VPN.app" / "Contents" / "Resources").mkdir()
+        (src / "Install HYU VPN.app" / "Contents" / "Resources" / "AppIcon.icns").write_bytes(b"installer icon")
         (src / "installer").mkdir()
         (src / "README-lab.md").write_text("HYU VPN lab package requires /usr/bin/python3 before sudo.\n", encoding="utf-8")
         for name in ["root-admin.sh", "manifest.py"]:
@@ -562,8 +566,10 @@ class ReleaseBuilderTests(PackagingTestCase):
             "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
             "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader",
             "HYU VPN.app/Contents/Info.plist",
+            "HYU VPN.app/Contents/Resources/AppIcon.icns",
             "Install HYU VPN.app/Contents/MacOS/HYUVPNInstallerApp",
             "Install HYU VPN.app/Contents/Info.plist",
+            "Install HYU VPN.app/Contents/Resources/AppIcon.icns",
             "README-lab.md",
             "installer/root-admin.sh",
             "installer/manifest.py",
@@ -733,11 +739,11 @@ class ReleaseBuilderTests(PackagingTestCase):
         installer_app = self.root / "build-products/Install HYU VPN.app"
         outside = self.root / "outside-secret.txt"
         outside.write_text("secret", encoding="utf-8")
-        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist"]:
+        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(path.name, encoding="utf-8")
             path.chmod(0o755)
-        (app / "Contents/Resources").mkdir()
+        (app / "Contents/Resources").mkdir(exist_ok=True)
         (app / "Contents/Resources/outside-link").symlink_to(outside)
         outputs = {str(oc.resolve()): f"{oc}:\n", str(oath.resolve()): f"{oath}:\n"}
         with self.assertRaisesRegex(PackagingError, "symlink"):
@@ -795,7 +801,7 @@ class ReleaseCliTests(PackagingTestCase):
         wrapperd = self.root / "build-products/hyu-vpnc-wrapperd"
         app = self.root / "build-products/HYU VPN.app"
         installer_app = self.root / "build-products/Install HYU VPN.app"
-        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist"]:
+        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(path.name, encoding="utf-8")
             path.chmod(0o755)
@@ -934,7 +940,7 @@ class ReleaseCliTests(PackagingTestCase):
         wrapperd = self.root / "build-products/hyu-vpnc-wrapperd"
         app = self.root / "build-products/HYU VPN.app"
         installer_app = self.root / "build-products/Install HYU VPN.app"
-        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist"]:
+        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(path.name, encoding="utf-8")
             path.chmod(0o755)
