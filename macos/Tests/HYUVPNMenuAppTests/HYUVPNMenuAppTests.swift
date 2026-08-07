@@ -107,6 +107,20 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(connected[.launchAtLogin]?.isChecked == true)
         #expect(MenuAction.allCases == [.currentState, .primaryConnection, .disconnect, .resetCredentials, .launchAtLogin, .diagnostics, .quit])
     }
+
+    @Test func primaryActionIsDisabledForTransientStates() throws {
+        let expected: [(VPNConnectionState, String)] = [
+            (.connecting, "Connecting…"),
+            (.disconnecting, "Disconnecting…"),
+            (.waitingForNetwork, "Waiting for Network"),
+        ]
+        for (state, title) in expected {
+            let menu = MenuModel.make(status: try status(state: state), diagnostics: "", launchAtLogin: .disabled)
+            #expect(menu[.primaryConnection]?.title == title)
+            #expect(menu[.primaryConnection]?.isEnabled == false)
+            #expect(menu[.primaryConnection]?.command == nil)
+        }
+    }
 }
 
 @Suite struct ControlNotificationAndWatcherTests {

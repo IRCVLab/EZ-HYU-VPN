@@ -9,7 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private var currentStatus: VPNStatus?
     private var lastPresentation = MenuPresentation(statusItemTitle: "", primaryText: "Status unavailable", detailText: "", symbolName: "exclamationmark.shield.fill")
     private var lastControlStatus = ""
-    private var launchAtLogin: LaunchAtLoginState = .disabled
     private let control = SecureVPNControlClient()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -52,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private func rebuildMenu() {
         let menu = NSMenu(title: "HYU VPN")
         if let status = currentStatus {
-            appendModeledItems(MenuModel.make(status: status, diagnostics: lastControlStatus, launchAtLogin: launchAtLogin), to: menu)
+            appendModeledItems(MenuModel.make(status: status, diagnostics: lastControlStatus, launchAtLogin: .disabled), to: menu)
         } else {
             menu.addItem(NSMenuItem(title: lastPresentation.primaryText, action: nil, keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: lastPresentation.detailText, action: nil, keyEquivalent: ""))
@@ -65,9 +64,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         menu.addItem(NSMenuItem.separator())
         add(.primaryConnection, #selector(primaryConnection), model, menu)
         add(.disconnect, #selector(disconnect), model, menu)
-        menu.addItem(NSMenuItem.separator())
-        add(.resetCredentials, #selector(resetCredentials), model, menu)
-        add(.launchAtLogin, #selector(toggleLaunchAtLogin), model, menu)
         menu.addItem(NSMenuItem.separator())
         add(.diagnostics, #selector(showDiagnostics), model, menu)
         menu.addItem(NSMenuItem.separator())
@@ -87,8 +83,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         launch(command)
     }
     @objc private func disconnect() { launch(.disconnect) }
-    @objc private func resetCredentials() { rebuildMenu() }
-    @objc private func toggleLaunchAtLogin() { launchAtLogin = launchAtLogin == .enabled ? .disabled : .enabled; rebuildMenu() }
     @objc private func showDiagnostics() { rebuildMenu() }
     @objc private func quit() { NSApp.terminate(nil) }
 

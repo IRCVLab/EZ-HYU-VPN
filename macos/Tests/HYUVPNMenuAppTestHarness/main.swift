@@ -15,6 +15,8 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
                 ("status-file-security", statusFileSecurity),
                 ("presentation-symbols-and-title-rule", presentationSymbolsAndTitleRule),
                 ("dynamic-menu-actions-and-checks", dynamicMenuActionsAndChecks),
+                ("primary-action-disabled-transient-states", primaryActionDisabledTransientStates),
+                ("live-menu-omits-unimplemented-actions", liveMenuOmitsUnimplementedActions),
                 ("watcher-initial-event-and-tick", watcherInitialEventAndTick),
                 ("control-security-timeout-and-normalized-errors", controlSecurityTimeoutAndErrors),
                 ("bundle-assembler-produces-lsuielement-app", bundleAssembler),
@@ -134,6 +136,29 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         let backoff = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .backoff, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
         try expect(backoff[.primaryConnection]?.title == "Reconnect Now", "backoff primary title")
         try expect(backoff[.primaryConnection]?.command == .reconnect, "backoff primary command")
+    }
+
+    static func primaryActionDisabledTransientStates() throws {
+        let expected: [(VPNConnectionState, String)] = [
+            (.connecting, "Connecting…"),
+            (.disconnecting, "Disconnecting…"),
+            (.waitingForNetwork, "Waiting for Network"),
+        ]
+        for (state, title) in expected {
+            let menu = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: state, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
+            try expect(menu[.primaryConnection]?.title == title, "transient title \(state.rawValue)")
+            try expect(menu[.primaryConnection]?.isEnabled == false, "transient disabled \(state.rawValue)")
+            try expect(menu[.primaryConnection]?.command == nil, "transient command nil \(state.rawValue)")
+        }
+    }
+
+    static func liveMenuOmitsUnimplementedActions() throws {
+        let root = packageRoot().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/main.swift"))
+        try expect(!source.contains("add(.resetCredentials"), "live menu omits reset credentials until implemented")
+        try expect(!source.contains("add(.launchAtLogin"), "live menu omits launch at login until implemented")
+        try expect(!source.contains("resetCredentials()"), "live menu has no reset no-op handler")
+        try expect(!source.contains("toggleLaunchAtLogin()"), "live menu has no in-memory launch toggle")
     }
 
     static func watcherInitialEventAndTick() throws {
