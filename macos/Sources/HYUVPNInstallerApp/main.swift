@@ -7,6 +7,31 @@ import HYUVPNMenuAppSupport
 import HYUVPNMenuCore
 
 @MainActor
+enum InstallerApplicationMenu {
+    static func make() -> NSMenu {
+        let mainMenu = NSMenu()
+
+        let applicationItem = NSMenuItem()
+        let applicationMenu = NSMenu()
+        applicationMenu.addItem(NSMenuItem(title: "Quit Install HYU VPN", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        return mainMenu
+    }
+}
+
+@MainActor
 final class HYUVPNInstallerApp: NSObject, NSApplicationDelegate {
     private let app = NSApplication.shared
     private var statusWindow: NSWindow?
@@ -105,6 +130,7 @@ final class HYUVPNInstallerApp: NSObject, NSApplicationDelegate {
 
 let application = NSApplication.shared
 let delegate = HYUVPNInstallerApp()
+application.mainMenu = InstallerApplicationMenu.make()
 application.delegate = delegate
 withExtendedLifetime(delegate) {
     application.run()

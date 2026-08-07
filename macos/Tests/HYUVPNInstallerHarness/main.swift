@@ -106,6 +106,15 @@ private func installerAppUsesExplicitAppKitDelegateBootstrap() throws {
     try expect(source.contains("application.run()"), "installer app starts AppKit run loop explicitly")
 }
 
+private func installerAppProvidesStandardEditShortcutsForCredentialFields() throws {
+    let source = try String(contentsOfFile: "macos/Sources/HYUVPNInstallerApp/main.swift", encoding: .utf8)
+    try expect(source.contains("application.mainMenu = InstallerApplicationMenu.make()"), "installer installs an application menu before prompting")
+    for action in ["#selector(NSText.cut(_:))", "#selector(NSText.copy(_:))", "#selector(NSText.paste(_:))", "#selector(NSText.selectAll(_:))"] {
+        try expect(source.contains(action), "installer edit menu includes \(action)")
+    }
+    try expect(source.contains("keyEquivalent: \"v\""), "installer edit menu binds Command-V")
+}
+
 
 private func rootAdminAuthorizationScriptQuotesCommandInOSAScriptArgv() throws {
     let commandArgv = ["/bin/echo", "space value", "apostrophe'", "quote\"", "back\\slash"]
@@ -180,6 +189,7 @@ do {
     try cleanupIncompleteStillAttemptsLaterKeys()
     try activationPolicyClassifiesMenuStartAsWarning()
     try installerAppUsesExplicitAppKitDelegateBootstrap()
+    try installerAppProvidesStandardEditShortcutsForCredentialFields()
     try rootAdminAuthorizationScriptQuotesCommandInOSAScriptArgv()
     try rootAdminHarmlessParserVariantExecutesViaArgv()
     try privilegedArgvAndSingleAuthorization()
