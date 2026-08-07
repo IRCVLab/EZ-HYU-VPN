@@ -69,46 +69,43 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
 }
 
 @Suite struct PresentationAndMenuTests {
-    @Test func presentationMapsEveryStateToSafeTextSymbolsAndDurations() throws {
-        let now = fixedDate("2026-08-04T12:30:00Z")
-        let connected = try VPNStatusDecoder.decode(try json(sampleDocument()))
-        let view = MenuPresenter.present(connected, now: now)
-        #expect(view.symbolName == "shield.lefthalf.filled")
-        #expect(view.statusItemTitle == "29m")
-        #expect(view.primaryText.contains("Connected"))
-        #expect(view.detailText.contains("utun7"))
-        #expect(view.connectedDurationText == "30m connected")
-        #expect(view.countdownText == "29m remaining")
-        var absentExpiry = sampleDocument(); absentExpiry["session_expires_at"] = NSNull()
-        let unknown = MenuPresenter.present(try VPNStatusDecoder.decode(try json(absentExpiry)), now: now)
-        #expect(unknown.countdownText == "Unknown")
-        #expect(unknown.statusItemTitle == "")
-        let expected: [(VPNConnectionState, String, String)] = [(.disabled, "shield.slash", ""), (.waitingForNetwork, "exclamationmark.shield", ""), (.connecting, "arrow.triangle.2.circlepath", ""), (.connected, "shield.lefthalf.filled", "29m"), (.disconnecting, "shield.slash", ""), (.backoff, "clock.arrow.circlepath", ""), (.error, "exclamationmark.shield", "")]
+    private func status(state: VPNConnectionState) throws -> VPNStatus {
+        var document = sampleDocument()
+        document["state"] = state.rawValue
+        if state != .connected {
+            document["connected_at"] = NSNull()
+            document["session_expires_at"] = NSNull()
+            document["tunnel_interface"] = NSNull()
+        }
+        if state != .error { document["error_code"] = NSNull() }
+        return try VPNStatusDecoder.decode(try json(document))
+    }
+
+    @Test func presentationMapsEveryStateToApprovedMenuBarCopyAndSymbols() throws {
+        let expected: [(VPNConnectionState, String, String)] = [
+            (.connected, "checkmark.shield.fill", "Connected"),
+            (.connecting, "arrow.triangle.2.circlepath", "Connecting…"),
+            (.disconnecting, "shield.slash", "Disconnecting…"),
+            (.disabled, "shield.slash", "Disconnected"),
+            (.waitingForNetwork, "wifi.exclamationmark", "Waiting for Network"),
+            (.backoff, "clock.arrow.circlepath", "Reconnecting…"),
+            (.error, "exclamationmark.shield.fill", "Needs Attention"),
+        ]
         for (state, symbol, title) in expected {
-            var doc = sampleDocument(); doc["state"] = state.rawValue
-            if state != .connected { doc["session_expires_at"] = NSNull(); doc["connected_at"] = NSNull() }
-            let projected = MenuPresenter.present(try VPNStatusDecoder.decode(try json(doc)), now: now)
-            #expect(projected.symbolName == symbol)
-            #expect(projected.statusItemTitle == title)
+            let view = MenuPresenter.present(try status(state: state))
+            #expect(view.statusItemTitle.isEmpty)
+            #expect(view.symbolName == symbol)
+            #expect(view.primaryText == title)
         }
     }
 
-    @Test func errorStateOffersAnExplicitRepairAndDisableAction() throws {
-        var document = sampleDocument()
-        document["state"] = "error"
-        document["automatic_reconnect_enabled"] = false
-        document["connected_at"] = NSNull()
-        document["session_expires_at"] = NSNull()
-        document["last_successful_hip_at"] = NSNull()
-        document["tunnel_interface"] = NSNull()
-        document["error_code"] = "NETWORK_SCRIPT_POSTCONDITION_FAILED"
-        let status = try VPNStatusDecoder.decode(try json(document))
-
-        let menu = MenuModel.make(status: status, notificationsEnabled: false, diagnostics: "")
-
-        #expect(menu[.disconnect]?.isEnabled == true)
-        #expect(menu[.disconnect]?.title == "Repair and Disable")
-        #expect(menu[.disconnect]?.command == .disconnect)
+    @Test func dynamicMenuModelUsesOnePrimaryActionAndNoExpiryActions() throws {
+        let connected = MenuModel.make(status: try status(state: .connected), diagnostics: "", launchAtLogin: .enabled)
+        #expect(connected[.primaryConnection]?.title == "Reconnect")
+        #expect(connected[.primaryConnection]?.command == .reconnect)
+        #expect(connected[.disconnect]?.isEnabled == true)
+        #expect(connected[.launchAtLogin]?.isChecked == true)
+        #expect(MenuAction.allCases == [.currentState, .primaryConnection, .disconnect, .resetCredentials, .launchAtLogin, .diagnostics, .quit])
     }
 }
 
@@ -122,20 +119,6 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(client.request(for: .setAutomaticReconnect(false)).arguments == ["automatic-off"])
         #expect(client.request(for: .setAutomaticReconnect(true)).arguments == ["automatic-on"])
         #expect(!client.request(for: .connect).usesShell)
-    }
-    @Test func notificationPlannerIsOffByDefaultStableAndSchedulesOnlyFutureKnownThresholds() throws {
-        let now = fixedDate("2026-08-04T12:00:00Z")
-        let connected = try VPNStatusDecoder.decode(try json(sampleDocument()))
-        #expect(NotificationPreference.defaultValue == false)
-        #expect(NotificationPlanner.plan(for: connected, now: now, enabled: false).requests.isEmpty)
-        let plan = NotificationPlanner.plan(for: connected, now: now, enabled: true)
-        #expect(plan.cancelIdentifiers == NotificationPlanner.stableIdentifiers)
-        #expect(plan.requests.map(\.identifier) == ["hyu.vpn.session-expiry.10m", "hyu.vpn.session-expiry.1m"])
-        #expect(plan.requests.map(\.timeInterval) == [2970, 3510])
-        let nearEnd = fixedDate("2026-08-04T12:58:45Z")
-        #expect(NotificationPlanner.plan(for: connected, now: nearEnd, enabled: true).requests.isEmpty)
-        var noExpiry = sampleDocument(); noExpiry["session_expires_at"] = NSNull()
-        #expect(NotificationPlanner.plan(for: try VPNStatusDecoder.decode(try json(noExpiry)), now: now, enabled: true).requests.isEmpty)
     }
     @Test func watcherConfigurationUsesFileEventsAndCoarseTimersWithoutReadingLogs() {
         let config = StatusWatcherConfiguration.default(statusPath: URL(fileURLWithPath: "/tmp/status.json"))
@@ -168,12 +151,6 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(sink.presentations.last?.statusItemTitle == "")
     }
 
-    @Test func notificationErrorDiagnosticIsStableAndSanitized() {
-        let diagnostic = NotificationFailureDiagnostic.normalizedCode(for: StatusProtocolError.invalid("password=CANARY"))
-        #expect(diagnostic == "NOTIFICATION_SCHEDULE_FAILED")
-        #expect(!diagnostic.contains("CANARY"))
-    }
-
     @Test func runnerExposesOnlyMinimalFixedEnvironment() {
         let env = SystemControlProcessRunner.fixedEnvironment()
         #expect(env.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"))
@@ -181,17 +158,6 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(!env.contains { $0.hasPrefix("HOME=") || $0.hasPrefix("USER=") || $0.contains("CANARY") })
     }
 
-    @Test func statusChangeNotificationFailureNormalizesDiagnosticAndDisables() throws {
-        let store = TestPreferenceStore(); store.enabled = true
-        let client = TestAsyncNotificationClient(scheduleFails: true)
-        let coordinator = AsyncNotificationCoordinator(store: store, client: client)
-        let done = DispatchSemaphore(value: 0)
-        let box = TestCompletionBox()
-        coordinator.statusDidChange(try VPNStatusDecoder.decode(try json(sampleDocument())), now: fixedDate("2026-08-04T12:00:00Z")) { result in box.record(result); done.signal() }
-        #expect(done.wait(timeout: .now() + 2) == .success)
-        #expect(box.diagnostic == "NOTIFICATION_SCHEDULE_FAILED")
-        #expect(store.enabled == false)
-    }
     @Test func internalSpawnSetupFailureDoesNotSpawnAndClosesFDs() throws {
         let pipeFactory = TestCountingPipeFactory(failOnCall: 0)
         let setup = TestFailingSpawnSetup()
@@ -206,15 +172,6 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
 
 final class TestStatusSink: StatusUpdateSink { var presentations: [MenuPresentation] = []; func apply(_ presentation: MenuPresentation) { presentations.append(presentation) } }
 final class TestStatusReader: StatusReading { var results: [Result<VPNStatus, Error>]; init(_ results: [Result<VPNStatus, Error>]) { self.results = results }; func readStatus() throws -> VPNStatus { try results.removeFirst().get() } }
-
-final class TestPreferenceStore: NotificationPreferenceStoring, @unchecked Sendable { var enabled: Bool?; func read() -> Bool { enabled ?? false }; func write(_ value: Bool) { enabled = value } }
-final class TestAsyncNotificationClient: AsyncNotificationClient, @unchecked Sendable {
-    let scheduleFails: Bool; init(scheduleFails: Bool) { self.scheduleFails = scheduleFails }
-    func requestAuthorization(completion: @escaping @Sendable (Result<Bool, Error>) -> Void) { completion(.success(true)) }
-    func cancel(_ identifiers: [String]) {}
-    func schedule(_ requests: [PlannedNotification], completion: @escaping @Sendable (Result<Void, Error>) -> Void) { scheduleFails ? completion(.failure(StatusProtocolError.invalid("password=CANARY"))) : completion(.success(())) }
-}
-final class TestCompletionBox: @unchecked Sendable { private let lock = NSLock(); private var _diagnostic = ""; func record(_ result: Result<Void, Error>) { if case .failure(let error) = result { lock.lock(); _diagnostic = String(describing: error); lock.unlock() } }; var diagnostic: String { lock.lock(); defer { lock.unlock() }; return _diagnostic } }
 
 final class TestFailingSpawnSetup: SpawnSetupManaging, @unchecked Sendable {
     private(set) var spawnCalls = 0

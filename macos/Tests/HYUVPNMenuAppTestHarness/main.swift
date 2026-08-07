@@ -17,31 +17,23 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
                 ("dynamic-menu-actions-and-checks", dynamicMenuActionsAndChecks),
                 ("watcher-initial-event-and-tick", watcherInitialEventAndTick),
                 ("control-security-timeout-and-normalized-errors", controlSecurityTimeoutAndErrors),
-                ("notification-preference-injected-cancel-reschedule", notificationPreferenceInjectedReschedule),
                 ("bundle-assembler-produces-lsuielement-app", bundleAssembler),
                 ("canonical-production-status-path", canonicalProductionStatusPath),
                 ("schema-float-integers-rejected", schemaFloatIntegersRejected),
-                ("connected-duration-only-connected", connectedDurationOnlyConnected),
                 ("system-runner-drains-large-output-and-timeouts", systemRunnerDrainsLargeOutputAndTimeouts),
-                ("async-notifications-grant-denial-status-change", asyncNotificationsGrantDenialStatusChange),
                 ("real-dispatch-watcher-atomic-replace-and-tick", realDispatchWatcherAtomicReplaceAndTick),
-                ("unavailable-status-cancels-notifications", unavailableStatusCancelsNotifications),
-                ("notification-schedule-failure-completes-once", notificationScheduleFailureCompletesOnce),
                 ("json-decoder-int-token-proof", jsonDecoderIntTokenProof),
                 ("process-group-timeout-kills-descendant-and-discards-output", processGroupTimeoutKillsDescendantAndDiscardsOutput),
-                ("near-expiry-thresholds-are-not-retroactive", nearExpiryThresholdsAreNotRetroactive),
                 ("duplicate-json-keys-rejected-before-collapse", duplicateJSONKeysRejectedBeforeCollapse),
                 ("unavailable-status-clears-stale-countdown", unavailableStatusClearsStaleCountdown),
                 ("direct-child-success-with-open-descendant-pipe-fails", directChildSuccessWithOpenDescendantPipeFails),
                 ("term-ignoring-descendant-is-killed", termIgnoringDescendantIsKilled),
                 ("synthetic-echild-is-never-success", syntheticECHILDIsNeverSuccess),
                 ("second-pipe-failure-closes-first-pipe", secondPipeFailureClosesFirstPipe),
-                ("notification-failure-normalized-diagnostic", notificationFailureNormalizedDiagnostic),
                 ("control-runner-uses-fixed-minimal-environment", controlRunnerUsesFixedMinimalEnvironment),
                 ("sentinel-parent-fd-is-not-inherited", sentinelParentFDIsNotInherited),
                 ("term-ignoring-descendant-closes-fds-still-killed", termIgnoringDescendantClosesFDsStillKilled),
                 ("cleanup-reap-is-bounded", cleanupReapIsBounded),
-                ("status-change-notification-failure-completes-normalized", statusChangeNotificationFailureCompletesNormalized),
                 ("menu-core-has-no-direct-foundation-process-run-surface", menuCoreHasNoDirectFoundationProcessRunSurface),
                 ("spawn-setup-seam-is-not-public-production-api", spawnSetupSeamIsNotPublicProductionAPI)
             ]
@@ -107,32 +99,41 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
     }
 
     static func presentationSymbolsAndTitleRule() throws {
-        let now = date("2026-08-04T12:30:00Z")
-        let symbols: [(VPNConnectionState, String)] = [(.connected, "shield.lefthalf.filled"), (.connecting, "arrow.triangle.2.circlepath"), (.backoff, "clock.arrow.circlepath"), (.disabled, "shield.slash"), (.disconnecting, "shield.slash"), (.error, "exclamationmark.shield"), (.waitingForNetwork, "exclamationmark.shield")]
-        for (state, symbol) in symbols {
+        let expected: [(VPNConnectionState, String, String)] = [
+            (.connected, "checkmark.shield.fill", "Connected"),
+            (.connecting, "arrow.triangle.2.circlepath", "Connecting…"),
+            (.disconnecting, "shield.slash", "Disconnecting…"),
+            (.disabled, "shield.slash", "Disconnected"),
+            (.waitingForNetwork, "wifi.exclamationmark", "Waiting for Network"),
+            (.backoff, "clock.arrow.circlepath", "Reconnecting…"),
+            (.error, "exclamationmark.shield.fill", "Needs Attention"),
+        ]
+        for (state, symbol, title) in expected {
             let status = try VPNStatusDecoder.decode(statusData(state: state, expiry: state == .connected ? "2026-08-04T12:59:30Z" : nil, connectedAt: state == .connected ? "2026-08-04T12:00:00Z" : nil))
-            let view = MenuPresenter.present(status, now: now)
+            let view = MenuPresenter.present(status)
+            try expect(view.statusItemTitle.isEmpty, "empty status title \(state.rawValue)")
             try expect(view.symbolName == symbol, "symbol \(state.rawValue)")
-            try expect(view.statusItemTitle == (state == .connected ? "29m" : ""), "title only connected")
+            try expect(view.primaryText == title, "title \(state.rawValue)")
         }
-        let missingExpiry = try VPNStatusDecoder.decode(statusData(expiry: nil))
-        try expect(MenuPresenter.present(missingExpiry, now: now).countdownText == "Unknown", "unknown expiry")
     }
 
     static func dynamicMenuActionsAndChecks() throws {
         let connected = try VPNStatusDecoder.decode(statusData(automatic: true))
-        let menu = MenuModel.make(status: connected, notificationsEnabled: true, diagnostics: "state=connected interface=utun7", now: date("2026-08-04T12:30:00Z"))
+        let menu = MenuModel.make(status: connected, diagnostics: "state=connected interface=utun7", launchAtLogin: .enabled)
         try expect(menu[.currentState]?.title.contains("Connected") == true, "current state")
-        try expect(menu[.expiry]?.title.contains("2026-08-04 12:59:30 UTC") == true, "absolute expiry")
-        try expect(menu[.connect]?.isEnabled == false && menu[.disconnect]?.isEnabled == true && menu[.reconnect]?.isEnabled == true, "connected action enablement")
-        try expect(menu[.automaticReconnect]?.isChecked == true, "auto checked")
-        try expect(menu[.expiryNotifications]?.isChecked == true, "notifications checked")
+        try expect(menu[.primaryConnection]?.title == "Reconnect", "connected primary title")
+        try expect(menu[.primaryConnection]?.command == .reconnect, "connected primary command")
+        try expect(menu[.disconnect]?.isEnabled == true, "connected disconnect enabled")
+        try expect(menu[.launchAtLogin]?.isChecked == true, "launch checked")
         try expect(menu[.diagnostics]?.title.contains("password") == false, "diagnostics sanitized")
-        try expect(menu[.quit]?.command == nil, "quit has no vpn command")
-        let error = try VPNStatusDecoder.decode(statusData(state: .error, expiry: nil, connectedAt: nil, automatic: false, error: "NETWORK_SCRIPT_POSTCONDITION_FAILED"))
-        let errorMenu = MenuModel.make(status: error, notificationsEnabled: false, diagnostics: "")
-        try expect(errorMenu[.disconnect]?.isEnabled == true, "error repair action enabled")
-        try expect(errorMenu[.disconnect]?.title == "Repair and Disable", "error repair action title")
+        try expect(MenuAction.allCases == [.currentState, .primaryConnection, .disconnect, .resetCredentials, .launchAtLogin, .diagnostics, .quit], "menu actions")
+        let disabled = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .disabled, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
+        try expect(disabled[.primaryConnection]?.title == "Connect", "disabled primary title")
+        try expect(disabled[.primaryConnection]?.command == .connect, "disabled primary command")
+        try expect(disabled[.disconnect]?.isEnabled == false, "disabled disconnect disabled")
+        let backoff = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .backoff, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
+        try expect(backoff[.primaryConnection]?.title == "Reconnect Now", "backoff primary title")
+        try expect(backoff[.primaryConnection]?.command == .reconnect, "backoff primary command")
     }
 
     static func watcherInitialEventAndTick() throws {
@@ -163,22 +164,6 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try expect(runner.requests.allSatisfy { !$0.usesShell && $0.executablePath == SecureVPNControlClient.defaultExecutablePath }, "fixed no shell")
         var bad = metadata; bad.symlink = true
         try expectThrows("symlink executable") { _ = try SecureVPNControlClient(metadata: bad, runner: runner).run(.connect) }
-    }
-
-    static func notificationPreferenceInjectedReschedule() throws {
-        let store = InMemoryPreferenceStore()
-        let center = RecordingNotificationClient(granted: true)
-        let coordinator = NotificationCoordinator(store: store, client: center)
-        let status = try VPNStatusDecoder.decode(statusData())
-        try expect(coordinator.isEnabled == false, "off default")
-        try coordinator.setEnabled(true, status: status, now: date("2026-08-04T12:00:00Z"))
-        try expect(center.authorizationRequests == 1, "requested auth")
-        try expect(center.cancelled == NotificationPlanner.stableIdentifiers, "cancel before schedule")
-        try expect(center.scheduled.map(\.identifier) == NotificationPlanner.stableIdentifiers, "scheduled stable")
-        try coordinator.statusDidChange(try VPNStatusDecoder.decode(statusData(expiry: "2026-08-04T12:20:00Z")), now: date("2026-08-04T12:00:00Z"))
-        try expect(center.cancelBatches.count == 2, "reschedule cancels")
-        try coordinator.setEnabled(false, status: status, now: date("2026-08-04T12:00:00Z"))
-        try expect(center.cancelBatches.count == 3 && store.enabled == false, "disable cancels")
     }
 
     static func bundleAssembler() throws {
@@ -213,14 +198,6 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try expectThrows("schema 1e0 rejected") { _ = try VPNStatusDecoder.decode(Data(String(decoding: statusData(), as: UTF8.self).replacingOccurrences(of: "\"schema_version\":1", with: "\"schema_version\":1e0").utf8)) }
     }
 
-    static func connectedDurationOnlyConnected() throws {
-        let now = date("2026-08-04T12:30:00Z")
-        for state in VPNConnectionState.allCases where state != .connected {
-            let view = MenuPresenter.present(try VPNStatusDecoder.decode(statusData(state: state, expiry: nil, connectedAt: "2026-08-04T12:00:00Z")), now: now)
-            try expect(view.connectedDurationText == "", "no connected duration for \(state.rawValue)")
-        }
-    }
-
     static func systemRunnerDrainsLargeOutputAndTimeouts() throws {
         let runner = SystemControlProcessRunner()
         let py = "/usr/bin/python3"
@@ -233,30 +210,6 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try expect(!stdout.lowercased().contains("password") && !stderr.lowercased().contains("cookie"), "secret output sanitized")
         let sleepy = try runner.run(ProcessLaunchRequest(executablePath: "/bin/sleep", arguments: ["5"], usesShell: false), timeout: 0.2, maxOutputBytes: 128)
         try expect(sleepy == .failure(.timeout), "timeout killed/reaped")
-    }
-
-    static func asyncNotificationsGrantDenialStatusChange() throws {
-        let grantedStore = InMemoryPreferenceStore()
-        let grantedClient = AsyncRecordingNotificationClient(results: [.success(true)])
-        let granted = AsyncNotificationCoordinator(store: grantedStore, client: grantedClient)
-        let status = try VPNStatusDecoder.decode(statusData())
-        let semaphore = DispatchSemaphore(value: 0)
-        granted.setEnabled(true, status: status, now: date("2026-08-04T12:00:00Z")) { result in
-            if case .success = result {} else { fatalError("unexpected notification failure") }
-            semaphore.signal()
-        }
-        try expect(semaphore.wait(timeout: .now() + 2) == .success, "async grant completed")
-        try expect(grantedStore.enabled == true, "persist only after grant")
-        try expect(grantedClient.scheduled.map(\.identifier) == NotificationPlanner.stableIdentifiers, "scheduled after grant")
-        granted.statusDidChange(try VPNStatusDecoder.decode(statusData(state: .disabled, expiry: nil, connectedAt: nil)), now: date("2026-08-04T12:00:00Z"))
-        try expect(grantedClient.cancelBatches.last == NotificationPlanner.stableIdentifiers && grantedClient.scheduled.isEmpty, "disconnect cancels")
-        let deniedStore = InMemoryPreferenceStore()
-        let deniedClient = AsyncRecordingNotificationClient(results: [.success(false)])
-        let denied = AsyncNotificationCoordinator(store: deniedStore, client: deniedClient)
-        let deniedSem = DispatchSemaphore(value: 0)
-        denied.setEnabled(true, status: status, now: date("2026-08-04T12:00:00Z")) { _ in deniedSem.signal() }
-        try expect(deniedSem.wait(timeout: .now() + 2) == .success, "async denial completed")
-        try expect(deniedStore.enabled == false && deniedClient.scheduled.isEmpty, "denial not persisted")
     }
 
     static func realDispatchWatcherAtomicReplaceAndTick() throws {
@@ -273,7 +226,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try atomicWrite(statusData(expiry: "2026-08-04T13:01:00Z"), to: statusURL)
         try expect(sink.wait(seconds: 3), "initial atomic replace tick observed")
         watcher.stop()
-        try expect(sink.presentations.contains { $0.statusItemTitle == "31m" }, "atomic replace updated countdown")
+        try expect(sink.presentations.allSatisfy { $0.statusItemTitle.isEmpty }, "atomic replace keeps status title empty")
     }
 
     static func atomicWrite(_ data: Data, to url: URL) throws {
@@ -283,31 +236,6 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp, backupItemName: nil, options: [])
     }
 
-
-    static func unavailableStatusCancelsNotifications() throws {
-        let store = InMemoryPreferenceStore(); store.enabled = true
-        let client = AsyncRecordingNotificationClient(results: [])
-        let coordinator = AsyncNotificationCoordinator(store: store, client: client)
-        coordinator.statusUnavailable()
-        try expect(client.cancelBatches.last == NotificationPlanner.stableIdentifiers, "unavailable cancels stable notifications")
-    }
-
-    static func notificationScheduleFailureCompletesOnce() throws {
-        let store = InMemoryPreferenceStore()
-        let client = AsyncRecordingNotificationClient(results: [.success(true)], scheduleResults: [.failure])
-        let coordinator = AsyncNotificationCoordinator(store: store, client: client)
-        let done = DispatchSemaphore(value: 0)
-        let completionBox = CompletionBox()
-        coordinator.setEnabled(true, status: try VPNStatusDecoder.decode(statusData()), now: date("2026-08-04T12:00:00Z")) { result in
-            completionBox.record(result)
-            done.signal()
-        }
-        try expect(done.wait(timeout: .now() + 2) == .success, "schedule failure returned")
-        let count = completionBox.count; let sawFailure = completionBox.failed
-        try expect(count == 1 && sawFailure, "completion exactly once failure")
-        try expect(store.enabled == false, "not persisted after schedule failure")
-        try expect(client.cancelBatches.last == NotificationPlanner.stableIdentifiers, "partial schedule cancelled")
-    }
 
     static func jsonDecoderIntTokenProof() throws {
         struct Probe: Decodable { let schema_version: Int }
@@ -408,12 +336,6 @@ time.sleep(20)
         try expect(pipeFactory.openDescriptors.isEmpty, "first pipe descriptors closed on partial failure")
     }
 
-    static func notificationFailureNormalizedDiagnostic() throws {
-        let diagnostic = NotificationFailureDiagnostic.normalizedCode(for: StatusProtocolError.invalid("password=CANARY schedule failed"))
-        try expect(diagnostic == "NOTIFICATION_SCHEDULE_FAILED", "normalized schedule diagnostic")
-        try expect(!diagnostic.contains("CANARY") && !diagnostic.lowercased().contains("password"), "no secret diagnostic")
-    }
-
     static func controlRunnerUsesFixedMinimalEnvironment() throws {
         let env = SystemControlProcessRunner.fixedEnvironment()
         try expect(env.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"), "minimal path")
@@ -480,20 +402,6 @@ time.sleep(20)
         try expect(waiter.blockingWaitCalls == 0, "no unbounded waitpid options 0")
     }
 
-    static func statusChangeNotificationFailureCompletesNormalized() throws {
-        let store = InMemoryPreferenceStore(); store.enabled = true
-        let client = AsyncRecordingNotificationClient(results: [], scheduleResults: [.failure])
-        let coordinator = AsyncNotificationCoordinator(store: store, client: client)
-        let done = DispatchSemaphore(value: 0)
-        let completionBox = CompletionBox()
-        coordinator.statusDidChange(try VPNStatusDecoder.decode(statusData()), now: date("2026-08-04T12:00:00Z")) { result in completionBox.record(result); done.signal() }
-        try expect(done.wait(timeout: .now() + 2) == .success, "status change failure completed")
-        try expect(completionBox.count == 1 && completionBox.failed, "status change completion once failure")
-        try expect(completionBox.diagnostic == "NOTIFICATION_SCHEDULE_FAILED", "status change normalized diagnostic")
-        try expect(store.enabled == false, "status change failure disables notifications")
-        try expect(client.cancelBatches.last == NotificationPlanner.stableIdentifiers, "status change failure cancels notifications")
-    }
-
     static func menuCoreHasNoDirectFoundationProcessRunSurface() throws {
         let root = packageRoot().deletingLastPathComponent()
         let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuCore/MenuCore.swift"))
@@ -512,12 +420,6 @@ time.sleep(20)
         try expect(source.contains("defer { if attrsInitialized { posix_spawnattr_destroy(&attrs) } }"), "attrs cleanup registered independently")
     }
 
-    static func nearExpiryThresholdsAreNotRetroactive() throws {
-        let status = try VPNStatusDecoder.decode(statusData(expiry: "2026-08-04T12:59:30Z"))
-        let plan = NotificationPlanner.plan(for: status, now: date("2026-08-04T12:58:45Z"), enabled: true)
-        try expect(plan.requests.isEmpty, "no immediate warning after threshold passed")
-    }
-
 }
 
 struct FakeMetadata: FileMetadataProviding {
@@ -528,32 +430,12 @@ final class RecordingStatusSink: StatusUpdateSink { var presentations: [MenuPres
 final class SequenceStatusReader: StatusReading { var results: [Result<VPNStatus, Error>]; init(_ results: [Result<VPNStatus, Error>]) { self.results = results }; func readStatus() throws -> VPNStatus { try results.removeFirst().get() } }
 struct FakeExecutableMetadata: ExecutableMetadataProviding { var ownerUID: uid_t; var mode: mode_t; var symlink: Bool; var executable: Bool; var parentModes: [String: mode_t]; func metadata(for path: String) throws -> FileMetadata { FileMetadata(ownerUID: path == SecureVPNControlClient.defaultExecutablePath ? ownerUID : uid_t(0), mode: parentModes[path] ?? mode, isSymlink: symlink, isRegularFile: true, isExecutable: executable) } }
 final class FakeProcessRunner: ControlProcessRunning { var results: [ControlProcessOutcome]; var requests: [ProcessLaunchRequest] = []; init(results: [ControlProcessOutcome]) { self.results = results }; func run(_ request: ProcessLaunchRequest, timeout: TimeInterval, maxOutputBytes: Int) throws -> ControlProcessOutcome { requests.append(request); return results.removeFirst() } }
-final class InMemoryPreferenceStore: NotificationPreferenceStoring, @unchecked Sendable { var enabled: Bool?; func read() -> Bool { enabled ?? false }; func write(_ value: Bool) { enabled = value } }
-final class RecordingNotificationClient: NotificationClient { let granted: Bool; var authorizationRequests = 0; var cancelBatches: [[String]] = []; var scheduled: [PlannedNotification] = []; init(granted: Bool) { self.granted = granted }; func requestAuthorization() -> Bool { authorizationRequests += 1; return granted }; func cancel(_ identifiers: [String]) { cancelBatches.append(identifiers) }; func schedule(_ requests: [PlannedNotification]) { scheduled = requests }; var cancelled: [String] { cancelBatches.last ?? [] } }
-
 
 final class SemaphoreStatusSink: StatusUpdateSink {
     private let lock = NSLock(); private let semaphore: DispatchSemaphore; private let expected: Int; private(set) var presentations: [MenuPresentation] = []
     init(expected: Int) { self.expected = expected; self.semaphore = DispatchSemaphore(value: 0) }
     func apply(_ presentation: MenuPresentation) { lock.lock(); presentations.append(presentation); let shouldSignal = presentations.count >= expected; lock.unlock(); if shouldSignal { semaphore.signal() } }
     func wait(seconds: TimeInterval) -> Bool { semaphore.wait(timeout: .now() + seconds) == .success }
-}
-
-enum AsyncNotificationResult { case success(Bool), failure }
-final class AsyncRecordingNotificationClient: AsyncNotificationClient, @unchecked Sendable {
-    var results: [AsyncNotificationResult]; var scheduleResults: [AsyncNotificationResult]; var cancelBatches: [[String]] = []; var scheduled: [PlannedNotification] = []
-    init(results: [AsyncNotificationResult], scheduleResults: [AsyncNotificationResult] = []) { self.results = results; self.scheduleResults = scheduleResults }
-    func requestAuthorization(completion: @escaping @Sendable (Result<Bool, Error>) -> Void) { let result = results.removeFirst(); DispatchQueue.global().async { switch result { case .success(let value): completion(.success(value)); case .failure: completion(.failure(StatusProtocolError.invalid("denied"))) } } }
-    func cancel(_ identifiers: [String]) { cancelBatches.append(identifiers); scheduled = [] }
-    func schedule(_ requests: [PlannedNotification], completion: @escaping @Sendable (Result<Void, Error>) -> Void) { scheduled = requests; let result = scheduleResults.isEmpty ? .success(true) : scheduleResults.removeFirst(); DispatchQueue.global().async { switch result { case .success: completion(.success(())); case .failure: completion(.failure(StatusProtocolError.invalid("schedule failed"))) } } }
-}
-
-final class CompletionBox: @unchecked Sendable {
-    private let lock = NSLock(); private var _count = 0; private var _failed = false; private var _diagnostic = ""
-    func record(_ result: Result<Void, Error>) { lock.lock(); _count += 1; if case .failure(let error) = result { _failed = true; _diagnostic = String(describing: error) }; lock.unlock() }
-    var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
-    var failed: Bool { lock.lock(); defer { lock.unlock() }; return _failed }
-    var diagnostic: String { lock.lock(); defer { lock.unlock() }; return _diagnostic }
 }
 
 

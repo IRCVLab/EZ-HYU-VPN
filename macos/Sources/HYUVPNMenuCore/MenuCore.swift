@@ -261,68 +261,42 @@ public struct MenuPresentation: Equatable, Sendable {
     public let primaryText: String
     public let detailText: String
     public let symbolName: String
-    public let countdownText: String
-    public let connectedDurationText: String
-    public init(statusItemTitle: String, primaryText: String, detailText: String, symbolName: String, countdownText: String, connectedDurationText: String) {
-        self.statusItemTitle = statusItemTitle; self.primaryText = primaryText; self.detailText = detailText; self.symbolName = symbolName; self.countdownText = countdownText; self.connectedDurationText = connectedDurationText
+    public init(statusItemTitle: String, primaryText: String, detailText: String, symbolName: String) {
+        self.statusItemTitle = statusItemTitle
+        self.primaryText = primaryText
+        self.detailText = detailText
+        self.symbolName = symbolName
     }
 }
 
 public enum MenuPresenter {
     public static func present(_ status: VPNStatus, now: Date = Date()) -> MenuPresentation {
-        let symbol = symbolName(for: status.state)
-        let stateName = title(for: status.state)
-        let countdown = countdownText(for: status, now: now)
-        let title = status.state == .connected && status.sessionExpiresAt != nil ? compactRemaining(until: status.sessionExpiresAt!, now: now) : ""
-        let connectedDuration = status.state == .connected ? connectedDurationText(since: status.connectedAt, now: now) : ""
         let details = [status.tunnelInterface, status.errorCode, status.backendBuildVersion].compactMap { $0 }.joined(separator: " • ")
-        return MenuPresentation(statusItemTitle: title, primaryText: stateName, detailText: details, symbolName: symbol, countdownText: countdown, connectedDurationText: connectedDuration)
+        return MenuPresentation(statusItemTitle: "", primaryText: title(for: status.state), detailText: details, symbolName: symbolName(for: status.state))
     }
 
     private static func title(for state: VPNConnectionState) -> String {
         switch state {
-        case .disabled: "Disabled"
-        case .waitingForNetwork: "Waiting for network"
-        case .connecting: "Connecting"
         case .connected: "Connected"
-        case .disconnecting: "Disconnecting"
-        case .backoff: "Retry scheduled"
-        case .error: "Error"
+        case .connecting: "Connecting…"
+        case .disconnecting: "Disconnecting…"
+        case .disabled: "Disconnected"
+        case .waitingForNetwork: "Waiting for Network"
+        case .backoff: "Reconnecting…"
+        case .error: "Needs Attention"
         }
     }
 
     private static func symbolName(for state: VPNConnectionState) -> String {
         switch state {
-        case .disabled: "shield.slash"
-        case .waitingForNetwork: "exclamationmark.shield"
+        case .connected: "checkmark.shield.fill"
         case .connecting: "arrow.triangle.2.circlepath"
-        case .connected: "shield.lefthalf.filled"
         case .disconnecting: "shield.slash"
+        case .disabled: "shield.slash"
+        case .waitingForNetwork: "wifi.exclamationmark"
         case .backoff: "clock.arrow.circlepath"
-        case .error: "exclamationmark.shield"
+        case .error: "exclamationmark.shield.fill"
         }
-    }
-
-    private static func countdownText(for status: VPNStatus, now: Date) -> String {
-        guard status.state == .connected else { return "" }
-        guard let expiry = status.sessionExpiresAt else { return "Unknown" }
-        return "\(compactRemaining(until: expiry, now: now)) remaining"
-    }
-
-    private static func connectedDurationText(since start: Date?, now: Date) -> String {
-        guard let start else { return "" }
-        let seconds = max(0, Int(now.timeIntervalSince(start)))
-        return "\(compact(seconds: seconds)) connected"
-    }
-
-    private static func compactRemaining(until expiry: Date, now: Date) -> String {
-        compact(seconds: max(0, Int(expiry.timeIntervalSince(now))))
-    }
-
-    private static func compact(seconds: Int) -> String {
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m" }
-        return "\(minutes / 60)h \(minutes % 60)m"
     }
 }
 
@@ -353,34 +327,6 @@ public struct VPNControlClient: Sendable {
         case .setAutomaticReconnect(let enabled): argument = enabled ? "automatic-on" : "automatic-off"
         }
         return ProcessLaunchRequest(executablePath: executablePath, arguments: [argument], usesShell: false)
-    }
-}
-
-public struct NotificationPreference { public static let defaultValue = false }
-
-public struct PlannedNotification: Equatable, Sendable {
-    public let identifier: String
-    public let timeInterval: Int
-    public let title: String
-    public let body: String
-}
-
-public struct NotificationPlan: Equatable, Sendable {
-    public let cancelIdentifiers: [String]
-    public let requests: [PlannedNotification]
-}
-
-public enum NotificationPlanner {
-    public static let stableIdentifiers = ["hyu.vpn.session-expiry.10m", "hyu.vpn.session-expiry.1m"]
-    public static func plan(for status: VPNStatus, now: Date = Date(), enabled: Bool = NotificationPreference.defaultValue) -> NotificationPlan {
-        guard enabled, status.state == .connected, let expiry = status.sessionExpiresAt else { return NotificationPlan(cancelIdentifiers: stableIdentifiers, requests: []) }
-        let thresholds = [(600, stableIdentifiers[0], "10 minutes"), (60, stableIdentifiers[1], "1 minute")]
-        let requests = thresholds.compactMap { threshold, identifier, label -> PlannedNotification? in
-            let interval = Int(expiry.timeIntervalSince(now)) - threshold
-            guard interval > 0 else { return nil }
-            return PlannedNotification(identifier: identifier, timeInterval: interval, title: "HYU VPN session expiring", body: "VPN session expires in \(label).")
-        }
-        return NotificationPlan(cancelIdentifiers: stableIdentifiers, requests: requests)
     }
 }
 
@@ -504,39 +450,47 @@ public final class StatusWatcher {
         } catch {
             lastStatus = nil
             (sink as? StatusValueSink)?.applyStatusValue(nil)
-            sink?.apply(MenuPresentation(statusItemTitle: "", primaryText: "Status unavailable", detailText: "CONTROL_STATUS_UNAVAILABLE", symbolName: "exclamationmark.shield", countdownText: "", connectedDurationText: ""))
+            sink?.apply(MenuPresentation(statusItemTitle: "", primaryText: "Status unavailable", detailText: "CONTROL_STATUS_UNAVAILABLE", symbolName: "exclamationmark.shield.fill"))
         }
     }
 }
 
-public enum MenuAction: Hashable, Sendable { case currentState, expiry, connectedDuration, connect, disconnect, reconnect, automaticReconnect, expiryNotifications, diagnostics, quit }
+public enum MenuAction: CaseIterable, Hashable, Sendable {
+    case currentState, primaryConnection, disconnect
+    case resetCredentials, launchAtLogin, diagnostics, quit
+}
 public struct MenuItemModel: Equatable, Sendable { public let title: String; public let isEnabled: Bool; public let isChecked: Bool; public let command: VPNControlCommand? }
+public enum LaunchAtLoginState: Equatable, Sendable { case enabled, disabled }
 
 public enum MenuModel {
-    public static func make(status: VPNStatus, notificationsEnabled: Bool, diagnostics: String, now: Date = Date()) -> [MenuAction: MenuItemModel] {
-        let view = MenuPresenter.present(status, now: now)
+    public static func make(status: VPNStatus, diagnostics: String, launchAtLogin: LaunchAtLoginState) -> [MenuAction: MenuItemModel] {
+        let view = MenuPresenter.present(status)
         var model: [MenuAction: MenuItemModel] = [:]
         model[.currentState] = MenuItemModel(title: "State: \(view.primaryText)", isEnabled: false, isChecked: false, command: nil)
-        if status.state == .connected, let expiry = status.sessionExpiresAt {
-            model[.expiry] = MenuItemModel(title: "Expires: \(absolute(expiry)) (\(view.countdownText))", isEnabled: false, isChecked: false, command: nil)
-            model[.connectedDuration] = MenuItemModel(title: view.connectedDurationText, isEnabled: false, isChecked: false, command: nil)
-        } else {
-            model[.expiry] = MenuItemModel(title: "Expires: Unknown", isEnabled: false, isChecked: false, command: nil)
-            model[.connectedDuration] = MenuItemModel(title: "", isEnabled: false, isChecked: false, command: nil)
-        }
-        model[.connect] = MenuItemModel(title: "Connect", isEnabled: [.disabled, .error, .waitingForNetwork, .backoff].contains(status.state), isChecked: false, command: .connect)
-        let disconnectTitle = status.state == .error ? "Repair and Disable" : "Disconnect"
-        model[.disconnect] = MenuItemModel(title: disconnectTitle, isEnabled: [.connected, .connecting, .backoff, .error].contains(status.state), isChecked: false, command: .disconnect)
-        model[.reconnect] = MenuItemModel(title: "Reconnect", isEnabled: status.state == .connected, isChecked: false, command: .reconnect)
-        model[.automaticReconnect] = MenuItemModel(title: "Automatic Reconnect", isEnabled: true, isChecked: status.automaticReconnectEnabled, command: .setAutomaticReconnect(!status.automaticReconnectEnabled))
-        model[.expiryNotifications] = MenuItemModel(title: "Notify before expiry", isEnabled: true, isChecked: notificationsEnabled, command: nil)
+        model[.primaryConnection] = primaryConnection(for: status.state)
+        model[.disconnect] = MenuItemModel(title: "Disconnect", isEnabled: [.connected, .connecting, .backoff, .error].contains(status.state), isChecked: false, command: .disconnect)
+        model[.resetCredentials] = MenuItemModel(title: "Reset Credentials…", isEnabled: true, isChecked: false, command: nil)
+        model[.launchAtLogin] = MenuItemModel(title: "Launch at Login", isEnabled: true, isChecked: launchAtLogin == .enabled, command: nil)
         model[.diagnostics] = MenuItemModel(title: "Diagnostics: \(sanitize(diagnostics))", isEnabled: true, isChecked: false, command: nil)
         model[.quit] = MenuItemModel(title: "Quit Menu App", isEnabled: true, isChecked: false, command: nil)
         return model
     }
 
-    private static func absolute(_ date: Date) -> String {
-        let formatter = DateFormatter(); formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'UTC'"; return formatter.string(from: date)
+    private static func primaryConnection(for state: VPNConnectionState) -> MenuItemModel {
+        switch state {
+        case .connected:
+            MenuItemModel(title: "Reconnect", isEnabled: true, isChecked: false, command: .reconnect)
+        case .disabled, .error:
+            MenuItemModel(title: "Connect", isEnabled: true, isChecked: false, command: .connect)
+        case .backoff:
+            MenuItemModel(title: "Reconnect Now", isEnabled: true, isChecked: false, command: .reconnect)
+        case .connecting:
+            MenuItemModel(title: "Connecting…", isEnabled: false, isChecked: false, command: nil)
+        case .disconnecting:
+            MenuItemModel(title: "Disconnecting…", isEnabled: false, isChecked: false, command: nil)
+        case .waitingForNetwork:
+            MenuItemModel(title: "Waiting for Network", isEnabled: false, isChecked: false, command: nil)
+        }
     }
 
     public static func sanitize(_ text: String) -> String {
@@ -743,85 +697,4 @@ private func exitCode(from status: Int32) -> Int32 {
 }
 
 
-public protocol NotificationPreferenceStoring: AnyObject, Sendable { func read() -> Bool; func write(_ value: Bool) }
-public final class UserDefaultsNotificationPreferenceStore: NotificationPreferenceStoring, @unchecked Sendable {
-    private let defaults: UserDefaults; private let key = "hyu.vpn.notifications.sessionExpiry.enabled"
-    public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
-    public func read() -> Bool { defaults.object(forKey: key) as? Bool ?? false }
-    public func write(_ value: Bool) { defaults.set(value, forKey: key) }
-}
-public protocol NotificationClient: AnyObject { func requestAuthorization() -> Bool; func cancel(_ identifiers: [String]); func schedule(_ requests: [PlannedNotification]) }
-
-public final class NotificationCoordinator {
-    private let store: NotificationPreferenceStoring
-    private let client: NotificationClient
-    public init(store: NotificationPreferenceStoring, client: NotificationClient) { self.store = store; self.client = client }
-    public var isEnabled: Bool { store.read() }
-    public func setEnabled(_ enabled: Bool, status: VPNStatus, now: Date = Date()) throws {
-        if enabled {
-            guard client.requestAuthorization() else { store.write(false); client.cancel(NotificationPlanner.stableIdentifiers); return }
-            store.write(true); reschedule(status: status, now: now)
-        } else { store.write(false); client.cancel(NotificationPlanner.stableIdentifiers) }
-    }
-    public func statusDidChange(_ status: VPNStatus, now: Date = Date()) throws { if isEnabled { reschedule(status: status, now: now) } else { client.cancel(NotificationPlanner.stableIdentifiers) } }
-    private func reschedule(status: VPNStatus, now: Date) {
-        let plan = NotificationPlanner.plan(for: status, now: now, enabled: isEnabled)
-        client.cancel(plan.cancelIdentifiers); client.schedule(plan.requests)
-    }
-}
-
 public protocol StatusValueSink: AnyObject { func applyStatusValue(_ status: VPNStatus?) }
-
-public enum NotificationFailureDiagnostic {
-    public static func normalizedCode(for error: Error) -> String { "NOTIFICATION_SCHEDULE_FAILED" }
-}
-
-public protocol AsyncNotificationClient: AnyObject, Sendable {
-    func requestAuthorization(completion: @escaping @Sendable (Result<Bool, Error>) -> Void)
-    func cancel(_ identifiers: [String])
-    func schedule(_ requests: [PlannedNotification], completion: @escaping @Sendable (Result<Void, Error>) -> Void)
-}
-
-public final class AsyncNotificationCoordinator {
-    private let store: NotificationPreferenceStoring
-    private let client: AsyncNotificationClient
-    public init(store: NotificationPreferenceStoring, client: AsyncNotificationClient) { self.store = store; self.client = client }
-    public var isEnabled: Bool { store.read() }
-    public func setEnabled(_ enabled: Bool, status: VPNStatus, now: Date = Date(), completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
-        if enabled {
-            client.requestAuthorization { [store, client] result in
-                switch result {
-                case .success(true):
-                    let plan = NotificationPlanner.plan(for: status, now: now, enabled: true)
-                    client.cancel(plan.cancelIdentifiers)
-                    client.schedule(plan.requests) { scheduleResult in
-                        switch scheduleResult {
-                        case .success:
-                            store.write(true); completion(.success(()))
-                        case .failure(let error):
-                            store.write(false); client.cancel(NotificationPlanner.stableIdentifiers); completion(.failure(StatusProtocolError.invalid(NotificationFailureDiagnostic.normalizedCode(for: error))))
-                        }
-                    }
-                case .success(false):
-                    store.write(false); client.cancel(NotificationPlanner.stableIdentifiers); completion(.failure(StatusProtocolError.invalid("NOTIFICATION_DENIED")))
-                case .failure(let error):
-                    store.write(false); client.cancel(NotificationPlanner.stableIdentifiers); completion(.failure(StatusProtocolError.invalid(NotificationFailureDiagnostic.normalizedCode(for: error))))
-                }
-            }
-        } else {
-            store.write(false); client.cancel(NotificationPlanner.stableIdentifiers); completion(.success(()))
-        }
-    }
-    public func statusDidChange(_ status: VPNStatus, now: Date = Date(), completion: (@Sendable (Result<Void, Error>) -> Void)? = nil) {
-        guard isEnabled else { client.cancel(NotificationPlanner.stableIdentifiers); completion?(.success(())); return }
-        let plan = NotificationPlanner.plan(for: status, now: now, enabled: true)
-        client.cancel(plan.cancelIdentifiers)
-        client.schedule(plan.requests) { [store, client] result in
-            switch result {
-            case .success: completion?(.success(()))
-            case .failure(let error): store.write(false); client.cancel(NotificationPlanner.stableIdentifiers); completion?(.failure(StatusProtocolError.invalid(NotificationFailureDiagnostic.normalizedCode(for: error))))
-            }
-        }
-    }
-    public func statusUnavailable() { client.cancel(NotificationPlanner.stableIdentifiers) }
-}

@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import UserNotifications
 import HYUVPNMenuCore
 
 @MainActor
@@ -8,16 +7,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private var statusItem: NSStatusItem?
     private var watcher: StatusWatcher?
     private var currentStatus: VPNStatus?
-    private var lastPresentation = MenuPresentation(statusItemTitle: "", primaryText: "Status unavailable", detailText: "", symbolName: "exclamationmark.shield", countdownText: "", connectedDurationText: "")
+    private var lastPresentation = MenuPresentation(statusItemTitle: "", primaryText: "Status unavailable", detailText: "", symbolName: "exclamationmark.shield.fill")
     private var lastControlStatus = ""
-    private lazy var notifications = AsyncNotificationCoordinator(store: UserDefaultsNotificationPreferenceStore(), client: UserNotificationClient())
+    private var launchAtLogin: LaunchAtLoginState = .disabled
     private let control = SecureVPNControlClient()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = item
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "exclamationmark.shield", accessibilityDescription: "HYU VPN")
+            button.image = NSImage(systemSymbolName: "exclamationmark.shield.fill", accessibilityDescription: "HYU VPN")
             button.image?.isTemplate = true
             button.title = ""
         }
@@ -32,14 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     nonisolated func applyStatusValue(_ status: VPNStatus?) {
         DispatchQueue.main.async { [weak self] in
             self?.currentStatus = status
-            if let status {
-                self?.notifications.statusDidChange(status) { [weak self] result in
-                    DispatchQueue.main.async {
-                        if case .failure(let error) = result { self?.lastControlStatus = NotificationFailureDiagnostic.normalizedCode(for: error) }
-                        self?.rebuildMenu()
-                    }
-                }
-            } else { self?.notifications.statusUnavailable() }
+            self?.rebuildMenu()
         }
     }
 
@@ -60,7 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private func rebuildMenu() {
         let menu = NSMenu(title: "HYU VPN")
         if let status = currentStatus {
-            appendModeledItems(MenuModel.make(status: status, notificationsEnabled: notifications.isEnabled, diagnostics: lastControlStatus, now: Date()), to: menu)
+            appendModeledItems(MenuModel.make(status: status, diagnostics: lastControlStatus, launchAtLogin: launchAtLogin), to: menu)
         } else {
             menu.addItem(NSMenuItem(title: lastPresentation.primaryText, action: nil, keyEquivalent: ""))
             menu.addItem(NSMenuItem(title: lastPresentation.detailText, action: nil, keyEquivalent: ""))
@@ -69,11 +61,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     }
 
     private func appendModeledItems(_ model: [MenuAction: MenuItemModel], to menu: NSMenu) {
-        add(.currentState, nil, model, menu); add(.expiry, nil, model, menu); add(.connectedDuration, nil, model, menu)
+        add(.currentState, nil, model, menu)
         menu.addItem(NSMenuItem.separator())
-        add(.connect, #selector(connect), model, menu); add(.disconnect, #selector(disconnect), model, menu); add(.reconnect, #selector(reconnect), model, menu)
+        add(.primaryConnection, #selector(primaryConnection), model, menu)
+        add(.disconnect, #selector(disconnect), model, menu)
         menu.addItem(NSMenuItem.separator())
-        add(.automaticReconnect, #selector(toggleAutomatic), model, menu); add(.expiryNotifications, #selector(toggleNotifications), model, menu)
+        add(.resetCredentials, #selector(resetCredentials), model, menu)
+        add(.launchAtLogin, #selector(toggleLaunchAtLogin), model, menu)
         menu.addItem(NSMenuItem.separator())
         add(.diagnostics, #selector(showDiagnostics), model, menu)
         menu.addItem(NSMenuItem.separator())
@@ -84,22 +78,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         guard let itemModel = model[action], !itemModel.title.isEmpty else { return }
         let item = NSMenuItem(title: itemModel.title, action: selector, keyEquivalent: action == .quit ? "q" : "")
         item.target = self; item.isEnabled = itemModel.isEnabled; item.state = itemModel.isChecked ? .on : .off
+        item.representedObject = itemModel.command
         menu.addItem(item)
     }
 
-    @objc private func connect() { launch(.connect) }
-    @objc private func disconnect() { launch(.disconnect) }
-    @objc private func reconnect() { launch(.reconnect) }
-    @objc private func toggleAutomatic() { if let status = currentStatus { launch(.setAutomaticReconnect(!status.automaticReconnectEnabled)) } }
-    @objc private func toggleNotifications() {
-        guard let status = currentStatus else { return }
-        notifications.setEnabled(!notifications.isEnabled, status: status) { [weak self] result in
-            DispatchQueue.main.async {
-                if case .failure(let error) = result { self?.lastControlStatus = NotificationFailureDiagnostic.normalizedCode(for: error) }
-                self?.rebuildMenu()
-            }
-        }
+    @objc private func primaryConnection(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? VPNControlCommand else { return }
+        launch(command)
     }
+    @objc private func disconnect() { launch(.disconnect) }
+    @objc private func resetCredentials() { rebuildMenu() }
+    @objc private func toggleLaunchAtLogin() { launchAtLogin = launchAtLogin == .enabled ? .disabled : .enabled; rebuildMenu() }
     @objc private func showDiagnostics() { rebuildMenu() }
     @objc private func quit() { NSApp.terminate(nil) }
 
@@ -115,36 +104,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         }
     }
 }
-
-
-final class NotificationScheduleBox: @unchecked Sendable { private let lock = NSLock(); private var stored: Error?; func record(_ error: Error) { lock.lock(); if stored == nil { stored = error }; lock.unlock() }; var error: Error? { lock.lock(); defer { lock.unlock() }; return stored } }
-
-final class UserNotificationClient: AsyncNotificationClient, @unchecked Sendable {
-    func requestAuthorization(completion: @escaping @Sendable (Result<Bool, Error>) -> Void) {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error { completion(.failure(error)) } else { completion(.success(granted)) }
-        }
-    }
-    func cancel(_ identifiers: [String]) { UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: identifiers) }
-    func schedule(_ requests: [PlannedNotification], completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
-        guard !requests.isEmpty else { completion(.success(())); return }
-        let group = DispatchGroup()
-        let box = NotificationScheduleBox()
-        for request in requests {
-            group.enter()
-            let content = UNMutableNotificationContent(); content.title = request.title; content.body = request.body
-            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(request.timeInterval), repeats: false)
-            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: request.identifier, content: content, trigger: trigger)) { error in
-                if let error { box.record(error) }
-                group.leave()
-            }
-        }
-        group.notify(queue: .global(qos: .utility)) {
-            if let error = box.error { completion(.failure(error)) } else { completion(.success(())) }
-        }
-    }
-}
-
 
 let application = NSApplication.shared
 let delegate = AppDelegate()
