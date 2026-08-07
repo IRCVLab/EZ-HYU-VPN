@@ -191,6 +191,10 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expect(disabled[.primaryConnection]?.title == "Connect", "disabled primary title")
         try expect(disabled[.primaryConnection]?.command == .connect, "disabled primary command")
         try expect(disabled[.disconnect]?.isEnabled == false, "disabled disconnect disabled")
+        let error = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .error, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
+        try expect(error[.primaryConnection]?.title == "Reconnect", "error primary title")
+        try expect(error[.primaryConnection]?.isEnabled == true, "error primary enabled")
+        try expect(error[.primaryConnection]?.command == .reconnect, "error primary command")
         let backoff = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .backoff, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
         try expect(backoff[.primaryConnection]?.title == "Reconnect Now", "backoff primary title")
         try expect(backoff[.primaryConnection]?.command == .reconnect, "backoff primary command")
@@ -345,7 +349,26 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         for required in ["HYU VPN: Status Unavailable", "Diagnostics…", "Quit HYU VPN", "button.title = \"\"", "button.toolTip = textualState", "accessibilityDescription: textualState", "button.setAccessibilityLabel(textualState)", "button.setAccessibilityHelp(textualState)", "\"Connecting…\"", "\"Disconnecting…\"", "\"Waiting for Network\""] {
             try expect(source.contains(required), "menu/icon contract contains \(required)")
         }
-        try expect(source.contains("menu.addItem(NSMenuItem.separator())"), "menu keeps approved separators")
+        let rebuildStart = try requireIndex(of: "private func rebuildMenu()", in: source, message: "rebuildMenu exists")
+        let rebuildEnd = try requireIndex(of: "    private func addPrimaryAction", in: source, message: "rebuildMenu end")
+        let rebuild = String(source[rebuildStart..<rebuildEnd])
+        try expect(rebuild.components(separatedBy: "NSMenuItem.separator()").count - 1 == 2, "menu has exactly two separators")
+        let expectedOrder = [
+            "menu.addItem(disabledItem(title: statusLineText()))",
+            "addPrimaryAction(to: menu)",
+            "addDisconnectAction(to: menu)",
+            "menu.addItem(NSMenuItem.separator())",
+            "addResetAction(to: menu)",
+            "addLaunchAtLoginAction(to: menu)",
+            "addDiagnosticsAction(to: menu)",
+            "menu.addItem(NSMenuItem.separator())",
+            "addQuitAction(to: menu)",
+        ]
+        var searchStart = rebuild.startIndex
+        for token in expectedOrder {
+            guard let range = rebuild.range(of: token, range: searchStart..<rebuild.endIndex) else { throw HarnessFailure(description: "menu order missing \(token)") }
+            searchStart = range.upperBound
+        }
         try expect(source.contains("addPrimaryAction"), "single dynamic primary action helper")
         try expect(source.contains("Disconnect"), "disconnect row present")
     }
@@ -892,12 +915,19 @@ time.sleep(20)
             try expect(shimSource.contains(required), "keychain ACL shim contains \(required)")
         }
         try expect(shimSource.contains("-Wdeprecated-declarations") || shimSource.contains("deprecated-declarations"), "deprecation warning is scoped to shim")
+        let accessFactoryIndex = try requireIndex(of: "let access = try KeychainCredentialAccessFactory.make()", in: adapterSource, message: "access factory before attrs")
+        let attributesIndex = try requireIndex(of: "let attributes: [String: Any]", in: adapterSource, message: "attributes dictionary")
+        let firstUpdateIndex = try requireIndex(of: "let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)", in: adapterSource, message: "initial update uses shared attributes")
         let addIndex = try requireIndex(of: "SecItemAdd", in: adapterSource, message: "add index")
-        let accessIndex = try requireIndex(of: "kSecAttrAccess", in: adapterSource, message: "access index")
-        let updateIndex = try requireIndex(of: "SecItemUpdate", in: adapterSource, message: "update index")
-        try expect(accessIndex < addIndex, "ACL attached before add")
-        try expect(updateIndex < accessIndex, "update path remains before add-only ACL attachment")
-        try expect(adapterSource.components(separatedBy: "kSecAttrAccess").count - 1 == 1, "ACL attribute used only on add path")
+        let retryIndex = try requireIndex(of: "let retryStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)", in: adapterSource, message: "duplicate retry uses shared attributes")
+        try expect(accessFactoryIndex < attributesIndex, "ACL constructed before update attributes")
+        try expect(attributesIndex < firstUpdateIndex, "ACL-bearing attributes are present before first update")
+        try expect(firstUpdateIndex < addIndex, "update attempted before add")
+        try expect(addIndex < retryIndex, "duplicate retry happens after add")
+        try expect(adapterSource.contains("kSecValueData as String: data"), "attributes contain credential data")
+        try expect(adapterSource.contains("kSecAttrAccess as String: access"), "attributes contain ACL access")
+        try expect(adapterSource.contains("addQuery[kSecValueData as String] = attributes[kSecValueData as String]"), "add reuses data from shared attributes")
+        try expect(adapterSource.contains("addQuery[kSecAttrAccess as String] = attributes[kSecAttrAccess as String]"), "add reuses ACL from shared attributes")
     }
 
     static func credentialResetControllerRuntimeBehavior() throws {

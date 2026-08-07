@@ -36,6 +36,12 @@ rollback_keychain() {
     [[ -n "$item" ]] && /usr/bin/security delete-generic-password -s "$item" -a hyu-vpn >/dev/null 2>&1 || true
   done < "$KEYCHAIN_CREATED_FILE"
 }
+validate_temp_username() {
+  /usr/bin/security find-generic-password -w -s "$TMP_USER_SERVICE" -a hyu-vpn | /usr/bin/python3 -I -c 'import sys
+value = sys.stdin.read().rstrip("\n")
+if not value or len(value) > 128 or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+    sys.exit(65)'
+}
 menubar_process_count() { /usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' '; }
 wait_for_menubar_exit() {
   local attempt=0
@@ -79,16 +85,17 @@ PACKAGE_MANIFEST_SHA256="$(/usr/bin/shasum -a 256 "$PAYLOAD_DIR/manifest.json" |
 STAGE_MANIFEST_SHA256="$(/usr/bin/shasum -a 256 "$STAGE_DIR/manifest.json" | /usr/bin/awk '{print $1}')"
 [[ "$PACKAGE_MANIFEST_SHA256" == [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] ]] || { print -u2 "invalid package manifest digest"; exit 65; }
 [[ "$STAGE_MANIFEST_SHA256" == [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] ]] || { print -u2 "invalid staged manifest digest"; exit 65; }
-printf "HYU VPN username: "
-IFS= read -r HYU_VPN_USERNAME
-[[ -n "$HYU_VPN_USERNAME" && "$HYU_VPN_USERNAME" != *[$'\001'-$'\037'$'\177']* && ${#HYU_VPN_USERNAME} -le 128 ]] || { print -u2 "invalid HYU VPN username"; exit 65; }
 # Store credentials only in random temporary Keychain services until root install succeeds.
 # Existing final credentials are never overwritten by this installer; missing finals are created only after root install succeeds.
 : > "$KEYCHAIN_CREATED_FILE"
 FINAL_USER_EXISTS=0; keychain_exists gp-vpn-username && FINAL_USER_EXISTS=1 || true
 FINAL_PASS_EXISTS=0; keychain_exists gp-vpn-password && FINAL_PASS_EXISTS=1 || true
 FINAL_TOTP_EXISTS=0; keychain_exists gp-vpn-totp && FINAL_TOTP_EXISTS=1 || true
-if [[ $FINAL_USER_EXISTS -eq 0 ]]; then /usr/bin/security add-generic-password -s "$TMP_USER_SERVICE" -a hyu-vpn -w "$HYU_VPN_USERNAME" || { cleanup; exit 1; }; fi
+if [[ $FINAL_USER_EXISTS -eq 0 ]]; then
+  print "HYU VPN username: enter it twice at the next prompts."
+  /usr/bin/security add-generic-password -s "$TMP_USER_SERVICE" -a hyu-vpn -w || { cleanup; exit 1; }
+  validate_temp_username || { print -u2 "invalid HYU VPN username"; cleanup; exit 65; }
+fi
 if [[ $FINAL_PASS_EXISTS -eq 0 ]]; then
   print "HYU VPN password (not the Mac administrator password): enter it twice at the next prompts."
   /usr/bin/security add-generic-password -s "$TMP_PASS_SERVICE" -a hyu-vpn -w || { cleanup; exit 1; }
@@ -106,7 +113,7 @@ set -e
 if [[ $STATUS -ne 0 ]]; then cleanup; exit $STATUS; fi
 promote_failed=0
 if [[ $FINAL_USER_EXISTS -eq 0 ]]; then
-  if /usr/bin/security add-generic-password -s gp-vpn-username -a hyu-vpn -w "$HYU_VPN_USERNAME"; then record_keychain_created gp-vpn-username; else promote_failed=1; fi
+  if /usr/bin/security find-generic-password -w -s "$TMP_USER_SERVICE" -a hyu-vpn | /usr/bin/security add-generic-password -s gp-vpn-username -a hyu-vpn -w; then record_keychain_created gp-vpn-username; else promote_failed=1; fi
 fi
 if [[ $promote_failed -eq 0 && $FINAL_PASS_EXISTS -eq 0 ]]; then
   if /usr/bin/security find-generic-password -w -s "$TMP_PASS_SERVICE" -a hyu-vpn | /usr/bin/security add-generic-password -s gp-vpn-password -a hyu-vpn -w; then record_keychain_created gp-vpn-password; else promote_failed=1; fi

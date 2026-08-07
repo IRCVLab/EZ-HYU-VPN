@@ -36,15 +36,18 @@ package final class KeychainCredentialStore: CredentialStore {
     package func write(_ value: String, for key: CredentialKey) throws {
         guard let data = value.data(using: .utf8) else { throw AdapterError.keychainFailure }
         let query = baseQuery(for: key)
-        let attributes: [String: Any] = [kSecValueData as String: data]
+        let access = try KeychainCredentialAccessFactory.make()
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccess as String: access,
+        ]
         let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if updateStatus == errSecSuccess { return }
         guard updateStatus == errSecItemNotFound else { throw AdapterError.keychainFailure }
 
         var addQuery = query
-        addQuery[kSecValueData as String] = data
-        let access = try KeychainCredentialAccessFactory.make()
-        addQuery[kSecAttrAccess as String] = access
+        addQuery[kSecValueData as String] = attributes[kSecValueData as String]
+        addQuery[kSecAttrAccess as String] = attributes[kSecAttrAccess as String]
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         if addStatus == errSecSuccess { return }
         if addStatus == errSecDuplicateItem {

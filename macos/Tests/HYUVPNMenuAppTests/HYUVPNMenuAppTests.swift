@@ -108,6 +108,18 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(MenuAction.allCases == [.currentState, .primaryConnection, .disconnect, .resetCredentials, .launchAtLogin, .diagnostics, .quit])
     }
 
+    @Test func primaryActionConnectsOnlyFromDisabledAndReconnectsFromError() throws {
+        let disabled = MenuModel.make(status: try status(state: .disabled), diagnostics: "", launchAtLogin: .disabled)
+        #expect(disabled[.primaryConnection]?.title == "Connect")
+        #expect(disabled[.primaryConnection]?.isEnabled == true)
+        #expect(disabled[.primaryConnection]?.command == .connect)
+
+        let error = MenuModel.make(status: try status(state: .error), diagnostics: "", launchAtLogin: .disabled)
+        #expect(error[.primaryConnection]?.title == "Reconnect")
+        #expect(error[.primaryConnection]?.isEnabled == true)
+        #expect(error[.primaryConnection]?.command == .reconnect)
+    }
+
     @Test func primaryActionIsDisabledForTransientStates() throws {
         let expected: [(VPNConnectionState, String)] = [
             (.connecting, "Connecting…"),

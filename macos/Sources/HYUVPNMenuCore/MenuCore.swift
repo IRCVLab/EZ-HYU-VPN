@@ -518,8 +518,10 @@ public enum MenuModel {
         switch state {
         case .connected:
             MenuItemModel(title: "Reconnect", isEnabled: true, isChecked: false, command: .reconnect)
-        case .disabled, .error:
+        case .disabled:
             MenuItemModel(title: "Connect", isEnabled: true, isChecked: false, command: .connect)
+        case .error:
+            MenuItemModel(title: "Reconnect", isEnabled: true, isChecked: false, command: .reconnect)
         case .backoff:
             MenuItemModel(title: "Reconnect Now", isEnabled: true, isChecked: false, command: .reconnect)
         case .connecting:
