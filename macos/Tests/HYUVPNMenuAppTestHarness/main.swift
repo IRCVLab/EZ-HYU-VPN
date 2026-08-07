@@ -61,6 +61,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("totp-resetter-runtime-unsafe-metadata-fails-closed", totpResetterRuntimeUnsafeMetadataFailsClosed),
                 ("totp-resetter-runtime-flock-coordination", totpResetterRuntimeFlockCoordination),
                 ("encrypted-credential-store-runtime", encryptedCredentialStoreRuntime),
+                ("menu-totp-provider-and-clipboard-policy-runtime", menuTOTPProviderAndClipboardPolicyRuntime),
                 ("native-credential-reader-closed-command-surface", nativeCredentialReaderClosedCommandSurface),
                 ("credential-reset-controller-runtime-behavior", credentialResetControllerRuntimeBehavior),
                 ("credential-reset-lifecycle-runtime", credentialResetLifecycleRuntime)
@@ -347,7 +348,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         for forbidden in ["countdown", "duration", "expiresAt", "sessionExpiresAt"] {
             try expect(!source.contains(forbidden), "no legacy expiry UI token \(forbidden)")
         }
-        for required in ["HYU VPN: Status Unavailable", "Quit HYU VPN", "button.title = \"\"", "button.toolTip = textualState", "accessibilityDescription: textualState", "button.setAccessibilityLabel(textualState)", "button.setAccessibilityHelp(textualState)", "\"Connecting…\"", "\"Disconnecting…\"", "\"Waiting for Network\""] {
+        for required in ["HYU VPN: Status Unavailable", "OTP:", "NSPasteboard.general", "forMode: .common", "Quit HYU VPN", "button.title = \"\"", "button.toolTip = textualState", "accessibilityDescription: textualState", "button.setAccessibilityLabel(textualState)", "button.setAccessibilityHelp(textualState)", "\"Connecting…\"", "\"Disconnecting…\"", "\"Waiting for Network\""] {
             try expect(source.contains(required), "menu/icon contract contains \(required)")
         }
         let rebuildStart = try requireIndex(of: "private func rebuildMenu()", in: source, message: "rebuildMenu exists")
@@ -356,6 +357,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expect(rebuild.components(separatedBy: "NSMenuItem.separator()").count - 1 == 2, "menu has exactly two separators")
         let expectedOrder = [
             "menu.addItem(disabledItem(title: statusLineText()))",
+            "addOTPAction(to: menu)",
             "addPrimaryAction(to: menu)",
             "addDisconnectAction(to: menu)",
             "menu.addItem(NSMenuItem.separator())",
@@ -956,6 +958,28 @@ time.sleep(20)
         try FileManager.default.moveItem(at: encryptedURL, to: encryptedTarget)
         try FileManager.default.createSymbolicLink(atPath: encryptedURL.path, withDestinationPath: encryptedTarget.path)
         try expectThrows("symlink ciphertext") { _ = try symlinkStore.read(.username) }
+    }
+
+    static func menuTOTPProviderAndClipboardPolicyRuntime() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-menu-totp-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EncryptedCredentialStore(root: root)
+        try store.write("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", for: .totpSeed)
+        let stateURL = root.appendingPathComponent("totp-counter.json")
+        let stateBefore = Data("{\"last_counter\":42}".utf8)
+        try stateBefore.write(to: stateURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+
+        let provider = MenuTOTPProvider(store: store)
+        let snapshot = provider.snapshot(at: Date(timeIntervalSince1970: 0))
+        let stateAfter = try Data(contentsOf: stateURL)
+        try expect(snapshot == TOTPDisplaySnapshot(code: "755224", secondsRemaining: 30), "menu provider generates expected display value")
+        try expect(stateAfter == stateBefore, "menu provider never consumes connector TOTP counter state")
+
+        try expect(OTPClipboardPolicy.copyableCode("123456") == "123456", "clipboard accepts six ASCII digits")
+        try expect(OTPClipboardPolicy.copyableCode("12345") == nil, "clipboard rejects short code")
+        try expect(OTPClipboardPolicy.copyableCode("１２３４５６") == nil, "clipboard rejects non-ASCII digits")
+        try expect(OTPClipboardPolicy.copyableCode("GEZDGNBVGY3TQOJQ") == nil, "clipboard rejects setup seed")
     }
 
     static func nativeCredentialReaderClosedCommandSurface() throws {

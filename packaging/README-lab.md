@@ -21,6 +21,8 @@ The native app uses the fixed system Python prerequisite `/usr/bin/python3` to v
 
 After the root transaction succeeds, the user phase writes auto-reconnect enabled, bootstraps/kickstarts the per-user service, stops any older menu process with bounded TERM/KILL fallback, opens `/Applications/HYU VPN.app`, and waits for exactly one menu process. Normal connect, reconnect, and disconnect operations use the installed helper/sudoers setup and should not request the Mac administrator password.
 
+The menu shows the current six-digit OTP with its remaining lifetime. Selecting that row copies only the six-digit OTP to the clipboard. Launch at Login can be toggled from the same menu; the Diagnostics row is intentionally omitted.
+
 ## Release evidence
 
 Each release includes:

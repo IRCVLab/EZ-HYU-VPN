@@ -21,6 +21,29 @@ private func sampleDocument() -> [String: Any] { [
 private func json(_ object: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) }
 private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f.date(from: string)! }
 
+@Suite struct TOTPDisplayTests {
+    private let rfcSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+    @Test func generatesSixDigitRFCValuesAndCountdownBoundaries() throws {
+        let first = try TOTPDisplayGenerator.snapshot(seed: rfcSecret, at: Date(timeIntervalSince1970: 0))
+        #expect(first == TOTPDisplaySnapshot(code: "755224", secondsRemaining: 30))
+
+        let boundary = try TOTPDisplayGenerator.snapshot(seed: rfcSecret, at: Date(timeIntervalSince1970: 59))
+        #expect(boundary == TOTPDisplaySnapshot(code: "287082", secondsRemaining: 1))
+        #expect(boundary.code.count == 6)
+        #expect(boundary.code.allSatisfy { $0.isNumber })
+    }
+
+    @Test func rejectsMalformedBase32WithoutExposingInput() {
+        #expect(throws: TOTPDisplayError.self) {
+            try TOTPDisplayGenerator.snapshot(seed: "NOT-A-VALID-SEED!", at: Date(timeIntervalSince1970: 0))
+        }
+        #expect(throws: TOTPDisplayError.self) {
+            try TOTPDisplayGenerator.snapshot(seed: "", at: Date(timeIntervalSince1970: 0))
+        }
+    }
+}
+
 @Suite struct MenuStatusProtocolTests {
     @Test func strictDecoderAcceptsOnlyPythonStatusSchemaV1AndRejectsUnsafeInputs() throws {
         let status = try VPNStatusDecoder.decode(try json(sampleDocument()))

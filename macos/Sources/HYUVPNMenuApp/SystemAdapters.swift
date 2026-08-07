@@ -220,6 +220,27 @@ package enum SystemCredentialBootstrap {
     }
 }
 
+package final class MenuTOTPProvider {
+    private let store: any CredentialStore
+
+    package init(store: any CredentialStore = EncryptedCredentialStore()) {
+        self.store = store
+    }
+
+    package func snapshot(at date: Date = Date()) -> TOTPDisplaySnapshot? {
+        guard let seed = try? store.read(.totpSeed), !seed.isEmpty else { return nil }
+        return try? TOTPDisplayGenerator.snapshot(seed: seed, at: date)
+    }
+}
+
+package enum OTPClipboardPolicy {
+    package static func copyableCode(_ value: String) -> String? {
+        let bytes = Array(value.utf8)
+        guard bytes.count == 6, bytes.allSatisfy({ (0x30...0x39).contains($0) }) else { return nil }
+        return value
+    }
+}
+
 package enum FileTOTPMetadataPolicy {
     package static func isSafe(ownerUID: uid_t, mode: mode_t, directory: Bool, expectedMode: mode_t, currentUID: uid_t = getuid()) -> Bool {
         guard ownerUID == currentUID else { return false }

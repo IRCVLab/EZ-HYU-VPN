@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private var startupRetryWorkItem: DispatchWorkItem?
     private var resetController: CredentialResetController?
     private var pendingResetPayload: ValidatedCredentials?
+    private let totpProvider = MenuTOTPProvider()
+    private var otpMenuItem: NSMenuItem?
+    private var otpTimer: Timer?
     private var loginItemController = SystemLoginItemController()
     private var loginItemState: LoginItemState = .disabled
     private var lastLoginItemResult = "LOGIN_ITEM_UNAVAILABLE"
@@ -31,6 +34,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         rebuildMenu()
         startWatcher()
         apply(lifecycle.handle(.appLaunched))
+        startOTPTimer()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        otpTimer?.invalidate()
+        otpTimer = nil
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -103,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         refreshLoginItemState()
         let menu = NSMenu(title: "HYU VPN")
         menu.addItem(disabledItem(title: statusLineText()))
+        addOTPAction(to: menu)
         addPrimaryAction(to: menu)
         addDisconnectAction(to: menu)
         menu.addItem(NSMenuItem.separator())
@@ -111,6 +121,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         menu.addItem(NSMenuItem.separator())
         addQuitAction(to: menu)
         statusItem?.menu = menu
+    }
+
+    private func addOTPAction(to menu: NSMenu) {
+        let item = NSMenuItem(title: "OTP unavailable", action: #selector(copyOTP(_:)), keyEquivalent: "")
+        item.target = self
+        otpMenuItem = item
+        refreshOTPItem()
+        menu.addItem(item)
+    }
+
+    private func startOTPTimer() {
+        otpTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, target: self, selector: #selector(refreshOTPFromTimer), userInfo: nil, repeats: true)
+        RunLoop.main.add(timer, forMode: .common)
+        otpTimer = timer
+        refreshOTPItem()
+    }
+
+    @objc private func refreshOTPFromTimer() {
+        refreshOTPItem()
+    }
+
+    private func refreshOTPItem(now: Date = Date()) {
+        guard let item = otpMenuItem, let snapshot = totpProvider.snapshot(at: now) else {
+            otpMenuItem?.title = "OTP unavailable"
+            otpMenuItem?.representedObject = nil
+            otpMenuItem?.isEnabled = false
+            return
+        }
+        item.title = "OTP: \(snapshot.code) · \(snapshot.secondsRemaining)s — Copy"
+        item.representedObject = snapshot.code
+        item.isEnabled = true
+    }
+
+    @objc private func copyOTP(_ sender: NSMenuItem) {
+        guard let candidate = sender.representedObject as? String,
+              let code = OTPClipboardPolicy.copyableCode(candidate) else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(code, forType: .string)
     }
 
     private func addPrimaryAction(to menu: NSMenu) {
