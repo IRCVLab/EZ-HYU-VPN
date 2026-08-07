@@ -7,6 +7,7 @@ pub struct ConnectionGeneration(pub u64);
 pub struct NetworkIdentity {
     pub interface: String,
     pub gateway: String,
+    pub is_tunnel: bool,
 }
 
 impl NetworkIdentity {
@@ -14,6 +15,15 @@ impl NetworkIdentity {
         Self {
             interface: interface.into(),
             gateway: gateway.into(),
+            is_tunnel: false,
+        }
+    }
+
+    pub fn tunnel(interface: impl Into<String>, gateway: impl Into<String>) -> Self {
+        Self {
+            interface: interface.into(),
+            gateway: gateway.into(),
+            is_tunnel: true,
         }
     }
 }
