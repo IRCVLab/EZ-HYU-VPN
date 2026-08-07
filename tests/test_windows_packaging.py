@@ -47,6 +47,8 @@ class WindowsPackagingTests(unittest.TestCase):
         ns = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
         state = root.find('.//w:Component[@Id="StateDirectoryComponent"]', ns)
         self.assertIsNotNone(state)
+        self.assertRegex(state.attrib["Guid"], r"^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$")
+        self.assertNotEqual(state.attrib["Guid"], "*")
         self.assertIsNone(state.find("w:RemoveFile", ns))
         self.assertIsNone(state.find("w:RemoveFolder", ns))
         workflow = WINDOWS_WORKFLOW.read_text(encoding="utf-8")

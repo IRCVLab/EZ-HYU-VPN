@@ -57,7 +57,7 @@
       <File Id="ZlibDll" Source="$(PayloadDir)\runtime\zlib1.dll" />
       <File Id="ListSystemKeysExe" Source="$(PayloadDir)\runtime\list-system-keys.exe" />
     </Component>
-    <Component Id="StateDirectoryComponent" Directory="STATEFOLDER" Guid="*">
+    <Component Id="StateDirectoryComponent" Directory="STATEFOLDER" Guid="84B4D84E-D48E-56C3-A2A7-A43452E96678">
       <CreateFolder>
         <util:PermissionEx User="SYSTEM" GenericAll="yes" />
         <util:PermissionEx User="Administrators" GenericAll="yes" />
