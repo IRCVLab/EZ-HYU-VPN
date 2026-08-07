@@ -870,8 +870,8 @@ class SupervisorLoopTests(unittest.TestCase):
             self.assertEqual(supervisor.run(), 75)
             popen.assert_not_called()
 
-    def test_signal_stop_forwards_to_child_group_waits_then_kills_on_timeout(self):
-        proc = FakeProcess(returncode=None, wait_side_effect=[subprocess.TimeoutExpired(["child"], 0.25), 0])
+    def test_signal_stop_only_notifies_child_and_never_reenters_wait(self):
+        proc = FakeProcess(returncode=None, wait_side_effect=[AssertionError("signal handler must not wait")])
         sent = []
         supervisor = Supervisor(isolated_supervisor_config(self, lock_path=str(managed_temp_path(self, "supervisor.lock")), stop_timeout=0.25))
         supervisor._child = proc
@@ -880,9 +880,28 @@ class SupervisorLoopTests(unittest.TestCase):
             supervisor._handle_signal(signal.SIGTERM, None)
 
         self.assertTrue(supervisor._stop_requested)
-        self.assertEqual(sent, [(4321, signal.SIGTERM), (4321, signal.SIGKILL)])
-        self.assertEqual(proc.wait_calls, [0.25, 0.25])
+        self.assertEqual(sent, [(4321, signal.SIGTERM)])
+        self.assertEqual(proc.wait_calls, [])
 
+
+    def test_established_tunnel_is_restarted_after_two_failed_network_probes(self):
+        timeout = subprocess.TimeoutExpired(["child"], 0.5)
+        proc = FakeProcess(returncode=None, wait_side_effect=[timeout, timeout, 0, 0])
+        ticks = iter([0.0, 1.0, 2.0])
+        readiness = type("Readiness", (), {"poll_interval": 1.0, "ready_once": lambda self: None})()
+        sent = []
+        supervisor = Supervisor(
+            isolated_supervisor_config(self, stop_timeout=0.25),
+            monotonic=lambda: next(ticks),
+            readiness=readiness,
+        )
+        supervisor._child = proc
+
+        with mock.patch("hyu_vpn.supervisor.os.killpg", side_effect=lambda pid, sig: sent.append((pid, sig))):
+            self.assertEqual(supervisor._wait_for_connected_child(proc), 1)
+
+        self.assertEqual(sent, [(4321, signal.SIGTERM)])
+        self.assertEqual(proc.wait_calls, [0.5, 0.5, 0.25, None])
 
     def test_main_enables_network_readiness_gate(self):
         with mock.patch("hyu_vpn.supervisor.Supervisor") as supervisor_cls:

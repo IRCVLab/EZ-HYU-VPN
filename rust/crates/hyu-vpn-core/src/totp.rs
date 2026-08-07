@@ -226,7 +226,7 @@ impl CounterGuard {
             file.write_all(&payload)
                 .and_then(|()| file.sync_all())
                 .map_err(|_| TotpError::StateFailure)?;
-            fs::rename(&temporary, &self.state_path).map_err(|_| TotpError::StateFailure)?;
+            replace_file_atomic(&temporary, &self.state_path)?;
             set_owner_only_permissions(&self.state_path)
         })();
         if result.is_err() {
@@ -234,6 +234,38 @@ impl CounterGuard {
         }
         result
     }
+}
+
+#[cfg(windows)]
+fn replace_file_atomic(temporary: &Path, destination: &Path) -> Result<(), TotpError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let temporary: Vec<u16> = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let moved = unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    (moved != 0).then_some(()).ok_or(TotpError::StateFailure)
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomic(temporary: &Path, destination: &Path) -> Result<(), TotpError> {
+    fs::rename(temporary, destination).map_err(|_| TotpError::StateFailure)
 }
 
 #[cfg(unix)]

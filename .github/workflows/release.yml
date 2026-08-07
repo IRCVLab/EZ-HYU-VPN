@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for verified platform workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for workflow in macOS Ubuntu Windows; do
+            run_id=""
+            for attempt in $(seq 1 120); do
+              run_id="$(gh run list --workflow "$workflow" --commit "$GITHUB_SHA" --event push --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+              if [ -n "$run_id" ]; then
+                status="$(gh run view "$run_id" --json status --jq .status 2>/dev/null || true)"
+                [ "$status" = completed ] && break
+              fi
+              sleep 15
+            done
+            [ -n "$run_id" ] || { echo "No $workflow workflow run found" >&2; exit 1; }
+            conclusion="$(gh run view "$run_id" --json conclusion --jq .conclusion)"
+            [ "$conclusion" = success ] || { echo "$workflow workflow failed: $conclusion" >&2; exit 1; }
+            mkdir -p "artifacts/$workflow"
+            gh run download "$run_id" --dir "artifacts/$workflow"
+          done
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find artifacts -type f \( \
+            -name '*.dmg' -o -name '*.deb' -o -name '*.msi' -o -name '*.sha256' \
+          \) -print | sort)
+          [ "${#files[@]}" -eq 6 ] || { printf 'Unexpected release files:\n%s\n' "${files[*]}" >&2; exit 1; }
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+            --verify-tag \
+            --title "HYU VPN $GITHUB_REF_NAME" \
+            --generate-notes

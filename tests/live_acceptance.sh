@@ -3,7 +3,7 @@
 
 set -u
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 CONNECTOR=${HYU_ACCEPTANCE_CONNECTOR:-"$ROOT/bin/hyu-vpn-connect"}
 PROTECTED_ENDPOINT=166.104.100.100
 PROTECTED_PORT=53

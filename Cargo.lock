@@ -705,6 +705,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "windows-sys",
  "zeroize",
 ]
 
@@ -742,8 +743,10 @@ name = "hyu-vpn-hip"
 version = "0.2.0"
 dependencies = [
  "hyu-vpn-platform-linux",
+ "hyu-vpn-platform-windows",
  "thiserror",
  "time",
+ "zeroize",
 ]
 
 [[package]]
@@ -780,6 +783,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyu-vpn-platform-windows"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "hyu-vpn-core",
+ "hyu-vpn-daemon",
+ "hyu-vpn-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "windows-sys",
+ "zeroize",
+]
+
+[[package]]
 name = "hyu-vpn-protocol"
 version = "0.2.0"
 dependencies = [
@@ -787,6 +807,35 @@ dependencies = [
  "serde_json",
  "thiserror",
  "time",
+ "zeroize",
+]
+
+[[package]]
+name = "hyu-vpn-windows-service"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "hyu-vpn-core",
+ "hyu-vpn-daemon",
+ "hyu-vpn-platform-windows",
+ "hyu-vpn-protocol",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "windows-service",
+ "windows-sys",
+ "zeroize",
+]
+
+[[package]]
+name = "hyu-vpn-windows-tray"
+version = "0.2.0"
+dependencies = [
+ "hyu-vpn-platform-windows",
+ "hyu-vpn-protocol",
+ "thiserror",
+ "windows-sys",
  "zeroize",
 ]
 
@@ -879,9 +928,9 @@ dependencies = [
 
 [[package]]
 name = "num-conv"
-version = "0.1.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
+checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "once_cell"
@@ -1235,9 +1284,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.45"
+version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9e442fc33d7fdb45aa9bfeb312c095964abdf596f7567261062b2a7107aaabd"
+checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
  "itoa",
@@ -1250,15 +1299,15 @@ dependencies = [
 
 [[package]]
 name = "time-core"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b36ee98fd31ec7426d599183e8fe26932a8dc1fb76ddb6214d05493377d34ca"
+checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
 
 [[package]]
 name = "time-macros"
-version = "0.2.25"
+version = "0.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e552d1249bf61ac2a52db88179fd0673def1e1ad8243a00d9ec9ed71fee3dd"
+checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",
@@ -1482,6 +1531,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1508,6 +1563,17 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags",
+ "widestring",
+ "windows-sys",
+]
 
 [[package]]
 name = "windows-sys"

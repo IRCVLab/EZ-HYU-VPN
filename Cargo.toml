@@ -5,9 +5,12 @@ members = [
     "rust/crates/hyu-vpn-daemon",
     "rust/crates/hyu-vpn-protocol",
     "rust/crates/hyu-vpn-platform-linux",
+    "rust/crates/hyu-vpn-platform-windows",
     "rust/apps/hyu-vpn-gtk",
     "rust/apps/hyu-vpn-hip",
     "rust/apps/hyu-vpn-linux-service",
+    "rust/apps/hyu-vpn-windows-service",
+    "rust/apps/hyu-vpn-windows-tray",
 ]
 
 [workspace.package]

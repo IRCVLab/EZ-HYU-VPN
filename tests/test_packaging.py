@@ -227,8 +227,8 @@ class NativeAppAssemblyTests(PackagingTestCase):
         feed = json.loads((REPO / "update.json").read_text(encoding="utf-8"))
         self.assertEqual(set(feed), {"schema_version", "version", "release_url"})
         self.assertEqual(feed["schema_version"], 1)
-        self.assertEqual(feed["version"], "0.1.1")
-        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.1")
+        self.assertEqual(feed["version"], "0.2.0")
+        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.2.0")
 
 
 class FakeOtoolRunner:
@@ -332,6 +332,7 @@ class DestinationGuardTests(PackagingTestCase):
         with self.assertRaises(PackagingError):
             guard_destination(target, allowed_root=self.build_root)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS /tmp resolves through /private/tmp")
     def test_allows_unresolved_system_var_alias_but_rejects_user_symlink_ancestor(self):
         canonical_tmp = Path(tempfile.mkdtemp(prefix="hyu-var-alias-", dir="/private/tmp"))
         self.addCleanup(lambda: subprocess.run(["/bin/rm", "-rf", str(canonical_tmp)]))
@@ -344,12 +345,14 @@ class DestinationGuardTests(PackagingTestCase):
         with self.assertRaises(PackagingError):
             guard_destination(user_link / "release", allowed_root=user_link)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS /private path policy")
     def test_guard_root_rejects_private_non_temp_locations(self):
         for bad in [Path("/private"), Path("/private/var"), Path("/private/var/db"), Path("/private/etc")]:
             with self.subTest(path=bad), self.assertRaises(PackagingError):
                 guard_root(bad)
         self.assertEqual(guard_root(Path("/tmp/hyu-vpn-safe-root")).as_posix(), "/private/tmp/hyu-vpn-safe-root")
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS /tmp resolves through /private/tmp")
     def test_legacy_assemblers_allow_unresolved_temp_alias_when_destination_is_safe_empty_dir(self):
         canonical_tmp = Path(tempfile.mkdtemp(prefix="hyu-assembler-var-", dir="/private/tmp"))
         self.addCleanup(lambda: subprocess.run(["/bin/rm", "-rf", str(canonical_tmp)]))
@@ -366,10 +369,10 @@ class DestinationGuardTests(PackagingTestCase):
         fixture = self.root / "fixture"
         (fixture / "source").mkdir(parents=True)
         (fixture / "source" / "main.swift").write_text("print(\"x\")\n", encoding="utf-8")
-        for script in [ASSEMBLE_APP, ASSEMBLE_MENU_APP]:
+        for script in [ASSEMBLE_APP, ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
             with self.subTest(script=script.name, destination="repo"):
                 arguments = [str(script), str(fixture), str(REPO)]
-                if script == ASSEMBLE_MENU_APP:
+                if script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
                     arguments.append("0.1.1")
                 proc = subprocess.run(arguments, text=True, capture_output=True)
                 self.assertNotEqual(proc.returncode, 0)
@@ -378,11 +381,26 @@ class DestinationGuardTests(PackagingTestCase):
             link.symlink_to(self.build_root)
             with self.subTest(script=script.name, destination="symlink"):
                 arguments = [str(script), str(fixture), str(link)]
-                if script == ASSEMBLE_MENU_APP:
+                if script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
                     arguments.append("0.1.1")
                 proc = subprocess.run(arguments, text=True, capture_output=True)
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("unsafe destination", proc.stderr)
+
+    def test_native_assemblers_allow_empty_descendants_of_repo_target(self):
+        target_root = REPO / "target"
+        target_root.mkdir(exist_ok=True)
+        for script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
+            destination = Path(tempfile.mkdtemp(prefix="assembler-safe-", dir=target_root))
+            self.addCleanup(destination.rmdir)
+            proc = subprocess.run(
+                [str(script), str(target_root / "missing-executable"), str(destination), "0.1.1"],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 66, proc.stderr)
+            self.assertIn("missing executable", proc.stderr)
+            self.assertNotIn("unsafe destination", proc.stderr)
+
 
 
 class NoticeTests(PackagingTestCase):

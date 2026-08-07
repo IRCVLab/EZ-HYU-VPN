@@ -231,7 +231,7 @@ async fn portal_probe_is_bounded_and_reports_tcp_reachability() {
     assert!(
         probe
             .reachable(&hyu_vpn_core::state::NetworkIdentity::new(
-                "eth0",
+                "lo",
                 "127.0.0.1",
             ))
             .await

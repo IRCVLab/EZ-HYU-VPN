@@ -1,0 +1,55 @@
+HYU VPN for Windows - third-party notices
+
+The Windows package uses OpenConnect v9.21 MinGW64/GnuTLS. Dependency DLLs and
+Wintun come from the tagged upstream GitLab CI artifact, while openconnect.exe and
+libopenconnect-5.dll are rebuilt from the pinned v9.21 source with HYU VPN's
+Windows GlobalProtect HIP execution patch.
+Upstream release:
+https://gitlab.com/openconnect/openconnect/-/releases/v9.21
+Source archive:
+https://gitlab.com/openconnect/openconnect/-/archive/v9.21/openconnect-v9.21.tar.gz
+Source archive SHA-256:
+ef0c875f3f8d8cc00e9647f36f87f2dd7d4ccad02c47c82f2dc5ba6b37edab06
+Source:
+https://gitlab.com/openconnect/openconnect/-/tree/v9.21
+Applied patch (also installed beside this notice):
+https://github.com/IRCVLab/EZ-HYU-VPN/blob/main/packaging/windows/openconnect-windows-hip.patch
+
+OpenConnect and libopenconnect are licensed under LGPL-2.1. The package also
+contains the upstream vpnc-script-win.js and Wintun runtime plus their dependency
+closure. Their copyright and license terms remain those of their upstream
+projects. Source for LGPL/GPL-covered components can be obtained from the URLs
+below or from the distributor of this package.
+
+OpenConnect / libopenconnect: LGPL-2.1-only
+https://www.infradead.org/openconnect/licence.html
+vpnc-scripts: GPL-2.0-or-later
+https://gitlab.com/openconnect/vpnc-scripts
+Wintun: upstream WireGuard project terms
+https://www.wintun.net/
+GnuTLS: LGPL-2.1-or-later
+https://www.gnutls.org/
+nettle / hogweed: LGPL-3.0-or-later or GPL-2.0-or-later by component
+https://www.lysator.liu.se/~nisse/nettle/
+GNU MP: LGPL-3.0-or-later or GPL-2.0-or-later
+https://gmplib.org/
+GNU gettext / libintl: LGPL-2.1-or-later
+https://www.gnu.org/software/gettext/
+GNU libtasn1: LGPL-2.1-or-later
+https://www.gnu.org/software/libtasn1/
+libxml2: MIT
+https://gitlab.gnome.org/GNOME/libxml2
+stoken: LGPL-2.1-only
+https://github.com/cernekee/stoken
+zlib: zlib License
+https://zlib.net/
+LZ4: BSD-2-Clause
+https://github.com/lz4/lz4
+
+The exact files and SHA-256 hashes shipped by HYU VPN are recorded in
+artifact-manifest.sha256 inside the installation directory. The rebuilt OpenConnect
+binary hashes are also recorded in OPENCONNECT-PATCHED-SHA256SUMS.txt.
+
+Pinned Windows vpnc-script source revision:
+https://gitlab.com/openconnect/vpnc-scripts/-/commit/6cdb2fe2d75be324564fe27ff85a5e1bb17a66b0
+SHA-256: e196fdf0cc8b325180154535f843034dc0ae9eb43ead9980adfcfc57c58069b2

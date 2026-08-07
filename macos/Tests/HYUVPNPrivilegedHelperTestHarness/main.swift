@@ -37,6 +37,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("spawn-failure-releases-lock", testSpawnFailureCleanup),
                 ("metadata-failure-aborts-prepared-child", testMetadataFailureAbortsPreparedChild),
                 ("commit-failure-preserves-record-when-teardown-fails", testCommitFailurePreservesRecordOnTeardownFailure),
+                ("monitor-failure-verifies-ledger", testMonitorFailureRequiresVerifiedLedgerTeardown),
                 ("signal-after-commit-cleans-recorded-child", testSignalAfterCommitCleanup),
                 ("nonzero-child-exit-clean-ledger-cleans-session", testNonzeroExitCleanLedgerCleansSession),
                 ("nonzero-child-exit-dirty-ledger-preserves-session", testNonzeroExitDirtyLedgerPreservesSession),
@@ -309,6 +310,15 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expectThrows("teardown incomplete") { _ = try harness.run(command: .start, startRequest: StartRequest(username: "alice")) }
         try expect(harness.store.record != nil, "durable record preserved for repair")
         try expect(harness.lock.releasedUIDs == [501], "lock released")
+    }
+
+    static func testMonitorFailureRequiresVerifiedLedgerTeardown() throws {
+        var harness = HelperHarness()
+        harness.process.monitorError = HelperError.processMismatch
+        harness.ledgerCoordinator.verifyResult = HelperError.teardownIncomplete("ledger remains dirty")
+        try expectThrows("monitor cleanup verifies ledger") { _ = try harness.run(command: .start, startRequest: StartRequest(username: "alice")) }
+        try expect(harness.ledgerCoordinator.verifiedNonces == ["nonce12345"], "committed cleanup verifies ledger")
+        try expect(harness.store.record != nil, "dirty committed cleanup preserves repair record")
     }
 
     static func testSignalAfterCommitCleanup() throws {
@@ -1319,6 +1329,7 @@ final class FakeProcessController: ProcessControlling {
     var signalGuardEnded = false
     var injectSignalAfterCommit = false
     var monitorExitStatus: Int32 = 0
+    var monitorError: Error?
     func beginLifecycleSignalGuard() throws { signalGuardBegun = true }
     func endLifecycleSignalGuard() { signalGuardEnded = true }
     func prepareSpawn(_ request: SpawnRequest) throws -> SpawnedProcess { if let spawnError { throw spawnError }; spawned = Spawned(argv: request.arguments, environment: request.environment); liveIdentity = .matching(pid: 1200, pgid: 1200, birth: 42, executable: request.executable.path); return SpawnedProcess(pid: 1200, processGroupID: 1200, birthTime: 42) }
@@ -1328,7 +1339,7 @@ final class FakeProcessController: ProcessControlling {
     func terminateProcessGroup(_ pgid: Int32) throws { signals.append(.termGroup(pgid: pgid)) }
     func killProcessGroup(_ pgid: Int32) throws { signals.append(.killGroup(pgid: pgid)); if let killError { throw killError }; liveIdentity = nil }
     func waitForExit(pid: Int32, timeout: TimeInterval) throws -> Bool { waitResults.isEmpty ? false : waitResults.removeFirst() }
-    func monitorForeground(record: SessionRecord, onChannelLoss: (SessionRecord) throws -> Void) throws -> MonitorOutcome { if channelLossAfterSpawn { try onChannelLoss(record); return .channelLoss }; return .exited(status: monitorExitStatus) }
+    func monitorForeground(record: SessionRecord, onChannelLoss: (SessionRecord) throws -> Void) throws -> MonitorOutcome { if let monitorError { throw monitorError }; if channelLossAfterSpawn { try onChannelLoss(record); return .channelLoss }; return .exited(status: monitorExitStatus) }
     func validateBeforeSignal(_ record: SessionRecord) throws {}
 }
 

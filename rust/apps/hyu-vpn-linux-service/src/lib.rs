@@ -209,10 +209,11 @@ impl LinuxActionExecutor {
         }
     }
 
-    fn start_connection(&self, generation: ConnectionGeneration) {
-        let credentials = match self.credentials.load() {
-            Ok(credentials) => credentials,
-            Err(_) => {
+    async fn start_connection(&self, generation: ConnectionGeneration) {
+        let repository = self.credentials.clone();
+        let credentials = match tokio::task::spawn_blocking(move || repository.load()).await {
+            Ok(Ok(credentials)) => credentials,
+            Err(_) | Ok(Err(_)) => {
                 let _ = self.events.send(EngineEvent::ConnectorExited {
                     generation,
                     return_code: 1,
@@ -298,9 +299,10 @@ impl ActionExecutor for LinuxActionExecutor {
     async fn execute(&self, action: EngineAction) -> Option<EngineEvent> {
         match action {
             EngineAction::PersistAutomaticReconnect(enabled) => {
-                let _ = self.preference.store(enabled);
+                let preference = self.preference.clone();
+                let _ = tokio::task::spawn_blocking(move || preference.store(enabled)).await;
             }
-            EngineAction::StartConnection { generation } => self.start_connection(generation),
+            EngineAction::StartConnection { generation } => self.start_connection(generation).await,
             EngineAction::StopConnection { generation } => {
                 if let Some(sender) = self
                     .sessions
@@ -388,11 +390,21 @@ pub async fn run_network_watch<R, C>(
     C: SystemClock + 'static,
 {
     let mut tracker = NetworkReadinessTracker::default();
+    let error_delay = Duration::from_secs(1);
     loop {
         if *shutdown.borrow() {
             return;
         }
-        let sample = monitor.current_identity().await.ok().flatten();
+        let sample = match monitor.current_identity().await {
+            Ok(sample) => sample,
+            Err(_) => {
+                tokio::select! {
+                    _ = shutdown.changed() => {},
+                    _ = tokio::time::sleep(error_delay) => {},
+                }
+                continue;
+            }
+        };
         let portal_reachable = if tracker.portal_probe_required(sample.as_ref()) {
             match sample.as_ref() {
                 Some(identity) => portal.reachable(identity).await.unwrap_or(false),
@@ -404,9 +416,15 @@ pub async fn run_network_watch<R, C>(
         if let Some(event) = tracker.observe(sample, portal_reachable) {
             control.apply_event(event);
         }
-        tokio::select! {
-            _ = shutdown.changed() => {},
-            _ = monitor.wait_for_change(Duration::from_secs(1)) => {},
+        let wait_result = tokio::select! {
+            _ = shutdown.changed() => Ok(()),
+            result = monitor.wait_for_change(Duration::from_secs(1)) => result,
+        };
+        if wait_result.is_err() {
+            tokio::select! {
+                _ = shutdown.changed() => {},
+                _ = tokio::time::sleep(error_delay) => {},
+            }
         }
     }
 }

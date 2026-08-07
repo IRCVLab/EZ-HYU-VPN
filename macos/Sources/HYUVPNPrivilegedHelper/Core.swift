@@ -1007,6 +1007,7 @@ public struct PrivilegedHelper {
         try process.beginLifecycleSignalGuard()
         var spawnedRecord: SessionRecord?
         var preparedSpawn: SpawnedProcess?
+        var spawnCommitted = false
         do {
             let nonce = try nonceGenerator.makeNonce()
             let username = header.username
@@ -1031,6 +1032,7 @@ public struct PrivilegedHelper {
             spawnedRecord = record
             try store.save(record)
             try process.commitSpawn(spawned)
+            spawnCommitted = true
             let outcome = try process.monitorForeground(record: record) { freshRecord in
                 try terminateVerified(record: freshRecord)
             }
@@ -1063,10 +1065,20 @@ public struct PrivilegedHelper {
             if let record = spawnedRecord {
                 do {
                     try process.abortSpawn(SpawnedProcess(pid: record.pid, processGroupID: record.processGroupID, birthTime: record.processBirthTime))
+                    if spawnCommitted {
+                        try ledgerCoordinator.verifyTeardownComplete(record: record)
+                    }
                     teardownProven = true
-                } catch { cleanupErrors.append("abort: \(error)") }
+                } catch { cleanupErrors.append("abort-or-verify: \(error)") }
                 if !teardownProven {
-                    do { try terminateVerified(record: record); teardownProven = true } catch { cleanupErrors.append("terminate: \(error)") }
+                    do {
+                        try terminateVerified(record: record)
+                        try ledgerCoordinator.verifyTeardownComplete(record: record)
+                        teardownProven = true
+                    } catch { cleanupErrors.append("terminate-or-verify: \(error)") }
+                }
+                if teardownProven {
+                    do { try store.remove() } catch { cleanupErrors.append("store-remove: \(error)") }
                 }
             } else if let preparedSpawn {
                 do { try process.abortSpawn(preparedSpawn); teardownProven = true } catch { cleanupErrors.append("abort: \(error)") }

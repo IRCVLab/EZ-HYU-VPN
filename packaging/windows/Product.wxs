@@ -1,0 +1,77 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="HYU VPN" Manufacturer="IRCVLab" Version="$(Version)"
+           UpgradeCode="03183877-BD10-4A76-B25D-2974E79888DF"
+           Language="1033" Scope="perMachine" InstallerVersion="500" Compressed="yes">
+    <SummaryInformation Description="HYU VPN automatic reconnect client" Manufacturer="IRCVLab" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of HYU VPN is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Icon Id="HYUVPNIcon" SourceFile="$(PayloadDir)\hyu-vpn.ico" />
+    <Property Id="ARPPRODUCTICON" Value="HYUVPNIcon" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="HYU VPN"><Directory Id="RUNTIMEFOLDER" Name="runtime" /></Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder"><Directory Id="STATEFOLDER" Name="HYUVPN" /></StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder"><Directory Id="PROGRAMMENUDIR" Name="HYU VPN" /></StandardDirectory>
+    <Component Id="ServiceComponent" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="ServiceExe" Source="$(PayloadDir)\hyu-vpn-windows-service.exe" KeyPath="yes" />
+      <ServiceInstall Id="HYUVPNServiceInstall" Name="HYUVPN" DisplayName="HYU VPN"
+                      Description="Maintains the HYU GlobalProtect VPN connection and reconnects after network changes."
+                      Type="ownProcess" Start="auto" ErrorControl="normal" Account="LocalSystem" Vital="yes">
+        <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart"
+                            ThirdFailureActionType="restart" RestartServiceDelayInSeconds="5" ResetPeriodInDays="1" />
+      </ServiceInstall>
+      <ServiceControl Id="HYUVPNServiceControl" Name="HYUVPN" Start="install" Stop="both"
+                      Remove="uninstall" Wait="yes" />
+    </Component>
+    <Component Id="ApplicationComponent" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="TrayExe" Source="$(PayloadDir)\hyu-vpn-windows-tray.exe" KeyPath="yes">
+        <Shortcut Id="StartMenuShortcut" Directory="PROGRAMMENUDIR" Name="HYU VPN"
+                  Description="HYU VPN system tray client" WorkingDirectory="INSTALLFOLDER" />
+      </File>
+      <File Id="HipExe" Source="$(PayloadDir)\hyu-vpn-hip.exe" />
+      <File Id="AppIconFile" Source="$(PayloadDir)\hyu-vpn.ico" />
+      <File Id="LicenseFile" Source="$(PayloadDir)\LICENSE.txt" />
+      <File Id="NoticesFile" Source="$(PayloadDir)\THIRD_PARTY_NOTICES.txt" />
+      <File Id="OpenConnectPatchFile" Source="$(PayloadDir)\openconnect-windows-hip.patch" />
+      <File Id="PatchedOpenConnectManifestFile" Source="$(PayloadDir)\OPENCONNECT-PATCHED-SHA256SUMS.txt" />
+      <File Id="ManifestFile" Source="$(PayloadDir)\artifact-manifest.sha256" />
+    </Component>
+    <Component Id="RuntimeComponent" Directory="RUNTIMEFOLDER" Guid="*">
+      <File Id="OpenConnectExe" Source="$(PayloadDir)\runtime\openconnect.exe" KeyPath="yes" />
+      <File Id="VpncScript" Source="$(PayloadDir)\runtime\vpnc-script-win.js" />
+      <File Id="WintunDll" Source="$(PayloadDir)\runtime\wintun.dll" />
+      <File Id="IconvDll" Source="$(PayloadDir)\runtime\iconv.dll" />
+      <File Id="LibGccDll" Source="$(PayloadDir)\runtime\libgcc_s_seh-1.dll" />
+      <File Id="GmpDll" Source="$(PayloadDir)\runtime\libgmp-10.dll" />
+      <File Id="GnutlsDll" Source="$(PayloadDir)\runtime\libgnutls-30.dll" />
+      <File Id="HogweedDll" Source="$(PayloadDir)\runtime\libhogweed-6.dll" />
+      <File Id="IntlDll" Source="$(PayloadDir)\runtime\libintl-8.dll" />
+      <File Id="Lz4Dll" Source="$(PayloadDir)\runtime\liblz4.dll" />
+      <File Id="NettleDll" Source="$(PayloadDir)\runtime\libnettle-8.dll" />
+      <File Id="OpenConnectDll" Source="$(PayloadDir)\runtime\libopenconnect-5.dll" />
+      <File Id="StokenDll" Source="$(PayloadDir)\runtime\libstoken-1.dll" />
+      <File Id="TasN1Dll" Source="$(PayloadDir)\runtime\libtasn1-6.dll" />
+      <File Id="WinPthreadDll" Source="$(PayloadDir)\runtime\libwinpthread-1.dll" />
+      <File Id="Xml2Dll" Source="$(PayloadDir)\runtime\libxml2-2.dll" />
+      <File Id="ZlibDll" Source="$(PayloadDir)\runtime\zlib1.dll" />
+      <File Id="ListSystemKeysExe" Source="$(PayloadDir)\runtime\list-system-keys.exe" />
+    </Component>
+    <Component Id="StateDirectoryComponent" Directory="STATEFOLDER" Guid="*">
+      <CreateFolder>
+        <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+        <util:PermissionEx User="Administrators" GenericAll="yes" />
+      </CreateFolder>
+    </Component>
+    <Component Id="ProgramMenuComponent" Directory="PROGRAMMENUDIR" Guid="*">
+      <RemoveFolder Id="RemoveProgramMenuFolder" On="uninstall" />
+      <RegistryValue Root="HKLM" Key="Software\IRCVLab\HYU VPN" Name="Installed"
+                     Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+    <Feature Id="MainFeature" Title="HYU VPN" Level="1">
+      <ComponentRef Id="ServiceComponent" /><ComponentRef Id="ApplicationComponent" />
+      <ComponentRef Id="RuntimeComponent" /><ComponentRef Id="StateDirectoryComponent" />
+      <ComponentRef Id="ProgramMenuComponent" />
+    </Feature>
+  </Package>
+</Wix>

@@ -48,6 +48,17 @@ fn rejects_unknown_versions_commands_fields_and_oversized_frames() {
 }
 
 #[test]
+fn decode_rejects_credential_payloads_that_bypass_constructor_invariants() {
+    for raw in [
+        br#"{"schema_version":1,"request_id":"bad-empty","command":"replace_credentials","credentials":{"username":"","password":"pass","totp_seed":"JBSWY3DPEHPK3PXP"}}"#.as_slice(),
+        br#"{"schema_version":1,"request_id":"bad-control","command":"replace_credentials","credentials":{"username":"user\nname","password":"pass","totp_seed":"JBSWY3DPEHPK3PXP"}}"#.as_slice(),
+        br#"{"schema_version":1,"request_id":"bad-nul","command":"replace_credentials","credentials":{"username":"user","password":"bad\u0000pass","totp_seed":"JBSWY3DPEHPK3PXP"}}"#.as_slice(),
+    ] {
+        assert!(decode_request(raw).is_err(), "accepted invalid credentials: {raw:?}");
+    }
+}
+
+#[test]
 fn credentials_are_bounded_and_zeroizable() {
     let mut credentials = Credentials::new("user", "password", "JBSWY3DPEHPK3PXP").unwrap();
     credentials.zeroize();

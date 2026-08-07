@@ -1,4 +1,6 @@
-use hyu_vpn_hip::{HipCliError, build_hip_from_args};
+#![cfg(target_os = "linux")]
+
+use hyu_vpn_hip::{HipCliError, build_hip_from_args, resolve_cookie_stdin_args};
 use hyu_vpn_platform_linux::LinuxPostureCollector;
 
 #[test]
@@ -39,5 +41,38 @@ fn hip_cli_rejects_unknown_duplicate_and_missing_required_options() {
             build_hip_from_args(&args, &fixture, "2026-08-08T00:00:00Z", None).unwrap_err(),
             HipCliError::InvalidInvocation
         );
+    }
+}
+
+#[test]
+fn cookie_can_be_supplied_only_through_bounded_stdin() {
+    let args = vec![
+        "--cookie-on-stdin".to_owned(),
+        "--client-ip=192.0.2.10".to_owned(),
+        "--md5=0123456789abcdef0123456789abcdef".to_owned(),
+    ];
+    let resolved = resolve_cookie_stdin_args(&args, b"user=alice&domain=HYU\n".as_slice()).unwrap();
+    assert_eq!(resolved[0], "--cookie");
+    assert_eq!(resolved[1], "user=alice&domain=HYU");
+    assert!(!resolved.iter().any(|value| value == "--cookie-on-stdin"));
+
+    for (candidate, input) in [
+        (
+            vec!["--cookie-on-stdin=x".to_owned()],
+            b"user=a\n".as_slice(),
+        ),
+        (
+            vec![
+                "--cookie-on-stdin".to_owned(),
+                "--cookie-on-stdin".to_owned(),
+            ],
+            b"user=a\n".as_slice(),
+        ),
+        (
+            vec!["--cookie-on-stdin".to_owned()],
+            b"user=a\nextra".as_slice(),
+        ),
+    ] {
+        assert!(resolve_cookie_stdin_args(&candidate, input).is_err());
     }
 }

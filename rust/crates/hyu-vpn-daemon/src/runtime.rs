@@ -131,7 +131,7 @@ where
 pub struct ControlPlane<R, C> {
     engine: Mutex<Engine>,
     status: RwLock<VpnStatus>,
-    credentials: R,
+    credentials: std::sync::Arc<R>,
     clock: C,
     action_tx: mpsc::UnboundedSender<EngineAction>,
 }
@@ -165,7 +165,7 @@ where
             Self {
                 engine: Mutex::new(engine),
                 status: RwLock::new(status),
-                credentials,
+                credentials: std::sync::Arc::new(credentials),
                 clock,
                 action_tx,
             },
@@ -212,7 +212,12 @@ where
             },
             Request::ReplaceCredentials { credentials } => {
                 match self.credentials.replace(credentials) {
-                    Ok(()) => Response::Ack,
+                    Ok(()) => {
+                        if self.status().automatic_reconnect_enabled {
+                            self.apply_event(EngineEvent::ReconnectRequested);
+                        }
+                        Response::Ack
+                    }
                     Err(_) => Response::Error {
                         error_code: ErrorCode::CredentialStoreFailure,
                     },
@@ -260,6 +265,16 @@ where
                     .write()
                     .expect("status lock poisoned")
                     .automatic_reconnect_enabled = enabled;
+            } else if let EngineAction::ScheduleRetry { delay_seconds } = action {
+                let retry_at = self
+                    .clock
+                    .now()
+                    .checked_add(std::time::Duration::from_secs(delay_seconds))
+                    .map(format_system_time);
+                self.status
+                    .write()
+                    .expect("status lock poisoned")
+                    .next_retry_at = retry_at;
             }
             let _ = self.action_tx.send(action);
         }
@@ -294,7 +309,67 @@ where
     C: SystemClock + 'static,
 {
     async fn handle(&self, request: RequestEnvelope) -> ResponseEnvelope {
-        ControlPlane::handle(self, request)
+        let request_id = request.request_id;
+        let response = match request.request {
+            Request::CredentialsPresent => {
+                let credentials = std::sync::Arc::clone(&self.credentials);
+                match tokio::task::spawn_blocking(move || credentials.present()).await {
+                    Ok(Ok(present)) => Response::CredentialsPresent { present },
+                    _ => Response::Error {
+                        error_code: ErrorCode::CredentialStoreFailure,
+                    },
+                }
+            }
+            Request::ReplaceCredentials {
+                credentials: replacement,
+            } => {
+                let credentials = std::sync::Arc::clone(&self.credentials);
+                match tokio::task::spawn_blocking(move || credentials.replace(replacement)).await {
+                    Ok(Ok(())) => {
+                        if self.status().automatic_reconnect_enabled {
+                            self.apply_event(EngineEvent::ReconnectRequested);
+                        }
+                        Response::Ack
+                    }
+                    _ => Response::Error {
+                        error_code: ErrorCode::CredentialStoreFailure,
+                    },
+                }
+            }
+            Request::CurrentOtp => {
+                let credentials = std::sync::Arc::clone(&self.credentials);
+                let now = self.clock.now();
+                match tokio::task::spawn_blocking(move || {
+                    let credentials = credentials.load()?;
+                    let secret = TotpSecret::parse(credentials.totp_seed())
+                        .map_err(|_| RepositoryError::Corrupt)?;
+                    TotpGenerator::new(secret)
+                        .code_at(now)
+                        .map_err(|_| RepositoryError::Corrupt)
+                })
+                .await
+                {
+                    Ok(Ok(otp)) => Response::CurrentOtp {
+                        code: otp.value,
+                        remaining_seconds: otp.remaining_seconds,
+                    },
+                    _ => Response::Error {
+                        error_code: ErrorCode::CredentialStoreFailure,
+                    },
+                }
+            }
+            request => {
+                return ControlPlane::handle(
+                    self,
+                    RequestEnvelope {
+                        schema_version: hyu_vpn_protocol::PROTOCOL_VERSION,
+                        request_id,
+                        request,
+                    },
+                );
+            }
+        };
+        ResponseEnvelope::new(request_id, response)
     }
 }
 

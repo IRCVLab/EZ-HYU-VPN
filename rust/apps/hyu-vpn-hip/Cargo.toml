@@ -6,6 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hyu-vpn-platform-linux = { path = "../../crates/hyu-vpn-platform-linux" }
 thiserror.workspace = true
 time.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hyu-vpn-platform-linux = { path = "../../crates/hyu-vpn-platform-linux" }
+
+[target.'cfg(windows)'.dependencies]
+hyu-vpn-platform-windows = { path = "../../crates/hyu-vpn-platform-windows" }

@@ -16,6 +16,12 @@ private class MemoryCredentialStore: InstallerCredentialStoring {
 }
 
 @Suite struct HYUVPNInstallerCoreTests {
+    @Test func missingCredentialKeysPreserveFormOrderWithoutReadingSecrets() throws {
+        let store = MemoryCredentialStore([.password: "retained-password"])
+        #expect(try InstallerCredentialBootstrapper.missingCredentialKeys(store: store) == [.username, .totpSeed])
+        #expect(store.reads.isEmpty)
+    }
+
     @Test func credentialBootstrapCollectsOnlyMissingFinalCredentialsAndUsesValidator() throws {
         let store = MemoryCredentialStore([.username: "retained-user"])
         var prompts: [CredentialKey] = []

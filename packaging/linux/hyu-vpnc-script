@@ -3,6 +3,13 @@ set -eu
 
 UPSTREAM=/usr/share/vpnc-scripts/vpnc-script
 RESOLVECTL=/usr/bin/resolvectl
+IP=/usr/sbin/ip
+SS=/usr/bin/ss
+AWK=/usr/bin/awk
+SORT=/usr/bin/sort
+SSH_ROUTE_STATE=/run/hyu-vpn/established-ssh-routes
+SSH_ROUTE_PROTOCOL=186
+SSH_ROUTE_METRIC=42760
 STUB=/run/systemd/resolve/stub-resolv.conf
 
 valid_tunnel() {
@@ -34,6 +41,114 @@ valid_ipv4() {
         [ -n "$octet" ] || return 1
         [ "$octet" -le 255 ] 2>/dev/null || return 1
     done
+}
+
+valid_device() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_.:-]*|tun*|tap*|vpn*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+valid_route_record() {
+    valid_ipv4 "$1" || return 1
+    [ "$2" = - ] || valid_ipv4 "$2" || return 1
+    valid_device "$3"
+}
+
+copy_existing_ssh_route_state() {
+    [ -f "$SSH_ROUTE_STATE" ] && [ ! -L "$SSH_ROUTE_STATE" ] || return 0
+    while IFS=' ' read -r peer gateway device extra; do
+        [ -z "${extra:-}" ] || continue
+        valid_route_record "$peer" "$gateway" "$device" || continue
+        /usr/bin/printf '%s %s %s\n' "$peer" "$gateway" "$device"
+    done < "$SSH_ROUTE_STATE"
+}
+
+preserve_ssh_peer_route() {
+    peer=$1
+    valid_ipv4 "$peer" || return 0
+
+    # Never replace a route owned by an administrator or another service.
+    if "$IP" -4 route show exact "$peer/32" 2>/dev/null | /usr/bin/grep -q .; then
+        return 0
+    fi
+
+    route_line=$("$IP" -4 route get "$peer" 2>/dev/null | "$AWK" 'NR == 1 { print; exit }') || return 0
+    [ -n "$route_line" ] || return 0
+    gateway=-
+    device=
+    previous=
+    # Word splitting parses the fixed tokenized output from iproute2.
+    # shellcheck disable=SC2086
+    set -- $route_line
+    for token do
+        case "$previous" in
+            via) gateway=$token ;;
+            dev) device=$token ;;
+        esac
+        previous=$token
+    done
+    valid_route_record "$peer" "$gateway" "$device" || return 0
+
+    if [ "$gateway" = - ]; then
+        "$IP" -4 route add "$peer/32" dev "$device" \
+            proto "$SSH_ROUTE_PROTOCOL" metric "$SSH_ROUTE_METRIC" 2>/dev/null || return 0
+    else
+        "$IP" -4 route add "$peer/32" via "$gateway" dev "$device" \
+            proto "$SSH_ROUTE_PROTOCOL" metric "$SSH_ROUTE_METRIC" 2>/dev/null || return 0
+    fi
+    /usr/bin/printf '%s %s %s\n' "$peer" "$gateway" "$device" >> "$temporary"
+}
+
+preserve_established_ssh_routes() {
+    [ -x "$IP" ] && [ -x "$SS" ] && [ -x "$AWK" ] && [ -x "$SORT" ] || return 0
+    state_dir=${SSH_ROUTE_STATE%/*}
+    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 0
+    umask 077
+    temporary=$(/usr/bin/mktemp "$SSH_ROUTE_STATE.tmp.XXXXXX") || return 0
+    /usr/bin/chmod 0600 "$temporary"
+    copy_existing_ssh_route_state > "$temporary"
+
+    # sshd receives public/NAT connections on its local port 22. Preserve only
+    # those active reply paths, never arbitrary application connections.
+    # The awk program is intentionally literal.
+    # shellcheck disable=SC2016
+    "$SS" -H -4 -n -t state established '( sport = :22 )' 2>/dev/null \
+        | "$AWK" '{ print $NF }' \
+        | while IFS= read -r endpoint; do
+            peer=${endpoint%:*}
+            preserve_ssh_peer_route "$peer"
+        done
+
+    if [ -s "$temporary" ]; then
+        "$SORT" -u -o "$temporary" "$temporary"
+        /usr/bin/mv -f "$temporary" "$SSH_ROUTE_STATE"
+    else
+        /usr/bin/rm -f "$temporary"
+    fi
+}
+
+cleanup_established_ssh_routes() {
+    [ -x "$IP" ] || return 0
+    if [ -f "$SSH_ROUTE_STATE" ] && [ ! -L "$SSH_ROUTE_STATE" ]; then
+        while IFS=' ' read -r peer gateway device extra; do
+            [ -z "${extra:-}" ] || continue
+            valid_route_record "$peer" "$gateway" "$device" || continue
+            if [ "$gateway" = - ]; then
+                "$IP" -4 route del "$peer/32" dev "$device" \
+                    proto "$SSH_ROUTE_PROTOCOL" metric "$SSH_ROUTE_METRIC" >/dev/null 2>&1 || true
+            else
+                "$IP" -4 route del "$peer/32" via "$gateway" dev "$device" \
+                    proto "$SSH_ROUTE_PROTOCOL" metric "$SSH_ROUTE_METRIC" >/dev/null 2>&1 || true
+            fi
+        done < "$SSH_ROUTE_STATE"
+        /usr/bin/rm -f "$SSH_ROUTE_STATE"
+    fi
+    # The protocol/metric pair is reserved for routes created above. This
+    # removes owned routes even when an unclean service stop lost /run state.
+    "$IP" -4 route flush proto "$SSH_ROUTE_PROTOCOL" metric "$SSH_ROUTE_METRIC" \
+        >/dev/null 2>&1 || true
 }
 
 resolved_stub_in_use() {
@@ -82,13 +197,31 @@ configure_resolved() {
     restore_stub
 }
 
-if [ "${reason:-}" = disconnect ] && valid_tunnel && [ -x "$RESOLVECTL" ]; then
-    "$RESOLVECTL" revert "$TUNDEV" >/dev/null 2>&1 || true
-fi
+case "${reason:-}" in
+    connect|reconnect) preserve_established_ssh_routes ;;
+    disconnect)
+        if valid_tunnel && [ -x "$RESOLVECTL" ]; then
+            "$RESOLVECTL" revert "$TUNDEV" >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
 
+set +e
 "$UPSTREAM" "$@"
+upstream_status=$?
+set -e
+
+if [ "$upstream_status" -ne 0 ]; then
+    case "${reason:-}" in
+        connect|reconnect) cleanup_established_ssh_routes ;;
+    esac
+    exit "$upstream_status"
+fi
 
 case "${reason:-}" in
     connect|reconnect) configure_resolved ;;
-    disconnect) restore_stub ;;
+    disconnect)
+        cleanup_established_ssh_routes
+        restore_stub
+        ;;
 esac

@@ -1,0 +1,158 @@
+name: Windows
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-openconnect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register Wine executable format
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+          if [[ ! -e /proc/sys/fs/binfmt_misc/DOSWin ]]; then
+            printf '%s\n' ':DOSWin:M::MZ::/usr/bin/wine:' | sudo tee /proc/sys/fs/binfmt_misc/register >/dev/null
+          fi
+      - name: Build and test patched OpenConnect v9.21
+        shell: bash
+        run: |
+          docker run --rm --security-opt no-new-privileges \
+            -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+            registry.gitlab.com/openconnect/build-images@sha256:ea03ac6c281cb137382e9069b26b96cce972242adf632d96adb8fd0cb0a9be2c \
+            bash -lc '
+              set -euo pipefail
+              ./scripts/build-openconnect-windows.sh
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patched-openconnect-windows-x64
+          path: target/openconnect-windows-patched
+          if-no-files-found: error
+
+  test-and-package:
+    needs: build-openconnect
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: patched-openconnect-windows-x64
+          path: target/openconnect-windows-patched
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: rustup show
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Windows Rust tests
+        run: >-
+          cargo test --locked
+          -p hyu-vpn-core
+          -p hyu-vpn-protocol
+          -p hyu-vpn-daemon
+          -p hyu-vpn-platform-windows
+          -p hyu-vpn-windows-service
+          -p hyu-vpn-windows-tray
+          -p hyu-vpn-hip
+      - name: Windows Rust Clippy
+        run: >-
+          cargo clippy --locked --all-targets
+          -p hyu-vpn-core
+          -p hyu-vpn-protocol
+          -p hyu-vpn-daemon
+          -p hyu-vpn-platform-windows
+          -p hyu-vpn-windows-service
+          -p hyu-vpn-windows-tray
+          -p hyu-vpn-hip
+          -- -D warnings
+      - name: Windows packaging model tests
+        run: python -m unittest -v tests.test_windows_packaging tests.test_rust_protocol_compat
+      - name: Build and validate MSI
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+      - name: Install and smoke-test MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Get-ChildItem dist/windows/HYU-VPN-*-x64.msi | Select-Object -First 1
+          $log = Join-Path $env:RUNNER_TEMP 'hyu-vpn-msi-install.log'
+          $process = Start-Process msiexec.exe -ArgumentList @('/i', $msi.FullName, '/qn', '/norestart', '/l*v', $log) -Wait -PassThru
+          if ($process.ExitCode -ne 0) { Get-Content $log; throw "MSI install failed: $($process.ExitCode)" }
+          $service = Get-Service HYUVPN
+          if ($service.Status -ne 'Running') { throw "HYUVPN service is not running" }
+          $install = Join-Path $env:ProgramFiles 'HYU VPN'
+          $required = @(
+            'hyu-vpn-windows-service.exe',
+            'hyu-vpn-windows-tray.exe',
+            'hyu-vpn-hip.exe',
+            'hyu-vpn.ico',
+            'artifact-manifest.sha256',
+            'runtime/openconnect.exe',
+            'runtime/vpnc-script-win.js',
+            'runtime/wintun.dll'
+          )
+          foreach ($relative in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $install $relative) -PathType Leaf)) {
+              throw "Installed file is missing: $relative"
+            }
+          }
+          & (Join-Path $install 'hyu-vpn-hip.exe') --smoke-test
+          if ($LASTEXITCODE -ne 0) { throw 'HIP smoke test failed' }
+          $tray = Start-Process (Join-Path $install 'hyu-vpn-windows-tray.exe') -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($tray.ExitCode -ne 0) { throw 'Tray smoke test failed' }
+          & (Join-Path $install 'runtime/openconnect.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'OpenConnect smoke test failed' }
+          $help = & (Join-Path $install 'runtime/openconnect.exe') --help 2>&1 | Out-String
+          if ($help -notmatch '--csd-wrapper=SCRIPT') { throw 'Patched OpenConnect HIP option is missing' }
+          $acl = (Get-Acl (Join-Path $env:ProgramData 'HYUVPN')).Sddl
+          if ($acl -match ';;;BU\)' -or $acl -match ';;;WD\)' -or $acl -match ';;;AU\)') {
+            throw "State directory grants access to ordinary users: $acl"
+          }
+          Set-Content -LiteralPath (Join-Path $env:ProgramData 'HYUVPN\upgrade-preservation-canary') -Value 'preserve-me'
+      - name: Build and install major-upgrade probe MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $upgradeDirectory = Join-Path $env:RUNNER_TEMP 'hyu-vpn-upgrade'
+          ./scripts/package-windows.ps1 -Version '0.2.1' -OutputDirectory $upgradeDirectory -SkipRustBuild
+          $upgrade = Get-ChildItem $upgradeDirectory/HYU-VPN-0.2.1-x64.msi | Select-Object -First 1
+          $log = Join-Path $env:RUNNER_TEMP 'hyu-vpn-msi-upgrade.log'
+          $process = Start-Process msiexec.exe -ArgumentList @('/i', $upgrade.FullName, '/qn', '/norestart', '/l*v', $log) -Wait -PassThru
+          if ($process.ExitCode -ne 0) { Get-Content $log; throw "MSI major upgrade failed: $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath (Join-Path $env:ProgramData 'HYUVPN\upgrade-preservation-canary'))) {
+            throw 'Encrypted state was not preserved across MSI major upgrade'
+          }
+          if ((Get-Service HYUVPN).Status -ne 'Running') { throw 'HYUVPN service is not running after major upgrade' }
+      - name: Uninstall MSI
+        if: always()
+        shell: pwsh
+        run: |
+          $state = Join-Path $env:ProgramData 'HYUVPN'
+          $canary = Join-Path $state 'upgrade-preservation-canary'
+          $hadCanary = Test-Path -LiteralPath $canary
+          $msi = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'hyu-vpn-upgrade\HYU-VPN-*-x64.msi') -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $msi) { $msi = Get-ChildItem dist/windows/HYU-VPN-*-x64.msi -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if ($null -ne $msi) {
+            $process = Start-Process msiexec.exe -ArgumentList @('/x', $msi.FullName, '/qn', '/norestart') -Wait -PassThru
+            if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 1605) { throw "MSI uninstall failed: $($process.ExitCode)" }
+          }
+          if ($hadCanary -and -not (Test-Path -LiteralPath $canary)) { throw 'Encrypted state was deleted during MSI uninstall' }
+          if (Test-Path -LiteralPath $state) { Remove-Item -LiteralPath $state -Recurse -Force }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hyu-vpn-windows-x64
+          path: |
+            dist/windows/*.msi
+            dist/windows/*.sha256
+          if-no-files-found: error

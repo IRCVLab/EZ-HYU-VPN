@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-package_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)
+package_root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 binary=${1:-}
 if [ -z "$binary" ]; then
     (cd "$package_root" && swift build --product hyu-vpnc-wrapperd >/dev/null)

@@ -158,7 +158,10 @@ impl LinuxPortalProbe {
 
 #[async_trait]
 impl hyu_vpn_core::ports::PortalProbe for LinuxPortalProbe {
-    async fn reachable(&self, _identity: &NetworkIdentity) -> Result<bool, NetworkProbeError> {
+    async fn reachable(&self, identity: &NetworkIdentity) -> Result<bool, NetworkProbeError> {
+        if identity.is_tunnel || identity.interface.is_empty() || identity.interface.len() > 15 {
+            return Ok(false);
+        }
         let addresses = match tokio::time::timeout(
             self.timeout,
             tokio::net::lookup_host((self.host.as_str(), self.port)),
@@ -169,8 +172,20 @@ impl hyu_vpn_core::ports::PortalProbe for LinuxPortalProbe {
             _ => return Ok(false),
         };
         for address in addresses.into_iter().take(8) {
+            let socket = if address.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()
+            } else {
+                tokio::net::TcpSocket::new_v6()
+            };
+            let Ok(socket) = socket else { continue };
+            if socket
+                .bind_device(Some(identity.interface.as_bytes()))
+                .is_err()
+            {
+                continue;
+            }
             if matches!(
-                tokio::time::timeout(self.timeout, tokio::net::TcpStream::connect(address)).await,
+                tokio::time::timeout(self.timeout, socket.connect(address)).await,
                 Ok(Ok(_))
             ) {
                 return Ok(true);

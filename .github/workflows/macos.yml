@@ -1,0 +1,75 @@
+name: macOS
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      SOURCE_BUNDLE_SHA256: ce053a9353d6c909e1475b01fa88acafbfaef5181e1cdcfa8e271e7696b2284b
+      SOURCE_BUNDLE_URL: https://github.com/IRCVLab/EZ-HYU-VPN/releases/download/v0.1.1/SOURCE-COMPLIANCE-BUNDLE.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify arm64 runner
+        run: test "$(uname -m)" = arm64
+      - name: Install pinned runtime formulas
+        run: brew install openconnect oath-toolkit
+      - name: Swift tests
+        run: |
+          swift test --package-path macos
+          swift run --package-path macos hyu-vpn-helper-test-harness
+          swift run --package-path macos hyu-vpn-menu-harness
+          swift run --package-path macos hyu-vpn-installer-harness
+          macos/Scripts/test-wrapperd-closed-stderr.sh
+      - name: Python and shell tests
+        run: |
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 -m unittest discover -s tests -v
+          for script in scripts/*.sh macos/Scripts/*.sh; do bash -n "$script"; done
+      - name: Download verified source compliance bundle
+        run: |
+          mkdir -p target/macos-input
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            "$SOURCE_BUNDLE_URL" -o target/macos-input/SOURCE-COMPLIANCE-BUNDLE.tar.gz
+          printf '%s  %s\n' "$SOURCE_BUNDLE_SHA256" \
+            target/macos-input/SOURCE-COMPLIANCE-BUNDLE.tar.gz | shasum -a 256 -c -
+      - name: Build and validate macOS DMG
+        run: |
+          version=0.2.0
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          VERSION="$version" \
+          SOURCE_COMPLIANCE_BUNDLE="$GITHUB_WORKSPACE/target/macos-input/SOURCE-COMPLIANCE-BUNDLE.tar.gz" \
+            scripts/package-macos.sh
+      - name: Inspect mounted macOS artifact
+        run: |
+          set -euo pipefail
+          dmg=dist/macos/EZ-HYU-VPN-arm64.dmg
+          (cd dist/macos && shasum -a 256 -c EZ-HYU-VPN-arm64.dmg.sha256)
+          hdiutil verify "$dmg"
+          mountpoint="$(mktemp -d "$RUNNER_TEMP/hyu-vpn-mount.XXXXXX")"
+          cleanup() { hdiutil detach "$mountpoint" >/dev/null 2>&1 || true; rmdir "$mountpoint" 2>/dev/null || true; }
+          trap cleanup EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$dmg" >/dev/null
+          codesign --verify --deep --strict "$mountpoint/HYU VPN.app"
+          codesign --verify --deep --strict "$mountpoint/Install HYU VPN.app"
+          test "$(lipo -archs "$mountpoint/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp")" = arm64
+          test "$(lipo -archs "$mountpoint/com.hyu.vpn.helper")" = arm64
+          test -f "$mountpoint/SOURCE-COMPLIANCE-BUNDLE.tar.gz"
+          test -f "$mountpoint/FINAL-RUNTIME-BINDING.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hyu-vpn-macos-arm64
+          path: |
+            dist/macos/EZ-HYU-VPN-arm64.dmg
+            dist/macos/EZ-HYU-VPN-arm64.dmg.sha256
+          if-no-files-found: error

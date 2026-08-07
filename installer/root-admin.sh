@@ -1,6 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 
 ACTION=""; PAYLOAD=""; MANIFEST=""; STAGE=""; STAGE_MANIFEST_SHA256=""; PACKAGE_MANIFEST_SHA256=""; DRY_RUN_ROOT=""; ADMIN_USER_ARG=""; ADMIN_UID_ARG=""; RECOVER=0; TOOLS_ROOT=""; LIVE_NONCE=""
 typeset -A SEEN_OPT
@@ -29,7 +29,7 @@ case "$ACTION" in install|uninstall) ;; *) print -u2 "unknown administrator phas
 validate_temp_root(){
   local root="$1" real parent entry
   [[ -n "$root" && "$root" != "/" && ! -L "$root" ]] || { print -u2 "fresh temporary dry-run root required"; exit 65; }
-  if [[ -e "$root" ]]; then real="$(CDPATH= cd -- "$root" && pwd -P)"; else real="$root"; fi
+  if [[ -e "$root" ]]; then real="$(CDPATH='' cd -- "$root" && pwd -P)"; else real="$root"; fi
   case "$real" in /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;; *) print -u2 "fresh temporary dry-run root required"; exit 65;; esac
   if [[ -e "$real" ]]; then
     [[ -d "$real" ]] || { print -u2 "fresh temporary dry-run root required"; exit 65; }
@@ -50,7 +50,7 @@ validate_tools_root(){
   local tools="$1" dry="$2" real_tools real_dry tool
   [[ -z "$tools" ]] && return 0
   [[ -n "$dry" && -d "$tools" && ! -L "$tools" ]] || { print -u2 "invalid tools root"; exit 65; }
-  real_tools="$(CDPATH= cd -- "$tools" && pwd -P)"; real_dry="$(CDPATH= cd -- "$dry" && pwd -P)"
+  real_tools="$(CDPATH='' cd -- "$tools" && pwd -P)"; real_dry="$(CDPATH='' cd -- "$dry" && pwd -P)"
   case "$real_tools" in "$real_dry"/*) ;; *) print -u2 "tools root must be inside dry-run root"; exit 65;; esac
   for tool in /usr/sbin/visudo /usr/sbin/chown /usr/bin/pgrep /usr/sbin/netstat /usr/sbin/scutil /usr/bin/env /bin/launchctl /bin/mv; do
     [[ -x "$real_tools$tool" ]] || { print -u2 "tools root missing allowlisted tool: $tool"; exit 65; }
@@ -324,8 +324,8 @@ for rel, info in expected.items():
 verify_manifest_arg_relation(){
   local payload_real manifest_dir_real manifest_real
   [[ -d "$PAYLOAD" && -f "$MANIFEST" && ! -L "$MANIFEST" ]] || { print -u2 "missing package payload or manifest"; return 1; }
-  payload_real="$(CDPATH= cd -- "$PAYLOAD" && pwd -P)"
-  manifest_dir_real="$(CDPATH= cd -- "$(/usr/bin/dirname "$MANIFEST")" && pwd -P)"
+  payload_real="$(CDPATH='' cd -- "$PAYLOAD" && pwd -P)"
+  manifest_dir_real="$(CDPATH='' cd -- "$(/usr/bin/dirname "$MANIFEST")" && pwd -P)"
   manifest_real="$manifest_dir_real/$(/usr/bin/basename "$MANIFEST")"
   [[ "$manifest_real" == "$payload_real/manifest.json" ]] || { print -u2 "manifest must be package top manifest"; return 1; }
 }
@@ -477,7 +477,11 @@ install_phase(){
   write_file "$STATE_DIR/migration.json" 600 '{"liveHelper":"drained-before-replace-and-verified-stopped"}'; write_installed_manifest; /bin/rm -rf "$PACKAGE_SNAPSHOT" "$TXN_SNAPSHOT"; /bin/rm -f "$STATE_DIR/native-suppression-transaction"; print complete >| "$TX_STATE"; durable_flush "$TX_STATE"; log "install-complete"
 }
 uninstall_phase(){
-  [[ -x "$HELPER_DST" ]] && { run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper status; run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper stop; run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper repair; }
+  if [[ -x "$HELPER_DST" ]]; then
+    drain_existing_helper
+    clear_inactive_repair_state
+    verify_installed_helper_stopped
+  fi
   [[ -f "$SERVICE_PLIST" ]] && run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID" "$SERVICE_PLIST"
   [[ -f "$LEGACY_MENUBAR_PLIST" ]] && run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID/$MENU_LABEL"
   [[ -x "$APP_SUPPORT/bin/hyu-vpn-native-client" && -f "$STATE_DIR/native-suppression.json" ]] && run_optional_cmd /usr/bin/env -i PATH=/usr/bin:/bin SUDO_UID="$ADMIN_UID" /usr/bin/python3 "$APP_SUPPORT/bin/hyu-vpn-native-client" restore-auto-launch

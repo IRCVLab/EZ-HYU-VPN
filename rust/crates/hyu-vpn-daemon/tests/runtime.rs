@@ -107,6 +107,67 @@ fn credential_replacement_and_current_otp_are_served_without_status_secrets() {
 }
 
 #[test]
+fn credential_replacement_cancels_backoff_and_reconnects_immediately_when_automatic() {
+    let (plane, mut actions) = ControlPlane::new(true, MemoryCredentials::default(), FixedClock);
+    plane.apply_event(EngineEvent::NetworkReady(NetworkIdentity::new(
+        "wlan0",
+        "192.0.2.1",
+    )));
+    assert_eq!(
+        actions.try_recv().unwrap(),
+        EngineAction::PublishState(VpnState::Connecting)
+    );
+    assert_eq!(
+        actions.try_recv().unwrap(),
+        EngineAction::StartConnection {
+            generation: hyu_vpn_core::state::ConnectionGeneration(1),
+        }
+    );
+    plane.apply_event(EngineEvent::ConnectorExited {
+        generation: hyu_vpn_core::state::ConnectionGeneration(1),
+        return_code: 1,
+        runtime_seconds: 0,
+    });
+    assert_eq!(
+        actions.try_recv().unwrap(),
+        EngineAction::PublishState(VpnState::Backoff)
+    );
+    assert_eq!(
+        actions.try_recv().unwrap(),
+        EngineAction::ScheduleRetry { delay_seconds: 10 }
+    );
+    assert_eq!(plane.status().state, VpnState::Backoff);
+    assert_eq!(
+        plane.status().next_retry_at.as_deref(),
+        Some("1970-01-01T00:01:09Z")
+    );
+
+    let credentials = Credentials::new(
+        "fixture-user",
+        "PASSWORD-CANARY",
+        "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+    )
+    .unwrap();
+    let response = plane.handle(request(
+        "replace",
+        Request::ReplaceCredentials { credentials },
+    ));
+    assert_eq!(serde_json::to_value(response).unwrap()["result"], "ack");
+    assert_eq!(actions.try_recv().unwrap(), EngineAction::CancelRetry);
+    assert_eq!(
+        actions.try_recv().unwrap(),
+        EngineAction::PublishState(VpnState::Connecting)
+    );
+    assert_eq!(
+        actions.try_recv().unwrap(),
+        EngineAction::StartConnection {
+            generation: hyu_vpn_core::state::ConnectionGeneration(2),
+        }
+    );
+    assert_eq!(plane.status().state, VpnState::Connecting);
+}
+
+#[test]
 fn atomic_status_file_contains_only_exact_status_document() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("status.json");

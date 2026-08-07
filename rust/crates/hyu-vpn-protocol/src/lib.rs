@@ -120,7 +120,10 @@ pub fn decode_request(frame: &[u8]) -> Result<RequestEnvelope, ProtocolError> {
         ("automatic_on", None) => Request::AutomaticOn,
         ("automatic_off", None) => Request::AutomaticOff,
         ("credentials_present", None) => Request::CredentialsPresent,
-        ("replace_credentials", Some(credentials)) => Request::ReplaceCredentials { credentials },
+        ("replace_credentials", Some(credentials)) => {
+            credentials.validate()?;
+            Request::ReplaceCredentials { credentials }
+        }
         ("current_otp", None) => Request::CurrentOtp,
         _ => return Err(ProtocolError::InvalidRequest),
     };
@@ -174,7 +177,7 @@ impl Credentials {
         &self.totp_seed
     }
 
-    fn validate(&self) -> Result<(), ProtocolError> {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
         if !bounded_nonempty(&self.username, MAX_USERNAME_BYTES)
             || !bounded_nonempty(&self.password, MAX_PASSWORD_BYTES)
             || !bounded_nonempty(&self.totp_seed, MAX_TOTP_SEED_BYTES)
