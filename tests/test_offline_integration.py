@@ -338,13 +338,12 @@ class OfflineAdversarialTests(unittest.TestCase):
 
 
 class DocumentationTests(unittest.TestCase):
-    def test_readme_documents_install_prereqs_disabled_service_rollback_and_privacy(self):
+    def test_readme_documents_end_user_download_install_usage_and_privacy(self):
         text = (ROOT / "README.md").read_text(encoding="utf-8")
         required = [
-            "Install after merge", "Prerequisites", "gp-vpn-username", "gp-vpn-password", "gp-vpn-totp",
-            "Foreground use", "service disabled by default", "launchctl", "after live acceptance",
-            "Stop and rollback", "Recovery", "Logs and privacy", "no passwords", "no TOTP seeds",
-            "no OTP values", "no authentication cookies", "no raw HIP XML", "GlobalProtect is not uninstalled",
+            "# EZ-HYU-VPN", "최신 DMG 다운로드", "EZ-HYU-VPN-arm64.dmg", "Install HYU VPN.app",
+            "Apple Silicon Mac", "macOS 14 이상", "OTP 설정용 비밀키", "macOS 관리자 암호",
+            "V 아이콘", "Launch at Login", "Quit HYU VPN", "암호화하여 저장",
         ]
         for phrase in required:
             with self.subTest(phrase=phrase):

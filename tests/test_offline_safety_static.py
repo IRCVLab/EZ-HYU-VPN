@@ -40,23 +40,21 @@ class OfflineSafetyStaticTests(unittest.TestCase):
         self.assertIn("connector=not-read-dry-run", print_preconditions_body)
         self.assertIn("dependencies=not-read-dry-run", print_preconditions_body)
 
-    def test_readme_offline_safe_commands_do_not_run_full_unittest_discovery_or_live_acceptance(self):
-        readme = README.read_text(encoding="utf-8")
-        offline_section = readme.split("Expected offline-safe behavior before live use:", 1)[1].split("During a real foreground attempt", 1)[0]
-
-        self.assertNotIn("unittest discover", offline_section)
-        self.assertNotIn("tests/live_acceptance.sh", offline_section)
-        self.assertIn("tests.test_launchd_config", offline_section)
-        self.assertIn("tests.test_supervisor", offline_section)
-        self.assertIn("tests.test_offline_safety_static", offline_section)
-        self.assertIn("tests.test_live_acceptance_gate", offline_section)
-        self.assertNotIn("SupervisorLoopTests.test_missing_auto", offline_section)
-
-    def test_readme_does_not_document_bootstrapping_quarantined_legacy_plist(self):
+    def test_readme_is_end_user_focused_and_does_not_expose_developer_mutation_commands(self):
         readme = README.read_text(encoding="utf-8")
 
-        self.assertIn("quarantine-only inert template", readme)
-        self.assertIn("Do not bootstrap `launchd/local.hyu-openconnect.plist`", readme)
+        self.assertIn("최신 DMG 다운로드", readme)
+        self.assertIn("Install HYU VPN.app", readme)
+        self.assertNotIn("unittest discover", readme)
+        self.assertNotIn("tests/live_acceptance.sh", readme)
+        self.assertNotIn("HYU_VPN_ALLOW_LIVE_MUTATION", readme)
+        self.assertNotIn("/opt/homebrew", readme)
+
+    def test_readme_does_not_document_legacy_launchagent_paths(self):
+        readme = README.read_text(encoding="utf-8")
+
+        self.assertNotIn("local.hyu-openconnect", readme)
+        self.assertNotIn("launchctl", readme)
         self.assertNotIn("cp launchd/local.hyu-openconnect.plist", readme)
 
 

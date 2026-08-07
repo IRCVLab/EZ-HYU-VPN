@@ -1,4 +1,7 @@
 .worktrees/
+.omx/
+.superpowers/reviews/
+.pytest_cache/
 /macos/.build/
 __pycache__/
 *.py[cod]
