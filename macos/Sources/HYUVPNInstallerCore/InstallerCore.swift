@@ -164,10 +164,44 @@ package enum RootAdminAuthorizationScript {
     }
 }
 
+package enum RootAdminFailureClassifier {
+    private static let maxCapturedDiagnosticBytes = 8192
+
+    package static func operationCode(exitStatus: Int32, capturedOutput: String) -> String {
+        let bounded = String(capturedOutput.prefix(maxCapturedDiagnosticBytes))
+        if bounded.localizedCaseInsensitiveContains("installed HYU VPN helper could not repair retained state") {
+            return "RETAINED_STATE_REPAIR_FAILED"
+        }
+        if bounded.localizedCaseInsensitiveContains("recorded process did not match live process") {
+            return "RETAINED_STATE_PROCESS_MISMATCH"
+        }
+        if bounded.localizedCaseInsensitiveContains("User canceled") || bounded.localizedCaseInsensitiveContains("user cancelled") {
+            return "ADMIN_AUTHORIZATION_CANCELLED"
+        }
+        if bounded.localizedCaseInsensitiveContains("The user name or password was incorrect") {
+            return "ADMIN_AUTHORIZATION_FAILED"
+        }
+        return "INSTALL_FAILED_ROOT_AUTHORIZATION_OR_TRANSACTION"
+    }
+
+    package static func sanitizedDiagnosticCode(exitStatus: Int32, capturedOutput: String) -> String {
+        let code = operationCode(exitStatus: exitStatus, capturedOutput: capturedOutput)
+        return "ROOT_TRANSACTION_EXIT_\(exitStatus)_\(code)"
+    }
+}
+
 package enum RootAdminAuthorizer {
     package static func authorizeOnce(argv: [String], newlyCreatedKeys: [CredentialKey], store: InstallerCredentialStoring, authorize: ([String]) throws -> Void) throws {
         do {
             try authorize(argv)
+        } catch let error as InstallerCoreError {
+            for key in newlyCreatedKeys { try? store.remove(key) }
+            switch error {
+            case .commandFailed(let code):
+                throw InstallerCoreError.commandFailed(code: code)
+            case .invalidInput, .rootAuthorizationOrTransactionFailed:
+                throw InstallerCoreError.rootAuthorizationOrTransactionFailed
+            }
         } catch {
             for key in newlyCreatedKeys { try? store.remove(key) }
             throw InstallerCoreError.rootAuthorizationOrTransactionFailed

@@ -180,6 +180,29 @@ private class MemoryCredentialStore: InstallerCredentialStoring {
         #expect(store.values[.totpSeed] == "retained-totp")
     }
 
+
+    @Test func rootAdminFailureOutputMapsKnownRetainedStateRepairFailureWithoutSecrets() throws {
+        let rawOutput = """
+        installed HYU VPN helper could not repair retained state
+        username=shchoi00 password=super-secret totp=JBSWY3DPEHPK3PXP
+        """
+        #expect(RootAdminFailureClassifier.operationCode(exitStatus: 1, capturedOutput: rawOutput) == "RETAINED_STATE_REPAIR_FAILED")
+        #expect(RootAdminFailureClassifier.sanitizedDiagnosticCode(exitStatus: 1, capturedOutput: rawOutput).contains("super-secret") == false)
+        #expect(RootAdminFailureClassifier.sanitizedDiagnosticCode(exitStatus: 1, capturedOutput: rawOutput).contains("JBSWY3DPEHPK3PXP") == false)
+    }
+
+    @Test func rootAuthorizationPreservesMappedRootTransactionCodeAndStillRollsBackNewKeys() throws {
+        let store = MemoryCredentialStore([.username: "created-user", .password: "created-pass", .totpSeed: "retained-totp"])
+        let argv = ["/usr/bin/env", "SUDO_USER=alice", "SUDO_UID=501", "/bin/zsh", "root-admin.sh"]
+        #expect(throws: InstallerCoreError.commandFailed(code: "RETAINED_STATE_REPAIR_FAILED")) {
+            try RootAdminAuthorizer.authorizeOnce(argv: argv, newlyCreatedKeys: [.username, .password], store: store) { _ in
+                throw InstallerCoreError.commandFailed(code: "RETAINED_STATE_REPAIR_FAILED")
+            }
+        }
+        #expect(store.removed == [.username, .password])
+        #expect(store.values[.totpSeed] == "retained-totp")
+    }
+
     @Test func commandErrorsAreSanitizedCodesOnly() {
         #expect(InstallerCoreError.commandFailed(code: "VERIFY_MANIFEST_FAILED").description == "HYU VPN installer command failed (VERIFY_MANIFEST_FAILED).")
         #expect(!InstallerCoreError.commandFailed(code: "VERIFY_MANIFEST_FAILED").description.contains("raw stderr secret"))

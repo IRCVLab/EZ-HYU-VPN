@@ -150,6 +150,29 @@ private func privilegedArgvAndSingleAuthorization() throws {
     try expect(store.removed == [.username], "root failure rolls back only newly-created keys")
 }
 
+
+private func rootAdminFailureClassifierMapsRetainedStateRepairSafely() throws {
+    let rawOutput = "installed HYU VPN helper could not repair retained state\npassword=super-secret totp=JBSWY3DPEHPK3PXP"
+    try expect(RootAdminFailureClassifier.operationCode(exitStatus: 1, capturedOutput: rawOutput) == "RETAINED_STATE_REPAIR_FAILED", "retained-state helper failure maps to stable operation code")
+    let diagnostic = RootAdminFailureClassifier.sanitizedDiagnosticCode(exitStatus: 1, capturedOutput: rawOutput)
+    try expect(!diagnostic.contains("super-secret") && !diagnostic.contains("JBSWY3DPEHPK3PXP"), "sanitized diagnostic excludes raw secrets")
+}
+
+private func rootAuthorizationPreservesMappedTransactionFailureCode() throws {
+    let store = MemoryCredentialStore([.username: "created-user", .totpSeed: "retained-totp"])
+    let argv = ["/usr/bin/env", "SUDO_USER=alice", "SUDO_UID=501", "/bin/zsh", "root-admin.sh"]
+    do {
+        try RootAdminAuthorizer.authorizeOnce(argv: argv, newlyCreatedKeys: [.username], store: store) { _ in
+            throw InstallerCoreError.commandFailed(code: "RETAINED_STATE_REPAIR_FAILED")
+        }
+        throw HarnessError.failure("mapped transaction failure not thrown")
+    } catch InstallerCoreError.commandFailed(let code) {
+        try expect(code == "RETAINED_STATE_REPAIR_FAILED", "mapped transaction failure code preserved")
+    }
+    try expect(store.removed == [.username], "mapped root failure still rolls back only newly-created keys")
+    try expect(store.values[.totpSeed] == "retained-totp", "mapped root failure keeps retained keys")
+}
+
 do {
     try credentialCollectionUsesContainsAndValidator()
     try writeRollbackOnlyNewKeys()
@@ -160,6 +183,8 @@ do {
     try rootAdminAuthorizationScriptQuotesCommandInOSAScriptArgv()
     try rootAdminHarmlessParserVariantExecutesViaArgv()
     try privilegedArgvAndSingleAuthorization()
+    try rootAdminFailureClassifierMapsRetainedStateRepairSafely()
+    try rootAuthorizationPreservesMappedTransactionFailureCode()
     print("HARNESS PASS hyu-vpn-installer-harness")
 } catch {
     print("HARNESS FAIL \(error)")

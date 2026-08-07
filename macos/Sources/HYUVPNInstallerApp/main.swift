@@ -349,10 +349,24 @@ struct InstallerController {
     }
 
     private func runWithAdministratorPrivileges(_ argv: [String]) throws {
-        do {
-            try run(RootAdminAuthorizationScript.makeOSAScriptArgv(argv), code: "INSTALL_FAILED_ROOT_AUTHORIZATION_OR_TRANSACTION")
-        } catch {
-            throw InstallerCoreError.rootAuthorizationOrTransactionFailed
+        try runRootAuthorizationCaptured(RootAdminAuthorizationScript.makeOSAScriptArgv(argv))
+    }
+
+    private func runRootAuthorizationCaptured(_ argv: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: argv[0])
+        process.arguments = Array(argv.dropFirst())
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        let outputData = stdout.fileHandleForReading.readDataToEndOfFile() + stderr.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationStatus == 0 else {
+            let output = String(decoding: outputData.prefix(8192), as: UTF8.self)
+            let code = RootAdminFailureClassifier.operationCode(exitStatus: process.terminationStatus, capturedOutput: output)
+            throw InstallerCoreError.commandFailed(code: code)
         }
     }
 }
