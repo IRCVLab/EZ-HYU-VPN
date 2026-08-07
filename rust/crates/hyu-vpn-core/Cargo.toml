@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
 data-encoding.workspace = true
 fs2.workspace = true
 hmac.workspace = true

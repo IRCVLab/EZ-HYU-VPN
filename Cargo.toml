@@ -12,6 +12,7 @@ rust-version = "1.85"
 version = "0.2.0"
 
 [workspace.dependencies]
+aes-gcm = "0.10"
 data-encoding = "2.9"
 fs2 = "0.4"
 hmac = "0.12"
