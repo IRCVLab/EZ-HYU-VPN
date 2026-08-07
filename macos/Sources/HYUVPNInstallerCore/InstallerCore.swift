@@ -31,18 +31,18 @@ package enum InstallerCredentialBootstrapper {
         var collected: [CredentialKey: String] = [:]
         if try !store.contains(.username) {
             let username = try prompt(.username)
-            try validate(username: username, password: validFallbackPassword, totpSeed: validFallbackTOTP)
-            collected[.username] = username
+            let validated = try validate(username: username, password: validFallbackPassword, totpSeed: validFallbackTOTP)
+            collected[.username] = validated.username
         }
         if try !store.contains(.password) {
             let password = try prompt(.password)
-            try validate(username: validFallbackUsername, password: password, totpSeed: validFallbackTOTP)
-            collected[.password] = password
+            let validated = try validate(username: validFallbackUsername, password: password, totpSeed: validFallbackTOTP)
+            collected[.password] = validated.password
         }
         if try !store.contains(.totpSeed) {
             let totpSeed = try prompt(.totpSeed)
-            try validate(username: validFallbackUsername, password: validFallbackPassword, totpSeed: totpSeed)
-            collected[.totpSeed] = totpSeed
+            let validated = try validate(username: validFallbackUsername, password: validFallbackPassword, totpSeed: totpSeed)
+            collected[.totpSeed] = validated.normalizedTOTPSeed
         }
         return collected
     }
@@ -61,9 +61,13 @@ package enum InstallerCredentialBootstrapper {
         }
     }
 
-    private static func validate(username: String, password: String, totpSeed: String) throws {
+    package static func cleanupWrittenCredentialsAfterActivationFailure(store: InstallerCredentialStoring, writtenKeys: [CredentialKey]) throws {
+        for key in writtenKeys { try store.remove(key) }
+    }
+
+    private static func validate(username: String, password: String, totpSeed: String) throws -> ValidatedCredentials {
         do {
-            _ = try CredentialValidator.validate(CredentialResetInput(username: username, password: password, passwordConfirmation: password, totpSeed: totpSeed, totpSeedConfirmation: totpSeed))
+            return try CredentialValidator.validate(CredentialResetInput(username: username, password: password, passwordConfirmation: password, totpSeed: totpSeed, totpSeedConfirmation: totpSeed))
         } catch let error as CredentialValidationError {
             throw InstallerCoreError.invalidInput(error.code)
         } catch {

@@ -58,6 +58,25 @@ private class MemoryCredentialStore: InstallerCredentialStoring {
         #expect(store.values[.totpSeed] == "retained-totp")
     }
 
+
+    @Test func credentialCollectionUsesValidatorNormalizedTOTPValue() throws {
+        let store = MemoryCredentialStore([.username: "retained-user", .password: "retained-password"])
+        let collected = try InstallerCredentialBootstrapper.collectMissingFinalCredentials(store: store) { key in
+            #expect(key == .totpSeed)
+            return "jbsw y3dp-ehpk 3pxp"
+        }
+        #expect(collected[.totpSeed] == "JBSWY3DPEHPK3PXP")
+    }
+
+    @Test func activationFailureCleanupRemovesOnlyNewlyWrittenCredentials() throws {
+        let store = MemoryCredentialStore([.username: "existing-user", .password: "new-password", .totpSeed: "new-totp"])
+        try InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: store, writtenKeys: [CredentialKey.password, CredentialKey.totpSeed])
+        #expect(store.values[.username] == "existing-user")
+        #expect(store.values[.password] == nil)
+        #expect(store.values[.totpSeed] == nil)
+        #expect(store.removed == [.password, .totpSeed])
+    }
+
     @Test func privilegedArgvInjectsConsoleSudoIdentityAndNoSecrets() throws {
         let argv = try RootAdminInvocation.makeInstallArgv(
             identity: ConsoleIdentity(user: "alice", uid: "501"),

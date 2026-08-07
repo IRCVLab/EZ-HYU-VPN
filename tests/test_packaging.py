@@ -477,6 +477,33 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertEqual(result.dmg_path.parent, missing_output)
         self.assertTrue(result.dmg_path.is_file())
 
+
+    def test_signed_installer_app_code_resources_is_allowed_and_manifested(self):
+        src = self.make_payload_source()
+        code_resources = src / "Install HYU VPN.app/Contents/_CodeSignature/CodeResources"
+        code_resources.parent.mkdir(parents=True)
+        code_resources.write_text("signed-installer-seal\n", encoding="utf-8")
+
+        result = ReleaseBuilder(ReleaseToolchain(fake=True)).build(
+            source_payload=src,
+            build_root=self.build_root,
+            output_root=self.output_root,
+            version="0.1.0-signed-installer-test",
+            arch="arm64",
+        )
+
+        self.assertIn("Install HYU VPN.app/Contents/_CodeSignature/CodeResources", result.manifest["files"])
+
+    def test_installer_failure_ui_logs_sanitized_operation_codes(self):
+        source = (REPO / "macos/Sources/HYUVPNInstallerApp/main.swift").read_text(encoding="utf-8")
+        self.assertIn("~/Library/Logs/HYU VPN/installer.log", source)
+        self.assertIn("appendInstallerLog", source)
+        self.assertIn("HYU VPN/installer.log", source)
+        self.assertIn("Operation code:", source)
+        self.assertIn("0600", source)
+        self.assertNotIn("standardError = pipe", source)
+        self.assertNotIn("String(data:", source)
+
     def test_signed_menu_app_code_resources_is_allowed_and_manifested(self):
         src = self.make_payload_source()
         code_resources = src / "HYU VPN.app/Contents/_CodeSignature/CodeResources"

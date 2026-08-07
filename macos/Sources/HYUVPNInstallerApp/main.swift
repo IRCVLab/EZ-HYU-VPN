@@ -12,6 +12,7 @@ final class HYUVPNInstallerApp: NSObject, NSApplicationDelegate {
     private let app = NSApplication.shared
     private var statusWindow: NSWindow?
     private let statusLabel = NSTextField(labelWithString: "Preparing HYU VPN installer…")
+    private let installerLogDisplayPath = "~/Library/Logs/HYU VPN/installer.log"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         app.setActivationPolicy(.regular)
@@ -22,11 +23,50 @@ final class HYUVPNInstallerApp: NSObject, NSApplicationDelegate {
             showAlert(title: "HYU VPN Installed", message: "HYU VPN was installed successfully. You can connect from the menu bar app without another administrator password.", style: .informational)
             app.terminate(nil)
         } catch {
-            showAlert(title: "HYU VPN Install Failed", message: String(describing: error), style: .critical)
+            let code = sanitizedOperationCode(for: error)
+            appendInstallerLog(operationCode: code)
+            showAlert(title: "HYU VPN Install Failed", message: "Operation code: \(code)\nDiagnostics: \(installerLogDisplayPath)", style: .critical)
             app.terminate(nil)
         }
     }
 
+    private func sanitizedOperationCode(for error: Error) -> String {
+        if let installerError = error as? InstallerCoreError {
+            switch installerError {
+            case .invalidInput(let code), .commandFailed(let code): return sanitizeOperationCode(code)
+            case .rootAuthorizationOrTransactionFailed: return "INSTALL_FAILED_ROOT_AUTHORIZATION_OR_TRANSACTION"
+            }
+        }
+        if error is InstallerAppError { return "INSTALLER_APP_FAILED" }
+        return "INSTALLER_UNKNOWN_FAILED"
+    }
+
+    private func sanitizeOperationCode(_ value: String) -> String {
+        let filtered = value.filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        return String((filtered.isEmpty ? "UNKNOWN" : filtered).prefix(80))
+    }
+
+    private func appendInstallerLog(operationCode: String) {
+        let code = sanitizeOperationCode(operationCode)
+        let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/HYU VPN", isDirectory: true)
+        let logURL = directory.appendingPathComponent("installer.log")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: logURL.path) {
+                FileManager.default.createFile(atPath: logURL.path, contents: nil)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path) // 0600
+            }
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let line = "\(timestamp) Operation code: \(code)\n"
+            let handle = try FileHandle(forWritingTo: logURL)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(line.utf8))
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path) // 0600
+        } catch {
+            return
+        }
+    }
 
     private func showProgressWindow() -> (String) -> Void {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 130), styleMask: [.titled], backing: .buffered, defer: false)
@@ -116,9 +156,14 @@ struct InstallerController {
         status("Saving HYU VPN credentials…")
         let installedMenuExecutable = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
         let credentialWriter = InstallerKeychainStore(additionalTrustedApplicationPath: installedMenuExecutable)
-        _ = try InstallerCredentialBootstrapper.writeCollectedCredentials(store: credentialWriter, collected: missingCredentialValues)
-        status("Starting HYU VPN menu app…")
-        try activateUserSession()
+        let writtenKeys = try InstallerCredentialBootstrapper.writeCollectedCredentials(store: credentialWriter, collected: missingCredentialValues)
+        do {
+            status("Starting HYU VPN menu app…")
+            try activateUserSession()
+        } catch {
+            try? InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: credentialWriter, writtenKeys: writtenKeys)
+            throw error
+        }
     }
 
     private func collectMissingCredentialsBeforeElevation() throws -> [CredentialKey: String] {

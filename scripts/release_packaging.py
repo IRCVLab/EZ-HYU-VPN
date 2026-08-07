@@ -85,6 +85,7 @@ APP_BUNDLE_REL = "HYU VPN.app"
 APP_BUNDLE_RELS = [APP_BUNDLE_REL, INSTALLER_APP_REL]
 OPTIONAL_APP_SIGNATURE_FILES = {
     "HYU VPN.app/Contents/_CodeSignature/CodeResources",
+    "Install HYU VPN.app/Contents/_CodeSignature/CodeResources",
 }
 EXECUTABLE_RELATIVE_FILES = {
     "runtime/openconnect/bin/openconnect",

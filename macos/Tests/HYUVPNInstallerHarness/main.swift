@@ -33,6 +33,11 @@ private func credentialCollectionUsesContainsAndValidator() throws {
     try expect(prompts == [.password, .totpSeed], "only missing credentials prompted")
     try expect(store.reads.isEmpty, "existing credentials not decrypted for prompt decision")
     try expect(collected[.password] == "vpn-password", "password collected in memory")
+    let normalized = try InstallerCredentialBootstrapper.collectMissingFinalCredentials(store: MemoryCredentialStore([.username: "retained", .password: "retained"])) { key in
+        try expect(key == .totpSeed, "only missing totp prompted for normalization")
+        return "jbsw y3dp-ehpk 3pxp"
+    }
+    try expect(normalized[.totpSeed] == "JBSWY3DPEHPK3PXP", "TOTP collected as validator-normalized value")
     do {
         _ = try InstallerCredentialBootstrapper.collectMissingFinalCredentials(store: MemoryCredentialStore([:])) { key in key == .totpSeed ? "123456" : "x" }
         throw HarnessError.failure("invalid TOTP accepted")
@@ -56,6 +61,14 @@ private func writeRollbackOnlyNewKeys() throws {
     try expect(store.values[.totpSeed] == "retained-totp", "pre-existing key retained")
 }
 
+private func activationFailureCleanupOnlyWrittenKeys() throws {
+    let store = MemoryCredentialStore([.username: "existing-user", .password: "new-password", .totpSeed: "new-totp"])
+    try InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: store, writtenKeys: [.password, .totpSeed])
+    try expect(store.values[.username] == "existing-user", "activation cleanup keeps existing username")
+    try expect(store.values[.password] == nil && store.values[.totpSeed] == nil, "activation cleanup removes written keys")
+    try expect(store.removed == [.password, .totpSeed], "activation cleanup removes only written keys")
+}
+
 private func privilegedArgvAndSingleAuthorization() throws {
     let argv = try RootAdminInvocation.makeInstallArgv(
         identity: ConsoleIdentity(user: "alice", uid: "501"), installerDir: "/installer", payload: "/payload", manifest: "/payload/manifest.json", stage: "/stage",
@@ -76,6 +89,7 @@ private func privilegedArgvAndSingleAuthorization() throws {
 do {
     try credentialCollectionUsesContainsAndValidator()
     try writeRollbackOnlyNewKeys()
+    try activationFailureCleanupOnlyWrittenKeys()
     try privilegedArgvAndSingleAuthorization()
     print("HARNESS PASS hyu-vpn-installer-harness")
 } catch {
