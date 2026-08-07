@@ -497,11 +497,14 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         let plist = app.appendingPathComponent("Contents/Info.plist")
         let binary = app.appendingPathComponent("Contents/MacOS/HYUVPNMenuApp")
         let bundledReader = app.appendingPathComponent("Contents/MacOS/HYUVPNCredentialReader")
+        let icon = app.appendingPathComponent("Contents/Resources/AppIcon.icns")
         try expect(FileManager.default.isExecutableFile(atPath: binary.path), "bundle executable")
         try expect(FileManager.default.isExecutableFile(atPath: bundledReader.path), "bundled native credential reader")
+        try expect(FileManager.default.fileExists(atPath: icon.path), "bundle icon")
         let info = NSDictionary(contentsOf: plist) as? [String: Any]
         try expect(info?["CFBundleExecutable"] as? String == "HYUVPNMenuApp", "plist executable")
         try expect(info?["CFBundleName"] as? String == "HYU VPN", "plist name")
+        try expect(info?["CFBundleIconFile"] as? String == "AppIcon", "plist icon")
         try expect(info?["LSUIElement"] as? Bool == true, "lsui")
     }
 

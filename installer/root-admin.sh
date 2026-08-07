@@ -148,6 +148,11 @@ drain_existing_helper(){
       ;;
   esac
 }
+stop_current_user_service(){
+  log "current-service-stop-start"
+  run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID/com.hyu.vpn.service"
+  log "current-service-stopped"
+}
 verify_installed_helper_stopped(){
   [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0
   local state
@@ -409,9 +414,10 @@ write_installed_manifest(){ local tmp="$INSTALLED_MANIFEST.tmp" paths_tmp="$INST
 
 install_phase(){
   print in_progress >| "$TX_STATE"; durable_flush "$TX_STATE"; log "before-snapshot"; copy_snapshot; fail_after snapshot
+  stop_current_user_service
+  drain_existing_helper
   quarantine_legacy
   migrate_legacy_menu_launchagent
-  drain_existing_helper
   copy_file "$TXN_SNAPSHOT/com.hyu.vpn.helper" "$HELPER_DST" 755; fail_after helper
   /bin/mkdir -p "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime/openconnect" "$APP_SUPPORT/runtime/vpnc" "$STATE_DIR/ledger"
   /bin/chmod 755 "$APP_SUPPORT" "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime" "$APP_SUPPORT/runtime/openconnect" "$APP_SUPPORT/runtime/vpnc"; /bin/chmod 700 "$STATE_DIR" "$STATE_DIR/ledger"

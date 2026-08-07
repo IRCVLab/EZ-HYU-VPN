@@ -363,7 +363,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertNotIn("etc/sudoers.d/com.hyu.vpn", installed_paths)
 
 
-    def test_root_admin_migrates_only_exact_legacy_menu_launchagent_and_keeps_service_owner(self):
+    def test_root_admin_stops_current_service_before_legacy_quarantine_and_keeps_service_owner(self):
         env = DryRunEnvironment(root=self.root / "dry menu migration", payload=self.payload, home=self.root / "home menu migration", manifest=self.manifest_path)
         stage = stage_user_payload(env)
         legacy = env.root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.menubar.plist"
@@ -381,6 +381,10 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertEqual(service_plist["Label"], "com.hyu.vpn.service")
         self.assertEqual(service_plist["ProgramArguments"], ["/usr/bin/python3", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service"])
         commands = (env.root / "private/var/db/hyu-vpn/command-log.jsonl").read_text(encoding="utf-8")
+        service_bootout = "launchctl bootout gui/501/com.hyu.vpn.service"
+        legacy_probe = "launchctl print gui/501/local.hyu-openconnect"
+        self.assertIn(service_bootout, commands)
+        self.assertLess(commands.index(service_bootout), commands.index(legacy_probe))
         self.assertIn("launchctl bootout gui/501/com.hyu.vpn.menubar", commands)
         self.assertNotIn("gui/501/com.hyu.vpn.service.plist", commands)
         installed_paths = (env.root / "private/var/db/hyu-vpn/installed-paths.tsv").read_text(encoding="utf-8")
@@ -867,6 +871,11 @@ class LauncherAndTemplateTests(InstallerTestCase):
         plist = plistlib.loads((REPO / "macos/Resources/HYUVPNMenuApp/Info.plist").read_bytes())
         self.assertEqual(plist["CFBundleIdentifier"], "com.hyu.vpn.menubar")
         self.assertIs(plist["LSMultipleInstancesProhibited"], True)
+        self.assertEqual(plist["CFBundleIconFile"], "AppIcon")
+
+        installer_plist = plistlib.loads((REPO / "macos/Resources/HYUVPNInstallerApp/Info.plist").read_bytes())
+        self.assertEqual(installer_plist["CFBundleIconFile"], "AppIcon")
+        self.assertTrue((REPO / "macos/Resources/AppIcon.icns").is_file())
 
 
 if __name__ == "__main__":

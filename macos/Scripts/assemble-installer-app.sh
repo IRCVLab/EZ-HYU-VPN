@@ -8,11 +8,13 @@ case "$dest" in /*) ;; *) dest="$PWD/$dest" ;; esac
 app="$dest/Install HYU VPN.app"
 contents="$app/Contents"
 macos_dir="$contents/MacOS"
+resources="$contents/Resources"
 plist="$contents/Info.plist"
 if [ ! -x "$exe" ]; then echo "missing executable: $exe" >&2; exit 66; fi
 rm -rf "$app"
-mkdir -p "$macos_dir"
+mkdir -p "$macos_dir" "$resources"
 cp "$exe" "$macos_dir/HYUVPNInstallerApp"
+cp "$(dirname "$0")/../Resources/AppIcon.icns" "$resources/AppIcon.icns"
 chmod 0755 "$macos_dir/HYUVPNInstallerApp"
 cp "$(dirname "$0")/../Resources/HYUVPNInstallerApp/Info.plist" "$plist"
 plutil -lint "$plist" >/dev/null
