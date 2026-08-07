@@ -124,7 +124,9 @@ private func installerCollectsEachConfirmedSecretInOneDialog() throws {
     let body = String(source[start.lowerBound..<end.lowerBound])
     try expect(body.components(separatedBy: "NSSecureTextField(").count - 1 == 2, "confirmed secret dialog contains two secure fields")
     try expect(body.components(separatedBy: "alert.runModal()").count - 1 == 1, "confirmed secret uses one modal")
-    try expect(body.contains("NSStackView"), "confirmed secret fields share one accessory view")
+    try expect(body.contains("NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 124))"), "confirmed secret dialog uses a stable large accessory frame")
+    try expect(body.contains("firstField.nextKeyView = confirmationField"), "Tab moves from the first secret field to confirmation")
+    try expect(body.contains("alert.window.recalculateKeyViewLoop()"), "alert recalculates the explicit key view loop")
     try expect(!body.contains("promptText("), "confirmed secret does not open sequential dialogs")
 }
 

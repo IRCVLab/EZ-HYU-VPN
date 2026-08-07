@@ -334,23 +334,23 @@ struct InstallerController {
         alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Cancel")
 
-        let firstField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        let confirmationField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 124))
+        let firstLabel = NSTextField(labelWithString: fieldLabel)
+        let firstField = NSSecureTextField(frame: NSRect(x: 0, y: 66, width: 420, height: 24))
+        let confirmationLabel = NSTextField(labelWithString: "Confirm \(fieldLabel.lowercased())")
+        let confirmationField = NSSecureTextField(frame: NSRect(x: 0, y: 8, width: 420, height: 24))
+        firstLabel.frame = NSRect(x: 0, y: 96, width: 420, height: 18)
+        confirmationLabel.frame = NSRect(x: 0, y: 38, width: 420, height: 18)
         firstField.placeholderString = fieldLabel
         confirmationField.placeholderString = "Confirm \(fieldLabel.lowercased())"
-        firstField.widthAnchor.constraint(equalToConstant: 320).isActive = true
-        confirmationField.widthAnchor.constraint(equalToConstant: 320).isActive = true
-
-        let fields = NSStackView(views: [
-            NSTextField(labelWithString: fieldLabel),
-            firstField,
-            NSTextField(labelWithString: "Confirm \(fieldLabel.lowercased())"),
-            confirmationField,
-        ])
-        fields.orientation = .vertical
-        fields.alignment = .leading
-        fields.spacing = 6
-        alert.accessoryView = fields
+        accessory.addSubview(firstLabel)
+        accessory.addSubview(firstField)
+        accessory.addSubview(confirmationLabel)
+        accessory.addSubview(confirmationField)
+        alert.accessoryView = accessory
+        alert.window.recalculateKeyViewLoop()
+        firstField.nextKeyView = confirmationField
+        confirmationField.nextKeyView = alert.buttons.first
         alert.window.initialFirstResponder = firstField
         guard alert.runModal() == .alertFirstButtonReturn else { throw InstallerAppError.cancelled }
 
