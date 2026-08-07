@@ -15,8 +15,21 @@ package final class KeychainCredentialStore: CredentialStore {
         .totpSeed: "gp-vpn-totp",
     ]
 
-    init() {
+    private let additionalTrustedApplicationPath: String?
+
+    package init(additionalTrustedApplicationPath: String? = nil) {
+        self.additionalTrustedApplicationPath = additionalTrustedApplicationPath
         precondition(Set(Self.services.keys) == Set(CredentialKey.allCases))
+    }
+
+
+    package func contains(_ key: CredentialKey) throws -> Bool {
+        var query = baseQuery(for: key)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        if status == errSecItemNotFound { return false }
+        guard status == errSecSuccess else { throw AdapterError.keychainFailure }
+        return true
     }
 
     package func read(_ key: CredentialKey) throws -> String? {
@@ -36,7 +49,7 @@ package final class KeychainCredentialStore: CredentialStore {
     package func write(_ value: String, for key: CredentialKey) throws {
         guard let data = value.data(using: .utf8) else { throw AdapterError.keychainFailure }
         let query = baseQuery(for: key)
-        let access = try KeychainCredentialAccessFactory.make()
+        let access = try KeychainCredentialAccessFactory.make(additionalTrustedApplicationPath: additionalTrustedApplicationPath)
         let attributes: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccess as String: access,
@@ -73,9 +86,14 @@ package final class KeychainCredentialStore: CredentialStore {
 }
 
 package enum KeychainCredentialAccessFactory {
-    package static func make() throws -> SecAccess {
+    package static func make(additionalTrustedApplicationPath: String? = nil) throws -> SecAccess {
         var unmanagedAccess: Unmanaged<SecAccess>?
-        let status = HYUVPNCreateCredentialAccess(&unmanagedAccess)
+        let status: OSStatus
+        if let additionalTrustedApplicationPath {
+            status = additionalTrustedApplicationPath.withCString { HYUVPNCreateCredentialAccessWithPath($0, &unmanagedAccess) }
+        } else {
+            status = HYUVPNCreateCredentialAccess(&unmanagedAccess)
+        }
         guard status == errSecSuccess, let access = unmanagedAccess?.takeRetainedValue() else { throw KeychainCredentialStore.AdapterError.keychainFailure }
         return access
     }

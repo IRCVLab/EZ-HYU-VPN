@@ -53,11 +53,14 @@ SOURCE_COMPLIANCE_BUNDLE_SEMANTICS = "canonical-pre-rewrite-pre-sign"
 SOURCE_COMPLIANCE_BUNDLE_SCOPE = "third-party-runtime-corresponding-source-only"
 GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
+INSTALLER_APP_REL = "Install HYU VPN.app"
+INSTALLER_EXEC_REL = "Install HYU VPN.app/Contents/MacOS/HYUVPNInstallerApp"
+
 REQUIRED_PAYLOAD_FILES = {
     "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
     "HYU VPN.app/Contents/Info.plist",
-    "Install HYU VPN.command",
-    "Uninstall HYU VPN.command",
+    INSTALLER_EXEC_REL,
+    "Install HYU VPN.app/Contents/Info.plist",
     "README-lab.md",
     "installer/install.sh",
     "installer/uninstall.sh",
@@ -79,6 +82,7 @@ REQUIRED_PAYLOAD_FILES = {
     "SOURCE-OFFER.txt",
 } | REQUIRED_SOURCE_MODULES
 APP_BUNDLE_REL = "HYU VPN.app"
+APP_BUNDLE_RELS = [APP_BUNDLE_REL, INSTALLER_APP_REL]
 OPTIONAL_APP_SIGNATURE_FILES = {
     "HYU VPN.app/Contents/_CodeSignature/CodeResources",
 }
@@ -648,6 +652,7 @@ def assemble_payload_from_repo(
     helper_executable: Path,
     wrapperd_executable: Path,
     menu_app: Path,
+    installer_app: Path,
     vpnc_script: Path,
     source_compliance_bundle: Path | None = None,
     closure_runner: ToolRunner | None = None,
@@ -661,6 +666,7 @@ def assemble_payload_from_repo(
     for required_input in [openconnect, oathtool, helper_executable, wrapperd_executable, vpnc_script]:
         _require_regular_file(required_input)
     _prewalk_regular_tree(Path(menu_app), "menu_app")
+    _prewalk_regular_tree(Path(installer_app), "installer_app")
     _prewalk_regular_tree(repo_root / "src/hyu_vpn", "src/hyu_vpn")
     def copy_file_rel(src: Path, rel: str, mode: int) -> None:
         src = _require_regular_file(src)
@@ -670,8 +676,6 @@ def assemble_payload_from_repo(
         dst.chmod(mode)
     for rel in ["install.sh", "uninstall.sh", "root-admin.sh", "manifest.py"]:
         copy_file_rel(repo_root / "installer" / rel, f"installer/{rel}", 0o755 if rel.endswith(".sh") else 0o644)
-    for rel in ["Install HYU VPN.command", "Uninstall HYU VPN.command"]:
-        copy_file_rel(repo_root / "installer" / rel, rel, 0o755)
     for rel in ["com.hyu.vpn.service.plist.in"]:
         copy_file_rel(repo_root / "launchd" / rel, f"launchd/{rel}", 0o644)
     for rel in ["hyu-vpn-control", "hyu-vpn-service", "hyu-vpn-connect", "hyu-vpn-native-client"]:
@@ -681,7 +685,8 @@ def assemble_payload_from_repo(
     copy_file_rel(wrapperd_executable, "runtime/vpnc/hyu-vpnc-wrapperd", 0o755)
     copy_file_rel(vpnc_script, "runtime/vpnc/vpnc-script", 0o755)
     copy_file_rel(helper_executable, "com.hyu.vpn.helper", 0o755)
-    shutil.copytree(menu_app, payload_root / "HYU VPN.app", symlinks=False)
+    shutil.copytree(menu_app, payload_root / APP_BUNDLE_REL, symlinks=False)
+    shutil.copytree(installer_app, payload_root / INSTALLER_APP_REL, symlinks=False)
     shutil.copytree(repo_root / "src/hyu_vpn", payload_root / "src/hyu_vpn", symlinks=False)
     for item in (payload_root / "src/hyu_vpn").rglob("*"):
         if item.is_file():
@@ -874,6 +879,7 @@ def mach_o_payload_files(stage_dir: Path) -> List[str]:
         "runtime/vpnc/hyu-vpnc-wrapperd",
         "com.hyu.vpn.helper",
         "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+        INSTALLER_EXEC_REL,
     ]
     seen: set[str] = set()
     for rel in preferred:
@@ -933,6 +939,8 @@ class ReleaseBuilder:
             "signing": "ad-hoc",
             "notarized": False,
             "distribution": "internal-lab",
+            "installer_ux": "native-gui-no-terminal",
+            "administrator_authorization": "macos-ui-once",
             "manifest": MANIFEST_NAME,
             "python_runtime_contract": "fixed-system-python-prerequisite",
             "prerequisites": {"python3": PYTHON_PREREQUISITE},
@@ -956,9 +964,10 @@ class ReleaseBuilder:
         for rel in macho_rels:
             self.toolchain.sign(stage_dir, rel)
             self.toolchain.verify_signature(stage_dir, rel)
-        self.toolchain.sign(stage_dir, APP_BUNDLE_REL)
-        self.toolchain.verify_signature(stage_dir, APP_BUNDLE_REL)
-        self.toolchain.verify_signature(stage_dir, APP_BUNDLE_REL + ":deep-strict")
+        for app_rel in APP_BUNDLE_RELS:
+            self.toolchain.sign(stage_dir, app_rel)
+            self.toolchain.verify_signature(stage_dir, app_rel)
+            self.toolchain.verify_signature(stage_dir, app_rel + ":deep-strict")
         if has_source_bundle:
             write_final_runtime_binding(stage_dir / SOURCE_COMPLIANCE_BUNDLE, stage_dir)
 

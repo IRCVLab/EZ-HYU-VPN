@@ -41,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--helper-executable", type=Path)
     parser.add_argument("--wrapperd-executable", type=Path)
     parser.add_argument("--menu-app", type=Path)
+    parser.add_argument("--installer-app", type=Path)
     parser.add_argument("--source-compliance-bundle", type=Path)
     parser.add_argument("--build-root", required=True, type=Path, help="Fresh explicit build root")
     parser.add_argument("--output-root", required=True, type=Path, help="Fresh explicit output root")
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source_payload = args.source_payload
         if args.assemble_from_repo:
-            missing = [name for name in ["openconnect", "oathtool", "vpnc_script", "helper_executable", "wrapperd_executable", "menu_app"] if getattr(args, name) is None]
+            missing = [name for name in ["openconnect", "oathtool", "vpnc_script", "helper_executable", "wrapperd_executable", "menu_app", "installer_app"] if getattr(args, name) is None]
             if missing:
                 raise PackagingError(f"missing assemble inputs: {', '.join(missing)}")
             source_payload = assemble_payload_from_repo(
@@ -63,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
                 helper_executable=args.helper_executable,
                 wrapperd_executable=args.wrapperd_executable,
                 menu_app=args.menu_app,
+                installer_app=args.installer_app,
                 source_compliance_bundle=args.source_compliance_bundle,
             )
         if source_payload is None:

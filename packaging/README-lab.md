@@ -1,36 +1,35 @@
-# HYU VPN internal lab install notes
+# HYU VPN internal lab installer
 
-This ad-hoc-signed build is only for the named internal lab. It is not notarized and is not ready for public distribution.
+For named internal lab users only. The DMG is a native GUI distribution; normal users do not run Terminal commands.
 
-## Current safety contract
+## Install from the DMG
 
-- This package uses the fixed system interpreter `/usr/bin/python3` for Python backend/native/HIP entrypoints. The installer must fail before sudo if `/usr/bin/python3` is absent or not executable; it must not fall back to PATH or Homebrew Python.
+1. Open the DMG.
+2. Double-click **Install HYU VPN.app**.
+3. Keep the installer progress window open while it verifies the package and prepares the payload.
+4. If credentials are missing, enter them in the GUI:
+   - HYU ID once.
+   - HYU VPN password twice.
+   - TOTP authenticator setup secret twice; do not enter the current 6-digit OTP code.
+5. Approve the single macOS administrator authorization dialog.
 
-- `Install HYU VPN.command` defaults to package audit only. Audit verifies the embedded manifest and exits without sudo, LaunchAgent bootstrap, Keychain writes, route/DNS changes, or VPN connection attempts.
-- A real install requires the explicit `--live-install` option. The user phase generates a fresh one-shot nonce internally, verifies the payload, stages runtime artifacts in a temporary directory, and collects credentials before sudo; nonce values are not accepted from the environment or files.
-- Credentials are written to the exact connector Keychain services: `gp-vpn-username`, `gp-vpn-password`, and `gp-vpn-totp`. Password/TOTP prompts use `/usr/bin/security ... -w`; secrets are not placed in argv, env, logs, or installer files.
-- The root phase accepts only fixed options. It rejects duplicate options and live use of dry-run/test controls.
-- The known unsafe legacy LaunchAgent label `local.hyu-openconnect` is quarantined by exact-label bootout/disable and is never re-enabled by rollback or uninstall.
-- LaunchAgents use `RunAtLoad=true` and `KeepAlive=false`. After the root transaction succeeds, the user activation phase first writes `auto-reconnect=false`, then bootstraps and kickstarts the service/menu. The service therefore starts idle and cannot launch OpenConnect until the user explicitly chooses Connect or later enables automatic reconnect.
-- Root helper config uses the exact eight-key Swift contract, with `vpncScript` pointing to the HYU ledger wrapper and wrapperd integrity stored separately in `runtime/vpnc/hyu-vpnc-wrapperd.sha256`.
-- Connector config is installed as root-owned mode-0644 `connector-config.json` and points to fixed `/Library/Application Support/HYU VPN/runtime/current/bin/oathtool` with a lowercase SHA-256 hash; installed connector execution must not fall back to Homebrew.
-- The staged runtime includes the Python backend source tree, backend entrypoints, HIP wrapper, fixed native-client CLI, oathtool, OpenConnect closure, ledger wrapper/wrapperd, and upstream `vpnc-script`.
-- The installer and uninstaller never delete or rewrite macOS SystemConfiguration network preference files.
+Existing HYU VPN Keychain credentials are retained. Missing credentials are collected in memory before elevation and written after the root install succeeds using the Security.framework Keychain path with ACL entries for the installer, `/usr/bin/security`, and the installed menu executable.
 
-## Installed launch entries
+## What the installer does
 
-- Service LaunchAgent executes `/Library/Application Support/HYU VPN/bin/hyu-vpn-service`; it loads at login without KeepAlive and starts idle while `auto-reconnect=false`.
-- Menu LaunchAgent executes `/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp`; it loads at login without KeepAlive.
+The native app uses the fixed system Python prerequisite `/usr/bin/python3` to verify `manifest.json`, stages the immutable payload, and then runs the existing transactional `installer/root-admin.sh` root phase once through the macOS administrator authorization UI. The shell scripts under `installer/` are implementation details for the app and are not user-facing launchers.
 
-## Remaining live gate
+After the root transaction succeeds, the user phase writes auto-reconnect enabled, bootstraps/kickstarts the per-user service, stops any older menu process with bounded TERM/KILL fallback, opens `/Applications/HYU VPN.app`, and waits for exactly one menu process. Normal connect, reconnect, and disconnect operations use the installed helper/sudoers setup and should not request the Mac administrator password.
 
-Offline packaging review, Swift helper/menu harnesses, and read-only DMG validation are complete. Before wider lab use, perform one explicit sudo/live migration run on this Mac with the old `local.hyu-openconnect` job already disabled, then repeat the acceptance run on a clean secondary lab Mac.
+## Release evidence
 
-## Task8 packaging contract
+Each release includes:
 
-- The DMG root is verified by one canonical `manifest.json` with `{schema:1, files:{rel:{sha256,mode,size}}}`. `config/final-runtime-manifest.json` is intentionally not emitted by Task8; Task7 must rely on the canonical package/stage manifest instead.
-- Runtime payload paths are `runtime/openconnect/bin/openconnect`, `runtime/openconnect/lib/*.dylib`, `runtime/oathtool`, `runtime/gp-hip-report`, and `runtime/vpnc/*`. During Task7 staging, OpenConnect and oathtool must live next to `runtime/lib` as `runtime/bin/*` so `@loader_path/../lib` remains valid.
-- Real non-fake release builds require `SOURCE-COMPLIANCE-BUNDLE.tar.gz` in the package root and listed in `manifest.json`. When using `scripts/package-release.py --assemble-from-repo`, provide it with `--source-compliance-bundle`; direct `--source-payload` mode must already contain the same regular non-symlink bundle. Fake tests do not require this artifact.
-- The source bundle describes canonical pre-rewrite/pre-sign runtime provenance. After install-name rewriting and ad-hoc signing, the packager writes manifested `FINAL-RUNTIME-BINDING.json`, which binds the source-bundle hash and every canonical runtime path/hash/size to the corresponding final shipped path/hash/size. Read-only mounted validation recomputes and verifies this binding.
-- DMG bit-for-bit reproducibility is not claimed or supported; the manifest and payload validation are deterministic.
-- Live install still requires explicit `--live-install`; package audit mode performs no sudo, route/DNS, VPN, Keychain, or launchctl mutation.
+- `manifest.json` for deterministic payload verification.
+- `release-metadata.json` with `installer_ux=native-gui-no-terminal` and `administrator_authorization=macos-ui-once`.
+- `FINAL-RUNTIME-BINDING.json` when the source compliance bundle is present; it binds canonical pre-rewrite/pre-sign runtime artifacts to the final ad-hoc-signed payload.
+- `THIRD_PARTY_NOTICES.txt` and `SOURCE-OFFER.txt` for bundled runtime components.
+
+## Internal implementation notes
+
+`installer/install.sh`, `installer/uninstall.sh`, and `installer/root-admin.sh` remain packaged for manifest verification, root transaction reuse, recovery, and internal diagnostics. They are not the DMG entry point for lab users.

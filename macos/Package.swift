@@ -14,6 +14,9 @@ let package = Package(
         .library(name: "HYUVPNMenuCore", targets: ["HYUVPNMenuCore"]),
         .executable(name: "HYUVPNMenuApp", targets: ["HYUVPNMenuApp"]),
         .executable(name: "hyu-vpn-menu-harness", targets: ["HYUVPNMenuAppTestHarness"]),
+        .library(name: "HYUVPNInstallerCore", targets: ["HYUVPNInstallerCore"]),
+        .executable(name: "HYUVPNInstallerApp", targets: ["HYUVPNInstallerApp"]),
+        .executable(name: "hyu-vpn-installer-harness", targets: ["HYUVPNInstallerHarness"]),
     ],
     targets: [
         .target(
@@ -61,11 +64,33 @@ let package = Package(
             sources: ["main.swift", "AppDelegate.swift"],
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
         ),
+        .target(
+            name: "HYUVPNInstallerCore",
+            dependencies: ["HYUVPNMenuCore"],
+            swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
+        ),
+        .executableTarget(
+            name: "HYUVPNInstallerApp",
+            dependencies: ["HYUVPNMenuCore", "HYUVPNMenuAppSupport", "HYUVPNInstallerCore"],
+            swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
+        ),
         .executableTarget(
             name: "HYUVPNMenuAppTestHarness",
             dependencies: ["HYUVPNMenuCore", "HYUVPNMenuAppSupport"],
             path: "Tests/HYUVPNMenuAppTestHarness",
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
+        ),
+        .executableTarget(
+            name: "HYUVPNInstallerHarness",
+            dependencies: ["HYUVPNInstallerCore"],
+            path: "Tests/HYUVPNInstallerHarness",
+            swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
+        ),
+        .testTarget(
+            name: "HYUVPNInstallerCoreTests",
+            dependencies: ["HYUVPNInstallerCore"],
+            swiftSettings: [.unsafeFlags(["-F", frameworkPath, "-warnings-as-errors"])],
+            linkerSettings: [.unsafeFlags(["-F", frameworkPath, "-Xlinker", "-rpath", "-Xlinker", frameworkPath, "-Xlinker", "-rpath", "-Xlinker", interopPath])]
         ),
         .testTarget(
             name: "HYUVPNMenuAppTests",
