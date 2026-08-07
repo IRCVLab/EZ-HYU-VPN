@@ -401,6 +401,10 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertNotIn("Install HYU VPN.command", source)
         self.assertNotIn("InstallerError.commandFailed(output", source)
         self.assertNotIn("String(data:", source)
+        self.assertIn("Installed with menu-start warning", source)
+        self.assertIn("Open /Applications/HYU VPN.app manually", source)
+        self.assertIn("ACTIVATION_FAILED_CREDENTIAL_CLEANUP_INCOMPLETE", source)
+        self.assertIn("bestEffortDeactivateUserService", source)
         self.assertNotIn("standardError = pipe", source)
         self.assertNotIn("private func validateUsername", source)
         self.assertNotIn("private func validatePassword", source)
@@ -503,6 +507,10 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertIn("0600", source)
         self.assertNotIn("standardError = pipe", source)
         self.assertNotIn("String(data:", source)
+        self.assertIn("Installed with menu-start warning", source)
+        self.assertIn("Open /Applications/HYU VPN.app manually", source)
+        self.assertIn("ACTIVATION_FAILED_CREDENTIAL_CLEANUP_INCOMPLETE", source)
+        self.assertIn("bestEffortDeactivateUserService", source)
 
     def test_signed_menu_app_code_resources_is_allowed_and_manifested(self):
         src = self.make_payload_source()

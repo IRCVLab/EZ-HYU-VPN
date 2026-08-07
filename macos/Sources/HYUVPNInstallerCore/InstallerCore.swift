@@ -22,6 +22,22 @@ package protocol InstallerCredentialStoring: AnyObject {
     func remove(_ key: CredentialKey) throws
 }
 
+package enum CredentialCleanupResult: Equatable, Sendable { case complete, incomplete }
+
+package enum InstallerActivationDisposition: Equatable, Sendable {
+    case installedWithMenuStartWarning(code: String)
+    case fatalCleanupCredentials(code: String)
+}
+
+package enum InstallerActivationPolicy {
+    package static func classify(serviceStarted: Bool, failedCode: String) -> InstallerActivationDisposition {
+        if serviceStarted && ["OLD_MENU_TERM_FAILED", "OLD_MENU_KILL_FAILED", "OLD_MENU_STOP_TIMEOUT", "MENU_OPEN_FAILED", "MENU_SINGLE_PROCESS_FAILED"].contains(failedCode) {
+            return .installedWithMenuStartWarning(code: failedCode)
+        }
+        return .fatalCleanupCredentials(code: failedCode)
+    }
+}
+
 package enum InstallerCredentialBootstrapper {
     private static let validFallbackUsername = "hyu-user"
     private static let validFallbackPassword = "hyu-password"
@@ -61,8 +77,12 @@ package enum InstallerCredentialBootstrapper {
         }
     }
 
-    package static func cleanupWrittenCredentialsAfterActivationFailure(store: InstallerCredentialStoring, writtenKeys: [CredentialKey]) throws {
-        for key in writtenKeys { try store.remove(key) }
+    package static func cleanupWrittenCredentialsAfterActivationFailure(store: InstallerCredentialStoring, writtenKeys: [CredentialKey]) -> CredentialCleanupResult {
+        var complete = true
+        for key in writtenKeys {
+            do { try store.remove(key) } catch { complete = false }
+        }
+        return complete ? .complete : .incomplete
     }
 
     private static func validate(username: String, password: String, totpSeed: String) throws -> ValidatedCredentials {

@@ -70,11 +70,35 @@ private class MemoryCredentialStore: InstallerCredentialStoring {
 
     @Test func activationFailureCleanupRemovesOnlyNewlyWrittenCredentials() throws {
         let store = MemoryCredentialStore([.username: "existing-user", .password: "new-password", .totpSeed: "new-totp"])
-        try InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: store, writtenKeys: [CredentialKey.password, CredentialKey.totpSeed])
+        let cleanup = InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: store, writtenKeys: [CredentialKey.password, CredentialKey.totpSeed])
+        #expect(cleanup == .complete)
         #expect(store.values[.username] == "existing-user")
         #expect(store.values[.password] == nil)
         #expect(store.values[.totpSeed] == nil)
         #expect(store.removed == [.password, .totpSeed])
+    }
+
+
+    @Test func activationCleanupAttemptsEveryWrittenKeyAndReportsIncomplete() throws {
+        final class FailingFirstRemoveStore: MemoryCredentialStore {
+            override func remove(_ key: CredentialKey) throws {
+                removed.append(key)
+                if key == .password { throw InstallerCoreError.commandFailed(code: "REMOVE_FAILED") }
+                values.removeValue(forKey: key)
+            }
+        }
+        let store = FailingFirstRemoveStore([.username: "existing", .password: "new-password", .totpSeed: "new-totp"])
+        let result = InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: store, writtenKeys: [.password, .totpSeed])
+        #expect(result == .incomplete)
+        #expect(store.removed == [.password, .totpSeed])
+        #expect(store.values[.username] == "existing")
+        #expect(store.values[.totpSeed] == nil)
+    }
+
+    @Test func activationWarningKeepsCredentialsAfterServiceStartedButMenuStartFails() throws {
+        #expect(InstallerActivationPolicy.classify(serviceStarted: true, failedCode: "MENU_OPEN_FAILED") == .installedWithMenuStartWarning(code: "MENU_OPEN_FAILED"))
+        #expect(InstallerActivationPolicy.classify(serviceStarted: true, failedCode: "MENU_SINGLE_PROCESS_FAILED") == .installedWithMenuStartWarning(code: "MENU_SINGLE_PROCESS_FAILED"))
+        #expect(InstallerActivationPolicy.classify(serviceStarted: false, failedCode: "SERVICE_KICKSTART_FAILED") == .fatalCleanupCredentials(code: "SERVICE_KICKSTART_FAILED"))
     }
 
     @Test func privilegedArgvInjectsConsoleSudoIdentityAndNoSecrets() throws {

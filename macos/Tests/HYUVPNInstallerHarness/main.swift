@@ -63,10 +63,34 @@ private func writeRollbackOnlyNewKeys() throws {
 
 private func activationFailureCleanupOnlyWrittenKeys() throws {
     let store = MemoryCredentialStore([.username: "existing-user", .password: "new-password", .totpSeed: "new-totp"])
-    try InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: store, writtenKeys: [.password, .totpSeed])
+    let cleanup = InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: store, writtenKeys: [.password, .totpSeed])
+    try expect(cleanup == .complete, "activation cleanup complete")
     try expect(store.values[.username] == "existing-user", "activation cleanup keeps existing username")
     try expect(store.values[.password] == nil && store.values[.totpSeed] == nil, "activation cleanup removes written keys")
     try expect(store.removed == [.password, .totpSeed], "activation cleanup removes only written keys")
+}
+
+private final class FailingFirstRemoveStore: MemoryCredentialStore {
+    override func remove(_ key: CredentialKey) throws {
+        removed.append(key)
+        if key == .password { throw InstallerCoreError.commandFailed(code: "REMOVE_FAILED") }
+        values.removeValue(forKey: key)
+    }
+}
+
+private func cleanupIncompleteStillAttemptsLaterKeys() throws {
+    let store = FailingFirstRemoveStore([.username: "existing-user", .password: "new-password", .totpSeed: "new-totp"])
+    let cleanup = InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: store, writtenKeys: [.password, .totpSeed])
+    try expect(cleanup == .incomplete, "cleanup reports incomplete")
+    try expect(store.removed == [.password, .totpSeed], "cleanup attempts later keys after first failure")
+    try expect(store.values[.username] == "existing-user", "cleanup keeps existing key")
+    try expect(store.values[.totpSeed] == nil, "cleanup removed later key")
+}
+
+private func activationPolicyClassifiesMenuStartAsWarning() throws {
+    try expect(InstallerActivationPolicy.classify(serviceStarted: true, failedCode: "MENU_OPEN_FAILED") == .installedWithMenuStartWarning(code: "MENU_OPEN_FAILED"), "menu open is installed warning after service start")
+    try expect(InstallerActivationPolicy.classify(serviceStarted: true, failedCode: "MENU_SINGLE_PROCESS_FAILED") == .installedWithMenuStartWarning(code: "MENU_SINGLE_PROCESS_FAILED"), "single count is installed warning after service start")
+    try expect(InstallerActivationPolicy.classify(serviceStarted: false, failedCode: "SERVICE_KICKSTART_FAILED") == .fatalCleanupCredentials(code: "SERVICE_KICKSTART_FAILED"), "pre-service failure remains fatal")
 }
 
 private func privilegedArgvAndSingleAuthorization() throws {
@@ -90,6 +114,8 @@ do {
     try credentialCollectionUsesContainsAndValidator()
     try writeRollbackOnlyNewKeys()
     try activationFailureCleanupOnlyWrittenKeys()
+    try cleanupIncompleteStillAttemptsLaterKeys()
+    try activationPolicyClassifiesMenuStartAsWarning()
     try privilegedArgvAndSingleAuthorization()
     print("HARNESS PASS hyu-vpn-installer-harness")
 } catch {

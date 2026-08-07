@@ -19,8 +19,14 @@ final class HYUVPNInstallerApp: NSObject, NSApplicationDelegate {
         app.activate(ignoringOtherApps: true)
         let progress = showProgressWindow()
         do {
-            try InstallerController(bundleURL: Bundle.main.bundleURL, status: progress).runInstall()
-            showAlert(title: "HYU VPN Installed", message: "HYU VPN was installed successfully. You can connect from the menu bar app without another administrator password.", style: .informational)
+            let result = try InstallerController(bundleURL: Bundle.main.bundleURL, status: progress).runInstall()
+            switch result {
+            case .installed:
+                showAlert(title: "HYU VPN Installed", message: "HYU VPN was installed successfully. You can connect from the menu bar app without another administrator password.", style: .informational)
+            case .installedWithMenuStartWarning(let code):
+                appendInstallerLog(operationCode: code)
+                showAlert(title: "HYU VPN Installed", message: "Installed with menu-start warning. Open /Applications/HYU VPN.app manually. Operation code: \(code)\nDiagnostics: \(installerLogDisplayPath)", style: .warning)
+            }
             app.terminate(nil)
         } catch {
             let code = sanitizedOperationCode(for: error)
@@ -110,6 +116,16 @@ enum InstallerAppError: Error, CustomStringConvertible {
     }
 }
 
+enum InstallerRunResult: Equatable {
+    case installed
+    case installedWithMenuStartWarning(code: String)
+}
+
+enum UserActivationResult: Equatable {
+    case active
+    case menuStartWarning(code: String)
+}
+
 @MainActor
 struct InstallerController {
     let bundleURL: URL
@@ -117,7 +133,7 @@ struct InstallerController {
     private var payloadURL: URL { bundleURL.deletingLastPathComponent() }
     private let credentialReader = InstallerKeychainStore()
 
-    func runInstall() throws {
+    func runInstall() throws -> InstallerRunResult {
         status("Preparing HYU VPN installer…")
         let payload = payloadURL.path
         let manifest = payloadURL.appendingPathComponent("manifest.json").path
@@ -159,9 +175,15 @@ struct InstallerController {
         let writtenKeys = try InstallerCredentialBootstrapper.writeCollectedCredentials(store: credentialWriter, collected: missingCredentialValues)
         do {
             status("Starting HYU VPN menu app…")
-            try activateUserSession()
+            switch try activateUserSession() {
+            case .active:
+                return .installed
+            case .menuStartWarning(let code):
+                return .installedWithMenuStartWarning(code: code)
+            }
         } catch {
-            try? InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: credentialWriter, writtenKeys: writtenKeys)
+            let cleanup = InstallerCredentialBootstrapper.cleanupWrittenCredentialsAfterActivationFailure(store: credentialWriter, writtenKeys: writtenKeys)
+            if cleanup == .incomplete { throw InstallerCoreError.commandFailed(code: "ACTIVATION_FAILED_CREDENTIAL_CLEANUP_INCOMPLETE") }
             throw error
         }
     }
@@ -179,19 +201,44 @@ struct InstallerController {
         }
     }
 
-    private func activateUserSession() throws {
+    private func activateUserSession() throws -> UserActivationResult {
         let uid = String(getuid())
         let prefPath = NSHomeDirectory() + "/Library/Application Support/hyu-openconnect/auto-reconnect.json"
-        try run(["/usr/bin/python3", "-I", "-c", "import sys; sys.path.insert(0,\"/Library/Application Support/HYU VPN/src\"); from hyu_vpn.control import AutoReconnectPreference; AutoReconnectPreference(sys.argv[1], owner_uid=int(sys.argv[2])).write(True)", prefPath, uid], code: "AUTO_RECONNECT_PREF_FAILED")
         let servicePlist = NSHomeDirectory() + "/Library/LaunchAgents/com.hyu.vpn.service.plist"
-        try requireFile(servicePlist, label: "installed service LaunchAgent")
-        try run(["/bin/launchctl", "bootstrap", "gui/\(uid)", servicePlist], code: "SERVICE_BOOTSTRAP_FAILED", allowFailure: true)
-        try run(["/bin/launchctl", "kickstart", "-k", "gui/\(uid)/com.hyu.vpn.service"], code: "SERVICE_KICKSTART_FAILED")
-        try stopExistingMenubar(uid: uid)
-        try run(["/usr/bin/open", "-gj", "-a", "/Applications/HYU VPN.app"], code: "MENU_OPEN_FAILED")
-        guard waitForSingleMenubar(uid: uid) else { throw InstallerCoreError.commandFailed(code: "MENU_SINGLE_PROCESS_FAILED") }
+        do {
+            try run(["/usr/bin/python3", "-I", "-c", "import sys; sys.path.insert(0,\"/Library/Application Support/HYU VPN/src\"); from hyu_vpn.control import AutoReconnectPreference; AutoReconnectPreference(sys.argv[1], owner_uid=int(sys.argv[2])).write(True)", prefPath, uid], code: "AUTO_RECONNECT_PREF_FAILED")
+            try requireFile(servicePlist, label: "installed service LaunchAgent")
+            try run(["/bin/launchctl", "bootstrap", "gui/\(uid)", servicePlist], code: "SERVICE_BOOTSTRAP_FAILED", allowFailure: true)
+            try run(["/bin/launchctl", "kickstart", "-k", "gui/\(uid)/com.hyu.vpn.service"], code: "SERVICE_KICKSTART_FAILED")
+        } catch {
+            bestEffortDeactivateUserService(uid: uid, prefPath: prefPath, servicePlist: servicePlist)
+            throw error
+        }
+        do {
+            try stopExistingMenubar(uid: uid)
+            try run(["/usr/bin/open", "-gj", "-a", "/Applications/HYU VPN.app"], code: "MENU_OPEN_FAILED")
+            guard waitForSingleMenubar(uid: uid) else { throw InstallerCoreError.commandFailed(code: "MENU_SINGLE_PROCESS_FAILED") }
+            return .active
+        } catch let error as InstallerCoreError {
+            let code = sanitizedCoreCode(error)
+            switch InstallerActivationPolicy.classify(serviceStarted: true, failedCode: code) {
+            case .installedWithMenuStartWarning(let warningCode): return .menuStartWarning(code: warningCode)
+            case .fatalCleanupCredentials: throw error
+            }
+        }
     }
 
+    private func sanitizedCoreCode(_ error: InstallerCoreError) -> String {
+        switch error {
+        case .invalidInput(let code), .commandFailed(let code): return code
+        case .rootAuthorizationOrTransactionFailed: return "INSTALL_FAILED_ROOT_AUTHORIZATION_OR_TRANSACTION"
+        }
+    }
+
+    private func bestEffortDeactivateUserService(uid: String, prefPath: String, servicePlist: String) {
+        try? run(["/usr/bin/python3", "-I", "-c", "import sys; sys.path.insert(0,\"/Library/Application Support/HYU VPN/src\"); from hyu_vpn.control import AutoReconnectPreference; AutoReconnectPreference(sys.argv[1], owner_uid=int(sys.argv[2])).write(False)", prefPath, uid], code: "AUTO_RECONNECT_RESTORE_FAILED", allowFailure: true)
+        try? run(["/bin/launchctl", "bootout", "gui/\(uid)", servicePlist], code: "SERVICE_BOOTOUT_FAILED", allowFailure: true)
+    }
 
     private func stopExistingMenubar(uid: String) throws {
         try run(["/usr/bin/pkill", "-TERM", "-u", uid, "-x", "HYUVPNMenuApp"], code: "OLD_MENU_TERM_FAILED", allowFailure: true)
