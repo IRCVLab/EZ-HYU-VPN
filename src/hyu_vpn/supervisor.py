@@ -226,6 +226,10 @@ class Supervisor:
                 return True, None
             if command == "connect":
                 self._connector_failure_code = None
+                automatic_was_enabled = self.preference.read(default=False)
+                if automatic_was_enabled:
+                    self._write_current_status(state=self._status.state, automatic=True)
+                    return True, None
                 self.preference.write(True)
                 if self._child is None or self._child.poll() is not None:
                     self._write_current_status(state="connecting", automatic=True)
@@ -466,8 +470,12 @@ class Supervisor:
                     continue
                 if self.readiness is not None:
                     self._write_current_status(state="waiting-for-network", automatic=True)
-                    if not self.readiness.wait_until_ready(stop_requested=lambda: self._stop_requested):
-                        break
+                    if not self.readiness.wait_until_ready(stop_requested=self._network_readiness_stop_requested):
+                        if self._stop_requested:
+                            break
+                        if self.preference.read(default=False):
+                            break
+                        continue
                 if self._stop_requested or not self.preference.read(default=False):
                     continue
 
@@ -799,6 +807,9 @@ class Supervisor:
             return
         self._control_event.wait(delay)
         self._control_event.clear()
+
+    def _network_readiness_stop_requested(self) -> bool:
+        return self._stop_requested or not self.preference.read(default=False)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

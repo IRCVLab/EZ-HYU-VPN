@@ -299,6 +299,87 @@ class SupervisorLoopTests(unittest.TestCase):
             self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
             self.assertTrue(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
 
+    def test_idempotent_connect_when_automatic_already_enabled_preserves_backoff_without_wake(self):
+        with tempfile.TemporaryDirectory() as td:
+            pref_path = Path(td) / "auto.json"
+            status_path = Path(td) / "status.json"
+            enable_auto_reconnect(pref_path)
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+            retry_at = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+            supervisor._write_current_status(state="backoff", automatic=True, next_retry_at=retry_at)
+
+            class RecordingControlEvent:
+                def __init__(self):
+                    self.set_calls = 0
+
+                def set(self):
+                    self.set_calls += 1
+
+                def wait(self, timeout=None):
+                    return False
+
+                def clear(self):
+                    pass
+
+            event = RecordingControlEvent()
+            supervisor._control_event = event
+
+            self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(event.set_calls, 0)
+            self.assertEqual(status.state, "backoff")
+            self.assertTrue(status.automatic_reconnect_enabled)
+            self.assertEqual(status.next_retry_at, retry_at)
+
+    def test_connect_when_automatic_disabled_enables_and_wakes_supervisor(self):
+        with tempfile.TemporaryDirectory() as td:
+            pref_path = Path(td) / "auto.json"
+            status_path = Path(td) / "status.json"
+            AutoReconnectPreference(pref_path).write(False)
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+
+            class RecordingControlEvent:
+                def __init__(self):
+                    self.set_calls = 0
+
+                def set(self):
+                    self.set_calls += 1
+
+                def wait(self, timeout=None):
+                    return False
+
+                def clear(self):
+                    pass
+
+            event = RecordingControlEvent()
+            supervisor._control_event = event
+
+            self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(event.set_calls, 1)
+            self.assertEqual(status.state, "connecting")
+            self.assertTrue(status.automatic_reconnect_enabled)
+
     def test_polls_native_conflict_with_sleep_and_starts_only_after_clear(self):
         clock = FakeClock()
         conflicts = iter([True, True, False])
@@ -377,7 +458,7 @@ class SupervisorLoopTests(unittest.TestCase):
         self.assertEqual(clock.sleeps, [10, 20])
 
 
-    def test_backoff_wait_wakes_for_connect_command_without_remaining_delay(self):
+    def test_backoff_wait_wakes_for_reconnect_command_without_remaining_delay(self):
         with tempfile.TemporaryDirectory() as td:
             socket_path = Path(td) / "control.sock"
             status_path = Path(td) / "status.json"
@@ -396,6 +477,7 @@ class SupervisorLoopTests(unittest.TestCase):
                 ),
                 conflict_detector=mock.Mock(conflict_active=lambda: False),
                 popen_factory=lambda *_args, **_kwargs: starts.append(time.monotonic()) or processes.pop(0),
+                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, "", ""),
             )
             run_thread = threading.Thread(target=supervisor.run)
             run_thread.start()
@@ -411,7 +493,7 @@ class SupervisorLoopTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(read_status(status_path).state, "backoff")
 
-            self.assertEqual(send_control_command(socket_path, "connect"), {"schema_version": 1, "ok": True, "error_code": None})
+            self.assertEqual(send_control_command(socket_path, "reconnect"), {"schema_version": 1, "ok": True, "error_code": None})
             run_thread.join(timeout=2)
 
             self.assertFalse(run_thread.is_alive())
@@ -632,6 +714,80 @@ class SupervisorLoopTests(unittest.TestCase):
 
         self.assertEqual(supervisor.run(), 0)
         popen.assert_not_called()
+
+    def test_disconnect_interrupts_offline_readiness_and_service_settles_disabled_without_launch(self):
+        with tempfile.TemporaryDirectory() as td:
+            pref_path = Path(td) / "auto.json"
+            status_path = Path(td) / "status.json"
+            enable_auto_reconnect(pref_path)
+            starts = []
+            allow_readiness_check = threading.Event()
+            disabled_wait_entered = threading.Event()
+            release_disabled_wait = threading.Event()
+
+            class OfflineReadiness:
+                def __init__(self):
+                    self.entered = threading.Event()
+                    self.stop_values = []
+
+                def wait_until_ready(self, *, stop_requested=None):
+                    self.entered.set()
+                    allow_readiness_check.wait(2)
+                    value = stop_requested()
+                    self.stop_values.append(value)
+                    return False
+
+            readiness = OfflineReadiness()
+
+            supervisor = None
+
+            def observed_sleep(_delay):
+                from hyu_vpn.status import read_status
+
+                status = read_status(status_path)
+                if status.state == "disabled" and not status.automatic_reconnect_enabled:
+                    disabled_wait_entered.set()
+                release_disabled_wait.wait(2)
+                supervisor._stop_requested = True
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    lock_path=str(Path(td) / "lock"),
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                    helper_path="/helper",
+                    conflict_poll_interval=30,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                readiness=readiness,
+                popen_factory=lambda argv, **kwargs: starts.append(argv) or FakeProcess(returncode=0),
+                command_runner=lambda argv, timeout: CommandResult(tuple(argv), 0, "", ""),
+                sleep=observed_sleep,
+            )
+
+            run_result = []
+            run_thread = threading.Thread(target=lambda: run_result.append(supervisor.run()))
+            run_thread.start()
+            self.assertTrue(readiness.entered.wait(2), "supervisor did not enter offline readiness")
+
+            self.assertEqual(supervisor.handle_control_command("disconnect"), (True, None))
+            allow_readiness_check.set()
+            self.assertTrue(disabled_wait_entered.wait(2), "service did not settle into disabled wait")
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(readiness.stop_values, [True])
+            self.assertEqual(status.state, "disabled")
+            self.assertFalse(status.automatic_reconnect_enabled)
+            self.assertEqual(starts, [])
+            self.assertTrue(run_thread.is_alive())
+
+            release_disabled_wait.set()
+            run_thread.join(timeout=2)
+            self.assertFalse(run_thread.is_alive())
+            self.assertEqual(run_result, [0])
 
     def test_existing_lock_causes_safe_failure_and_lock_file_is_mode_0600(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1303,6 +1459,8 @@ class SupervisorControlTests(unittest.TestCase):
                 '{"schema_version":1,"event":"connected","timestamp":"2026-08-04T12:01:00Z","tunnel_interface":"utun7"}'
             )
 
+            AutoReconnectPreference(pref_path).write(False)
+            supervisor._write_current_status(automatic=False)
             supervisor.handle_control_command("connect")
 
             from hyu_vpn.status import read_status
