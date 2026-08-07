@@ -43,12 +43,14 @@ public protocol NetworkTooling {
     func restoreDNSServers(serviceID: String, snapshot: ResolverSnapshot) throws
     func restoreSearchDomains(serviceID: String, snapshot: ResolverSnapshot) throws
     func restoreResolverSurfaces(serviceID: String, snapshot: ResolverSnapshot, current: ResolverSnapshot) throws
+    func waitForNetworkIdentityResample()
 }
 
 public extension NetworkTooling {
     func restoreDNSServers(serviceID: String, snapshot: ResolverSnapshot) throws { try restoreResolver(serviceID: serviceID, snapshot: snapshot) }
     func restoreSearchDomains(serviceID: String, snapshot: ResolverSnapshot) throws { try restoreResolver(serviceID: serviceID, snapshot: snapshot) }
     func restoreResolverSurfaces(serviceID: String, snapshot: ResolverSnapshot, current: ResolverSnapshot) throws { try restoreResolver(serviceID: serviceID, snapshot: snapshot) }
+    func waitForNetworkIdentityResample() {}
 }
 
 public protocol VpncUpstreamRunning {
@@ -191,8 +193,14 @@ public struct SystemNetworkTools: NetworkTooling {
 
     public func primaryServiceID() throws -> String {
         let out = try checked(paths.scutil, [], stdin: "show State:/Network/Global/IPv4\n")
-        guard let service = firstMatch(out, pattern: #"PrimaryService\s*:\s*(\S+)"#), !service.isEmpty else { throw HelperError.processMismatch }
+        guard let service = firstMatch(out, pattern: #"PrimaryService\s*:\s*(\S+)"#),
+              service.range(of: #"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"#, options: .regularExpression) != nil
+        else { throw HelperError.processMismatch }
         return service
+    }
+
+    public func waitForNetworkIdentityResample() {
+        Thread.sleep(forTimeInterval: 0.1)
     }
 
     public func defaultRoute() throws -> RouteSnapshot {
@@ -596,6 +604,10 @@ public struct NetworkWrapperRunner {
         }
         var preflight = try snapshot(destinations: destinations, environment: snapshotEnvironment)
         if reason == "repair" {
+            if emptyBaselineRetirementSafe(ledger: ledger, current: preflight) {
+                try removeLedgerAndSyncDirectory(ledgerPath)
+                return
+            }
             if let staleRoutes = staleNetworkOwnedRouteCleanupPlan(ledger: ledger, current: preflight), !staleRoutes.isEmpty {
                 do {
                     for route in staleRoutes { try tools.deleteRoute(route) }
@@ -668,7 +680,10 @@ public struct NetworkWrapperRunner {
 
     private func makeBaseline(nonce: String, destinations: [(String, String)], tunnelInterface: String? = nil) throws -> NetworkLedger {
         let snapshotEnvironment = tunnelInterface.map { ["TUNDEV": $0] } ?? [:]
+        let first = try snapshot(destinations: destinations, environment: snapshotEnvironment)
+        tools.waitForNetworkIdentityResample()
         let before = try snapshot(destinations: destinations, environment: snapshotEnvironment)
+        guard stableNetworkIdentity(first) == stableNetworkIdentity(before) else { throw HelperError.processMismatch }
         var records: [RouteRecord] = []
         let beforeByTarget = Dictionary(uniqueKeysWithValues: before.routes.map { (routeKey($0), $0) })
         for (destination, mask) in destinations {
@@ -677,6 +692,20 @@ public struct NetworkWrapperRunner {
             records.append(RouteRecord(before: beforeRoute, applied: applied, after: beforeRoute))
         }
         return NetworkLedger(schemaVersion: 1, sessionNonce: nonce, rebootIdentity: before.rebootIdentity, serviceIDBefore: before.serviceID, defaultInterfaceBefore: before.defaultInterface, defaultRouteBefore: before.defaultRoute, tunnelInterface: tunnelInterface, routeDeltasApplied: records.map(\.applied), routeRecords: records, dnsBefore: before.resolver, dnsApplied: nil, status: "recorded", timestamp: Date())
+    }
+
+    private func stableNetworkIdentity(_ snapshot: NetworkSnapshotData) -> String {
+        let route = snapshot.defaultRoute
+        return [
+            String(snapshot.rebootIdentity),
+            snapshot.serviceID,
+            snapshot.defaultInterface,
+            route.destination,
+            route.gateway ?? "",
+            route.interface ?? "",
+            route.netmask ?? "",
+            route.protocol,
+        ].joined(separator: "|")
     }
 
     private func ledgerWithPersistedIntent(baseline: NetworkLedger, destinations: [(String, String)], environment: [String: String]) throws -> NetworkLedger {
@@ -861,6 +890,18 @@ public struct NetworkWrapperRunner {
               ledger.defaultRouteBefore != current.defaultRoute || sameRouteAppliedDNSArtifactsAbsent(ledger: ledger, current: current.resolver)
         else { return false }
         return true
+    }
+
+    private func emptyBaselineRetirementSafe(ledger: NetworkLedger, current: NetworkSnapshotData) -> Bool {
+        ledger.status == "repair-required"
+            && stableBootIdentityMatches(ledger.rebootIdentity, current: current)
+            && ledger.routeDeltasApplied.isEmpty
+            && ledger.routeRecords.isEmpty
+            && ledger.dnsApplied == nil
+            && ledger.tunnelInterface == nil
+            && current.routes.isEmpty
+            && current.tunnelInterface.isEmpty
+            && current.resolver.activeInterface == current.defaultInterface
     }
 
     private func sameRouteAppliedDNSArtifactsAbsent(ledger: NetworkLedger, current: ResolverSnapshot) -> Bool {

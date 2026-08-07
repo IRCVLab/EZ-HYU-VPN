@@ -71,6 +71,10 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-keeps-stale-ledger-on-service-or-interface-change", testRepairKeepsStaleLedgerOnServiceOrInterfaceChange),
                 ("system-network-tools-accepts-dhcp-missing-setup-dns", testSystemNetworkToolsAcceptsDHCPMissingSetupDNS),
                 ("system-network-tools-uses-stable-boot-session-uuid", testSystemNetworkToolsUsesStableBootSessionUUID),
+                ("system-network-tools-rejects-transient-dhcp-service-id", testSystemNetworkToolsRejectsTransientDHCPServiceID),
+                ("network-preinit-requires-stable-service-id", testPreInitRequiresStableServiceID),
+                ("network-preinit-requires-stable-default-route", testPreInitRequiresStableDefaultRoute),
+                ("network-repair-retires-empty-baseline-after-service-change", testRepairRetiresEmptyBaselineAfterServiceChange),
                 ("network-repair-retires-clean-legacy-ledger-without-boot-match", testRepairRetiresCleanLegacyLedgerWithoutBootMatch),
                 ("network-repair-keeps-stable-ledger-on-boot-mismatch", testRepairKeepsStableLedgerOnBootMismatch),
                 ("network-repair-never-mutates-dns-for-legacy-boot-identity", testRepairNeverMutatesDNSForLegacyBootIdentity),
@@ -566,6 +570,76 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(fixture.upstream.reasons == ["pre-init"], "connect upstream not called after drift")
         let saved = try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).load(expectedNonce: fixture.nonce)
         try expect(saved.status == "repair-required", "ledger marked repair-required")
+    }
+
+    static func testSystemNetworkToolsRejectsTransientDHCPServiceID() throws {
+        let dir = try harnessTempDir()
+        let scutil = dir.appendingPathComponent("scutil")
+        try """
+#!/bin/sh
+cat >/dev/null
+printf '{ PrimaryService : DHCP-en0 }\\n'
+""".write(to: scutil, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scutil.path)
+        let paths = RuntimePaths(
+            ledgerRoot: dir,
+            upstream: dir.appendingPathComponent("vpnc-script"),
+            route: dir.appendingPathComponent("route"),
+            scutil: scutil,
+            sysctl: dir.appendingPathComponent("sysctl"),
+            networksetup: dir.appendingPathComponent("networksetup")
+        )
+        let tools = SystemNetworkTools(paths: paths, runner: BoundedProcessRunner(timeout: 2))
+
+        try expectThrows("transient DHCP service ID") { _ = try tools.primaryServiceID() }
+
+        try """
+#!/bin/sh
+cat >/dev/null
+printf '{ PrimaryService : 730F133F-1F6A-4C84-901E-9E41A028E092 }\\n'
+""".write(to: scutil, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scutil.path)
+        let stableServiceID = try tools.primaryServiceID()
+        try expect(stableServiceID == "730F133F-1F6A-4C84-901E-9E41A028E092", "stable UUID service ID accepted")
+    }
+
+    static func testPreInitRequiresStableServiceID() throws {
+        let fixture = try HarnessNetworkFixture()
+        fixture.tools.primaryServiceIDSequence = ["service-transient", "service-wifi"]
+
+        try expectThrows("identity changed between baseline samples") {
+            try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "unstable identity never writes a ledger")
+        try expect(fixture.upstream.reasons.isEmpty, "unstable identity never reaches upstream")
+    }
+
+    static func testPreInitRequiresStableDefaultRoute() throws {
+        let fixture = try HarnessNetworkFixture()
+        fixture.tools.defaultGatewaySequence = ["192.0.2.1", "192.0.2.254"]
+
+        try expectThrows("default route changed between baseline samples") {
+            try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "unstable route never writes a ledger")
+        try expect(fixture.upstream.reasons.isEmpty, "unstable route never reaches upstream")
+    }
+
+    static func testRepairRetiresEmptyBaselineAfterServiceChange() throws {
+        let fixture = try HarnessNetworkFixture()
+        try fixture.runner.run(reason: "pre-init", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        let store = NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid()))
+        let baseline = try store.load(expectedNonce: fixture.nonce)
+        try store.save(baseline.withStatus("repair-required"))
+        fixture.tools.primaryServiceIDValue = "service-after-dhcp-renewal"
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "empty stale baseline retired without mutation")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "empty baseline retirement does not mutate routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "empty baseline retirement does not mutate DNS")
     }
 
     static func testPreInitWithoutTunnelDeviceRecordsBaseline() throws {
@@ -1262,8 +1336,10 @@ final class FakeProcessController: ProcessControlling {
 final class HarnessNetworkTools: NetworkTooling {
     var rebootIdentityValue: UInt64 = stableTestBootIdentity
     var primaryServiceIDValue = "service-wifi"
+    var primaryServiceIDSequence: [String] = []
     var defaultInterface = "en0"
     var defaultGateway = "192.0.2.1"
+    var defaultGatewaySequence: [String] = []
     var routes: [RouteSnapshot] = []
     var restoredRoutes: [RouteSnapshot] = []
     var resolverServers = ["9.9.9.9"]
@@ -1276,8 +1352,11 @@ final class HarnessNetworkTools: NetworkTooling {
     var restoredSearchDomains: [ResolverSnapshot] = []
     var includeTunnelSurface = false
     func rebootIdentity() throws -> UInt64 { rebootIdentityValue }
-    func primaryServiceID() throws -> String { primaryServiceIDValue }
-    func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: defaultGateway, interface: defaultInterface, netmask: "0.0.0.0", protocol: "ipv4") }
+    func primaryServiceID() throws -> String { primaryServiceIDSequence.isEmpty ? primaryServiceIDValue : primaryServiceIDSequence.removeFirst() }
+    func defaultRoute() throws -> RouteSnapshot {
+        let gateway = defaultGatewaySequence.isEmpty ? defaultGateway : defaultGatewaySequence.removeFirst()
+        return RouteSnapshot(destination: "default", gateway: gateway, interface: defaultInterface, netmask: "0.0.0.0", protocol: "ipv4")
+    }
     func route(destination: String, netmask: String?) throws -> RouteSnapshot? { routes.first { $0.destination == destination && (netmask == nil || $0.netmask == netmask) } }
     func resolver(serviceID: String, baselineInterface: String, tunnelInterface: String?) throws -> ResolverSnapshot {
         var surfaces = resolverSurfaces ?? ["setup": ResolverFieldSnapshot(servers: resolverServers, searchDomains: resolverSearchDomains, serversPresent: resolverServersPresent, searchDomainsPresent: resolverSearchDomainsPresent)]
