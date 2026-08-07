@@ -47,6 +47,14 @@ class ReconnectPolicyTests(unittest.TestCase):
         self.assertEqual(policy.record_exit(1, runtime_seconds=300), 0)
         self.assertEqual(policy.next_delay(policy.record_exit(1, runtime_seconds=1)), 10)
 
+    def test_explicit_reset_clears_failure_count(self):
+        policy = ReconnectPolicy()
+        self.assertEqual(policy.record_exit(1, runtime_seconds=1), 1)
+
+        policy.reset()
+
+        self.assertEqual(policy.consecutive_failures, 0)
+
 
 class NativeConflictDetectorTests(unittest.TestCase):
     def test_detects_conflict_only_when_native_process_and_protected_utun_route_exist(self):
@@ -204,13 +212,15 @@ def managed_temp_path(testcase: unittest.TestCase, *parts: str) -> Path:
 def isolated_supervisor_config(testcase: unittest.TestCase, **overrides) -> SupervisorConfig:
     state_dir = managed_temp_path(testcase, "supervisor-state")
     values = {
+        "connect_path": str(state_dir / "hyu-vpn-connect"),
+        "helper_path": str(state_dir / "hyu-vpn-helper"),
         "lock_path": str(state_dir / "supervisor.lock"),
         "status_path": str(state_dir / "status.json"),
         "preference_path": str(state_dir / "auto-reconnect.json"),
         "control_socket_path": str(state_dir / "control.sock"),
     }
     values.update(overrides)
-    for key in ("lock_path", "status_path", "preference_path", "control_socket_path"):
+    for key in ("connect_path", "helper_path", "lock_path", "status_path", "preference_path", "control_socket_path"):
         production_value = SupervisorConfig.__dataclass_fields__[key].default
         if Path(values[key]).expanduser() == Path(production_value).expanduser():
             raise AssertionError(f"test config must isolate {key}")
@@ -228,7 +238,7 @@ class SupervisorTestIsolationContractTests(unittest.TestCase):
         self.assertEqual(len(direct_calls), 1, "test SupervisorConfig calls must use isolated_supervisor_config")
         isolated = isolated_supervisor_config(self)
         temp_root = Path(tempfile.gettempdir()).resolve()
-        for key in ("lock_path", "status_path", "preference_path", "control_socket_path"):
+        for key in ("connect_path", "helper_path", "lock_path", "status_path", "preference_path", "control_socket_path"):
             self.assertIn(temp_root, Path(getattr(isolated, key)).resolve().parents)
 
     def test_offline_integration_supervisor_configs_explicitly_isolate_all_state_paths(self):
@@ -443,7 +453,8 @@ class SupervisorLoopTests(unittest.TestCase):
         self.assertEqual(supervisor.run(), 0)
         self.assertEqual(clock.sleeps, [7, 7])
         self.assertEqual(len(started), 1)
-        self.assertEqual(started[0][0], [str(Path(__file__).resolve().parents[1] / "bin" / "hyu-vpn-connect")])
+        self.assertEqual(started[0][0], [supervisor.config.connect_path])
+        self.assertIn(Path(tempfile.gettempdir()).resolve(), Path(supervisor.config.connect_path).resolve().parents)
         self.assertTrue(started[0][1]["start_new_session"])
 
     def test_failed_children_back_off_without_spin_and_long_runtime_resets(self):
@@ -1801,6 +1812,7 @@ class SupervisorControlTests(unittest.TestCase):
                 ),
                 conflict_detector=mock.Mock(conflict_active=lambda: False),
                 popen_factory=lambda *_args, **_kwargs: process,
+                command_runner=lambda argv, _timeout: CommandResult(tuple(argv), 1, "", ""),
             )
 
             self.assertEqual(supervisor.run(), 1)
@@ -1845,6 +1857,102 @@ class SupervisorControlTests(unittest.TestCase):
             self.assertEqual(status.state, "error")
             self.assertEqual(status.error_code, "NETWORK_SCRIPT_POSTCONDITION_FAILED")
             self.assertFalse(status.automatic_reconnect_enabled)
+
+    def test_state_mismatch_successful_repair_resumes_automatic_reconnect(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            process = FakeProcess(returncode=1)
+            process.stdout = io.StringIO('{"schema_version":1,"event":"network-script-state-mismatch","timestamp":"2026-08-05T01:00:00Z"}\n')
+            commands = []
+
+            def runner(argv, timeout):
+                commands.append((tuple(argv), timeout))
+                return CommandResult(tuple(argv), 0, "", "")
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    helper_path="/helper",
+                    max_iterations=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+                command_runner=runner,
+            )
+
+            self.assertEqual(supervisor.run(), 1)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(commands, [(("/usr/bin/sudo", "-n", "/helper", "repair"), 5.0)])
+            self.assertEqual(status.state, "waiting-for-network")
+            self.assertIsNone(status.error_code)
+            self.assertTrue(status.automatic_reconnect_enabled)
+            self.assertTrue(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
+
+    def test_manual_disconnect_waits_for_automatic_repair_and_wins_final_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            status_path = Path(td) / "status.json"
+            pref_path = Path(td) / "auto.json"
+            enable_auto_reconnect(pref_path)
+            process = FakeProcess(returncode=1)
+            process.stdout = io.StringIO(
+                '{"schema_version":1,"event":"network-script-state-mismatch","timestamp":"2026-08-05T01:00:00Z"}\n'
+            )
+            repair_started = threading.Event()
+            release_repair = threading.Event()
+            stop_started = threading.Event()
+
+            def runner(argv, _timeout):
+                if argv[-1] == "repair":
+                    repair_started.set()
+                    release_repair.wait(1)
+                    return CommandResult(tuple(argv), 0, "", "")
+                if argv[-1] == "stop":
+                    stop_started.set()
+                    return CommandResult(tuple(argv), 0, "", "")
+                raise AssertionError(argv)
+
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    helper_path="/helper",
+                    max_iterations=1,
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+                popen_factory=lambda *_args, **_kwargs: process,
+                command_runner=runner,
+            )
+            run_thread = threading.Thread(target=supervisor.run)
+            run_thread.start()
+            self.assertTrue(repair_started.wait(1))
+
+            disconnect_result = []
+            disconnect_thread = threading.Thread(
+                target=lambda: disconnect_result.append(supervisor.handle_control_command("disconnect"))
+            )
+            disconnect_thread.start()
+            stop_raced_with_repair = stop_started.wait(0.1)
+
+            release_repair.set()
+            run_thread.join(2)
+            disconnect_thread.join(2)
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertFalse(run_thread.is_alive())
+            self.assertFalse(disconnect_thread.is_alive())
+            self.assertFalse(stop_raced_with_repair, "helper stop raced with helper repair")
+            self.assertEqual(disconnect_result, [(True, None)])
+            self.assertEqual(status.state, "disabled")
+            self.assertFalse(status.automatic_reconnect_enabled)
+            self.assertFalse(json.loads(pref_path.read_text(encoding="utf-8"))["automatic_reconnect_enabled"])
 
     def test_network_script_error_enters_repair_required_when_automatic_repair_fails(self):
         with tempfile.TemporaryDirectory() as td:

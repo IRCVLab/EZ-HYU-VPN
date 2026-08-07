@@ -58,10 +58,13 @@ class ReconnectPolicy:
 
     def record_exit(self, returncode: int, *, runtime_seconds: float) -> int:
         if returncode == 0 or runtime_seconds >= self.reset_after_seconds:
-            self.consecutive_failures = 0
+            self.reset()
         else:
             self.consecutive_failures += 1
         return self.consecutive_failures
+
+    def reset(self) -> None:
+        self.consecutive_failures = 0
 
 
 class NativeConflictDetector:
@@ -169,6 +172,7 @@ class Supervisor:
         self._repair_required = False
         self._connector_failure_code: Optional[str] = None
         self._connector_repair_pending = False
+        self._resume_automatic_after_repair = False
         self._status = self._base_status("disabled")
         self.policy = ReconnectPolicy()
         self._stop_requested = False
@@ -201,6 +205,7 @@ class Supervisor:
                 self._control_event.set()
                 return True, None
             if command == "automatic-off":
+                self._resume_automatic_after_repair = False
                 self.preference.write(False)
                 if self._child is None or self._child.poll() is not None:
                     self._write_current_status(state="disabled", automatic=False)
@@ -209,6 +214,7 @@ class Supervisor:
                 self._control_event.set()
                 return True, None
             if command == "disconnect":
+                self._resume_automatic_after_repair = False
                 self.preference.write(False)
                 result = self._disconnect_locked()
                 self._control_event.set()
@@ -367,9 +373,13 @@ class Supervisor:
                     return
             if event.kind in NETWORK_SCRIPT_EVENT_KINDS:
                 error_code = _NETWORK_SCRIPT_ERROR_CODES[event.kind]
+                automatic_was_enabled = self.preference.read(default=False)
                 self.preference.write(False)
                 self._connector_failure_code = error_code
                 self._connector_repair_pending = True
+                self._resume_automatic_after_repair = (
+                    error_code == "NETWORK_SCRIPT_STATE_MISMATCH" and automatic_was_enabled
+                )
                 self._active_generation = None
                 self._write_current_status(state="error", automatic=False, error_code=error_code)
                 self._state_changed.notify_all()
@@ -540,16 +550,29 @@ class Supervisor:
                     connector_repair_pending = self._connector_repair_pending
                     connector_failure_code = self._connector_failure_code
                 if connector_repair_pending:
-                    repair = self.command_runner(
-                        ["/usr/bin/sudo", "-n", self.config.helper_path, "repair"],
-                        self.config.helper_timeout,
-                    )
-                    with self._state_lock:
-                        self._connector_repair_pending = False
-                    if repair.returncode != 0:
-                        self._enter_repair_required(automatic=False)
-                    elif connector_failure_code is not None:
-                        self._write_current_status(state="error", automatic=False, error_code=connector_failure_code)
+                    with self._teardown_lock:
+                        repair = self.command_runner(
+                            ["/usr/bin/sudo", "-n", self.config.helper_path, "repair"],
+                            self.config.helper_timeout,
+                        )
+                        with self._state_lock:
+                            self._connector_repair_pending = False
+                            resume_automatic = self._resume_automatic_after_repair
+                        if repair.returncode != 0:
+                            with self._state_lock:
+                                self._resume_automatic_after_repair = False
+                            self._enter_repair_required(automatic=False)
+                        elif connector_failure_code == "NETWORK_SCRIPT_STATE_MISMATCH" and resume_automatic:
+                            with self._state_lock:
+                                self._resume_automatic_after_repair = False
+                                self._connector_failure_code = None
+                            self.policy.reset()
+                            self.preference.write(True)
+                            self._write_current_status(state="waiting-for-network", automatic=True)
+                        elif connector_failure_code is not None:
+                            with self._state_lock:
+                                self._resume_automatic_after_repair = False
+                            self._write_current_status(state="error", automatic=False, error_code=connector_failure_code)
                     if self.config.max_iterations is not None and iterations >= self.config.max_iterations:
                         break
                     if connector_failure_code is not None or repair.returncode != 0:
