@@ -63,6 +63,7 @@ fn credentials_are_bounded_and_zeroizable() {
 #[test]
 fn status_response_is_secret_free_and_uses_compatible_state_values() {
     let status = VpnStatus {
+        schema_version: 1,
         state: VpnState::WaitingForNetwork,
         automatic_reconnect_enabled: true,
         connected_at: None,
@@ -71,6 +72,7 @@ fn status_response_is_secret_free_and_uses_compatible_state_values() {
         tunnel_interface: None,
         next_retry_at: None,
         error_code: Some(ErrorCode::PortalUnreachable),
+        last_transition_at: "1970-01-01T00:00:00Z".into(),
         backend_build_version: Some("0.2.0".into()),
     };
     let encoded = encode_response(&ResponseEnvelope::new(
@@ -88,5 +90,39 @@ fn status_response_is_secret_free_and_uses_compatible_state_values() {
         "\"portal\":",
     ] {
         assert!(!text.to_ascii_lowercase().contains(forbidden));
+    }
+}
+
+#[test]
+fn shared_status_fixture_round_trips_exact_python_schema() {
+    let raw = include_str!("../../../../tests/fixtures/vpn-status-v1.json");
+    let status: VpnStatus = serde_json::from_str(raw).expect("shared status fixture");
+    assert_eq!(status.schema_version, 1);
+    assert_eq!(status.last_transition_at, "2026-08-04T12:00:01Z");
+    let original: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let encoded = serde_json::to_value(status).unwrap();
+    assert_eq!(encoded, original);
+}
+
+#[test]
+fn rejects_invalid_status_version_timestamps_interface_and_build() {
+    let raw = include_str!("../../../../tests/fixtures/vpn-status-v1.json");
+    let valid: serde_json::Value = serde_json::from_str(raw).unwrap();
+    for (field, invalid) in [
+        ("schema_version", serde_json::json!(2)),
+        (
+            "last_transition_at",
+            serde_json::json!("2026-08-04T12:00:01"),
+        ),
+        ("connected_at", serde_json::json!("not-a-date")),
+        ("tunnel_interface", serde_json::json!("utun7;rm")),
+        ("backend_build_version", serde_json::json!("bad version!")),
+    ] {
+        let mut candidate = valid.clone();
+        candidate[field] = invalid;
+        assert!(
+            serde_json::from_value::<VpnStatus>(candidate).is_err(),
+            "accepted invalid {field}"
+        );
     }
 }

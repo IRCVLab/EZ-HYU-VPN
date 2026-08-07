@@ -177,8 +177,9 @@ pub enum ErrorCode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "WireVpnStatus", deny_unknown_fields)]
 pub struct VpnStatus {
+    pub schema_version: u16,
     pub state: VpnState,
     pub automatic_reconnect_enabled: bool,
     pub connected_at: Option<String>,
@@ -187,7 +188,83 @@ pub struct VpnStatus {
     pub tunnel_interface: Option<String>,
     pub next_retry_at: Option<String>,
     pub error_code: Option<ErrorCode>,
+    pub last_transition_at: String,
     pub backend_build_version: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireVpnStatus {
+    schema_version: u16,
+    state: VpnState,
+    automatic_reconnect_enabled: bool,
+    connected_at: Option<String>,
+    session_expires_at: Option<String>,
+    last_successful_hip_at: Option<String>,
+    tunnel_interface: Option<String>,
+    next_retry_at: Option<String>,
+    error_code: Option<ErrorCode>,
+    last_transition_at: String,
+    backend_build_version: Option<String>,
+}
+
+impl TryFrom<WireVpnStatus> for VpnStatus {
+    type Error = &'static str;
+
+    fn try_from(value: WireVpnStatus) -> Result<Self, Self::Error> {
+        if value.schema_version != PROTOCOL_VERSION {
+            return Err("unsupported status version");
+        }
+        for timestamp in [
+            value.connected_at.as_deref(),
+            value.session_expires_at.as_deref(),
+            value.last_successful_hip_at.as_deref(),
+            value.next_retry_at.as_deref(),
+            Some(value.last_transition_at.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+                .map_err(|_| "invalid status timestamp")?;
+        }
+        if let Some(interface) = value.tunnel_interface.as_deref() {
+            let mut bytes = interface.bytes();
+            if interface.len() > 64
+                || !bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+                || !bytes
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            {
+                return Err("invalid tunnel interface");
+            }
+        }
+        if let Some(version) = value.backend_build_version.as_deref() {
+            let mut bytes = version.bytes();
+            if version.len() > 128
+                || !bytes
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                || !bytes.all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'~' | b'-')
+                })
+            {
+                return Err("invalid backend build version");
+            }
+        }
+        Ok(Self {
+            schema_version: value.schema_version,
+            state: value.state,
+            automatic_reconnect_enabled: value.automatic_reconnect_enabled,
+            connected_at: value.connected_at,
+            session_expires_at: value.session_expires_at,
+            last_successful_hip_at: value.last_successful_hip_at,
+            tunnel_interface: value.tunnel_interface,
+            next_retry_at: value.next_retry_at,
+            error_code: value.error_code,
+            last_transition_at: value.last_transition_at,
+            backend_build_version: value.backend_build_version,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

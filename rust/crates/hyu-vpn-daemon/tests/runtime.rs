@@ -58,6 +58,7 @@ fn connect_and_network_events_publish_status_and_actions() {
     let response = plane.handle(request("1", Request::Connect));
     assert_eq!(serde_json::to_value(response).unwrap()["result"], "ack");
     assert_eq!(plane.status().state, VpnState::WaitingForNetwork);
+    assert_eq!(plane.status().last_transition_at, "1970-01-01T00:00:59Z");
     assert_eq!(
         actions.try_recv().unwrap(),
         EngineAction::PersistAutomaticReconnect(true)

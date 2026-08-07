@@ -104,6 +104,7 @@ where
     ) -> (Self, mpsc::UnboundedReceiver<EngineAction>) {
         let engine = Engine::new(automatic_reconnect_enabled);
         let status = VpnStatus {
+            schema_version: hyu_vpn_protocol::PROTOCOL_VERSION,
             state: engine.state(),
             automatic_reconnect_enabled,
             connected_at: None,
@@ -112,6 +113,7 @@ where
             tunnel_interface: None,
             next_retry_at: None,
             error_code: None,
+            last_transition_at: format_system_time(clock.now()),
             backend_build_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         };
         let (action_tx, action_rx) = mpsc::unbounded_channel();
@@ -222,6 +224,7 @@ where
     fn update_status_state(&self, state: VpnState) {
         let mut status = self.status.write().expect("status lock poisoned");
         status.state = state;
+        status.last_transition_at = format_system_time(self.clock.now());
         if matches!(
             state,
             VpnState::Disabled | VpnState::Connecting | VpnState::Backoff | VpnState::Error
@@ -249,4 +252,11 @@ where
     async fn handle(&self, request: RequestEnvelope) -> ResponseEnvelope {
         ControlPlane::handle(self, request)
     }
+}
+
+fn format_system_time(value: SystemTime) -> String {
+    let datetime = time::OffsetDateTime::from(value);
+    datetime
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }

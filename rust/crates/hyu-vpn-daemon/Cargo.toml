@@ -11,6 +11,7 @@ hyu-vpn-core = { path = "../hyu-vpn-core" }
 hyu-vpn-protocol = { path = "../hyu-vpn-protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

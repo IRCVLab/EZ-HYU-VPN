@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "state": "connected",
+  "automatic_reconnect_enabled": true,
+  "connected_at": "2026-08-04T12:00:00Z",
+  "session_expires_at": "2026-08-04T12:59:30Z",
+  "last_successful_hip_at": "2026-08-04T11:59:00Z",
+  "tunnel_interface": "utun7",
+  "next_retry_at": null,
+  "error_code": null,
+  "last_transition_at": "2026-08-04T12:00:01Z",
+  "backend_build_version": "0.2.0"
+}
