@@ -2,6 +2,8 @@ import Foundation
 import Darwin
 import HYUVPNPrivilegedHelper
 
+private let stableTestBootIdentity: UInt64 = 0x8000_0000_0000_1092
+
 struct HarnessFailure: Error, CustomStringConvertible { let description: String }
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw HarnessFailure(description: message) } }
 func expectThrows(_ message: String, _ body: () throws -> Void) throws {
@@ -60,9 +62,14 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-restores-exact-retained-setup-dns-after-default-network-change", testRepairRestoresExactRetainedSetupDNSAfterDefaultNetworkChange),
                 ("network-repair-keeps-stale-ledger-when-applied-route-remains", testRepairKeepsStaleLedgerWhenAppliedRouteRemains),
                 ("network-repair-keeps-stale-ledger-on-mixed-setup-dns", testRepairKeepsStaleLedgerOnMixedSetupDNS),
+                ("network-repair-keeps-stale-ledger-on-setup-surface-drift", testRepairKeepsStaleLedgerOnSetupSurfaceDrift),
                 ("network-repair-keeps-stale-ledger-on-route-key-collision", testRepairKeepsStaleLedgerOnRouteKeyCollision),
-                ("network-repair-keeps-stale-ledger-on-network-identity-change", testRepairKeepsStaleLedgerOnNetworkIdentityChange),
+                ("network-repair-keeps-stale-ledger-on-service-or-interface-change", testRepairKeepsStaleLedgerOnServiceOrInterfaceChange),
                 ("system-network-tools-accepts-dhcp-missing-setup-dns", testSystemNetworkToolsAcceptsDHCPMissingSetupDNS),
+                ("system-network-tools-uses-stable-boot-session-uuid", testSystemNetworkToolsUsesStableBootSessionUUID),
+                ("network-repair-retires-clean-legacy-ledger-without-boot-match", testRepairRetiresCleanLegacyLedgerWithoutBootMatch),
+                ("network-repair-keeps-stable-ledger-on-boot-mismatch", testRepairKeepsStableLedgerOnBootMismatch),
+                ("network-repair-never-mutates-dns-for-legacy-boot-identity", testRepairNeverMutatesDNSForLegacyBootIdentity),
                 ("system-network-tools-normalizes-static-host-route-mask", testSystemNetworkToolsNormalizesStaticHostRouteMask),
                 ("system-network-tools-resolves-explicit-network-host-route", testSystemNetworkToolsResolvesExplicitNetworkHostRoute),
                 ("system-network-tools-rejects-cloned-host-route-as-static", testSystemNetworkToolsRejectsClonedHostRouteAsStatic),
@@ -444,6 +451,26 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(snapshot.surfaces[stateKey]?.servers == ["9.9.9.9"], "DHCP state DNS still captured for drift and repair")
     }
 
+    static func testSystemNetworkToolsUsesStableBootSessionUUID() throws {
+        let dir = try harnessTempDir()
+        let sysctl = dir.appendingPathComponent("sysctl")
+        let calls = dir.appendingPathComponent("sysctl-calls")
+        try """
+        #!/bin/sh
+        printf '%s\n' "$*" >> '\(calls.path)'
+        [ "$1" = "-n" ] && [ "$2" = "kern.bootsessionuuid" ] || exit 1
+        printf '%s\n' '01234567-89AB-CDEF-0123-456789ABCDEF'
+        """.write(to: sysctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sysctl.path)
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: sysctl, networksetup: dir.appendingPathComponent("networksetup"))
+
+        let identity = try SystemNetworkTools(paths: paths).rebootIdentity()
+        let arguments = try String(contentsOf: calls, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try expect(identity == 0x8123_4567_89AB_CDEF, "boot session UUID is encoded with the stable identity marker")
+        try expect(arguments == "-n kern.bootsessionuuid", "boottime seconds are not used as the durable identity")
+    }
+
     static func testSystemNetworkToolsNormalizesStaticHostRouteMask() throws {
         let tools = try systemNetworkToolsWithRouteOutput("""
            route to: 198.51.100.9
@@ -747,6 +774,27 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(fixture.tools.restoredDNSServers.isEmpty, "ambiguous DNS is not overwritten")
     }
 
+    static func testRepairKeepsStaleLedgerOnSetupSurfaceDrift() throws {
+        let (fixture, _, _) = try staleNetworkLedgerFixture()
+        let setupKey = "Setup:/Network/Service/service-wifi/DNS"
+        fixture.tools.resolverSurfaces?[setupKey] = ResolverFieldSnapshot(
+            servers: [],
+            searchDomains: [],
+            serversPresent: false,
+            searchDomainsPresent: false,
+            keyPresent: true,
+            otherFingerprint: "foreign-setup-state"
+        )
+
+        try expectThrows("Setup DNS surface drift blocks deletion-only retirement") {
+            try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "Setup DNS surface drift keeps repair evidence")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "Setup DNS surface drift never mutates routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "Setup DNS surface drift never mutates DNS")
+    }
+
     static func testRepairKeepsStaleLedgerOnRouteKeyCollision() throws {
         let (fixture, tunnelRoute, _) = try staleNetworkLedgerFixture()
         let foreign = RouteSnapshot(destination: tunnelRoute.destination, gateway: "192.0.2.254", interface: "en0", netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol)
@@ -760,9 +808,8 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(fixture.tools.routes == [foreign], "foreign route collision is left untouched")
     }
 
-    static func testRepairKeepsStaleLedgerOnNetworkIdentityChange() throws {
+    static func testRepairKeepsStaleLedgerOnServiceOrInterfaceChange() throws {
         let mutations: [(HarnessNetworkTools) -> Void] = [
-            { $0.rebootIdentityValue = 4243 },
             { $0.primaryServiceIDValue = "service-other" },
             { $0.defaultInterface = "en1" },
         ]
@@ -770,7 +817,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
             let (fixture, _, _) = try staleNetworkLedgerFixture()
             mutate(fixture.tools)
 
-            try expectThrows("boot, service, or interface drift blocks stale ledger retirement") {
+            try expectThrows("service or interface drift blocks stale ledger retirement") {
                 try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
             }
 
@@ -778,7 +825,44 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         }
     }
 
-    static func staleNetworkLedgerFixture() throws -> (HarnessNetworkFixture, RouteSnapshot, ResolverSnapshot) {
+    static func testRepairRetiresCleanLegacyLedgerWithoutBootMatch() throws {
+        let (fixture, _, _) = try staleNetworkLedgerFixture(ledgerBootIdentity: 4242)
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "artifact-free legacy ledger can be retired without claiming a same-boot match")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "legacy retirement never restores obsolete routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "legacy retirement leaves current dynamic DNS untouched")
+    }
+
+    static func testRepairNeverMutatesDNSForLegacyBootIdentity() throws {
+        let (fixture, _, appliedDNS) = try staleNetworkLedgerFixture(ledgerBootIdentity: 4242)
+        fixture.tools.resolverServers = appliedDNS.servers
+        fixture.tools.resolverServersPresent = appliedDNS.serversPresent
+
+        try expectThrows("legacy boot identity cannot authorize DNS mutation") {
+            try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "legacy DNS ambiguity keeps repair evidence")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "legacy identity never authorizes route mutation")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "legacy identity never authorizes DNS mutation")
+    }
+
+    static func testRepairKeepsStableLedgerOnBootMismatch() throws {
+        let (fixture, _, _) = try staleNetworkLedgerFixture()
+        fixture.tools.rebootIdentityValue = 0x8000_0000_0000_1093
+
+        try expectThrows("stable ledger retirement requires its exact boot session identity") {
+            try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "stable boot mismatch keeps repair evidence")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "stable boot mismatch never mutates routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "stable boot mismatch never mutates DNS")
+    }
+
+    static func staleNetworkLedgerFixture(ledgerBootIdentity: UInt64 = stableTestBootIdentity) throws -> (HarnessNetworkFixture, RouteSnapshot, ResolverSnapshot) {
         let fixture = try HarnessNetworkFixture()
         let oldDefault = RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: "0.0.0.0", protocol: "ipv4")
         let oldBypass = RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4")
@@ -809,7 +893,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).save(
             NetworkLedger(
                 sessionNonce: fixture.nonce,
-                rebootIdentity: 4242,
+                rebootIdentity: ledgerBootIdentity,
                 serviceIDBefore: "service-wifi",
                 defaultInterfaceBefore: "en0",
                 defaultRouteBefore: oldDefault,
@@ -848,7 +932,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).save(
             NetworkLedger(
                 sessionNonce: fixture.nonce,
-                rebootIdentity: 4242,
+                rebootIdentity: stableTestBootIdentity,
                 serviceIDBefore: "service-wifi",
                 defaultInterfaceBefore: "en0",
                 defaultRouteBefore: oldDefault,
@@ -1097,7 +1181,7 @@ final class FakeProcessController: ProcessControlling {
 
 
 final class HarnessNetworkTools: NetworkTooling {
-    var rebootIdentityValue: UInt64 = 4242
+    var rebootIdentityValue: UInt64 = stableTestBootIdentity
     var primaryServiceIDValue = "service-wifi"
     var defaultInterface = "en0"
     var defaultGateway = "192.0.2.1"

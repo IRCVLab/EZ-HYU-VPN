@@ -1,6 +1,8 @@
 import Foundation
 import Dispatch
 
+private let stableBootIdentityMarker: UInt64 = 1 << 63
+
 public struct RuntimePaths: Equatable, Sendable {
     public let ledgerRoot: URL
     public let upstream: URL
@@ -180,9 +182,11 @@ public struct SystemNetworkTools: NetworkTooling {
     public init(paths: RuntimePaths = .production, runner: BoundedProcessRunner = BoundedProcessRunner()) { self.paths = paths; self.runner = runner }
 
     public func rebootIdentity() throws -> UInt64 {
-        let out = try checked(paths.sysctl, ["-n", "kern.boottime"])
-        guard let match = out.range(of: #"sec\s*=\s*(\d+)"#, options: .regularExpression), let value = String(out[match]).components(separatedBy: CharacterSet.decimalDigits.inverted).compactMap(UInt64.init).first, value > 1 else { throw HelperError.processMismatch }
-        return value
+        let raw = try checked(paths.sysctl, ["-n", "kern.bootsessionuuid"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard raw.range(of: #"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"#, options: .regularExpression) != nil else { throw HelperError.processMismatch }
+        let compact = raw.replacingOccurrences(of: "-", with: "")
+        guard let prefix = UInt64(compact.prefix(16), radix: 16) else { throw HelperError.processMismatch }
+        return prefix | stableBootIdentityMarker
     }
 
     public func primaryServiceID() throws -> String {
@@ -729,7 +733,7 @@ public struct NetworkWrapperRunner {
 
     private func preflightSafe(ledger: NetworkLedger, current: NetworkSnapshotData, allowRepairRequired: Bool = false) -> Bool {
         guard ledger.status == "recorded" || (allowRepairRequired && ledger.status == "repair-required") else { return false }
-        guard ledger.rebootIdentity == current.rebootIdentity, ledger.serviceIDBefore == current.serviceID, ledger.defaultInterfaceBefore == current.defaultInterface, ledger.defaultRouteBefore == current.defaultRoute else { return false }
+        guard stableBootIdentityMatches(ledger.rebootIdentity, current: current), ledger.serviceIDBefore == current.serviceID, ledger.defaultInterfaceBefore == current.defaultInterface, ledger.defaultRouteBefore == current.defaultRoute else { return false }
         for record in ledger.routeRecords {
             let matches = current.routes.filter { routeKey($0) == routeKey(record.applied) }
             guard matches.count <= 1 else { return false }
@@ -772,7 +776,7 @@ public struct NetworkWrapperRunner {
     }
 
     private func baselineRestored(ledger: NetworkLedger, current: NetworkSnapshotData) -> Bool {
-        guard ledger.rebootIdentity == current.rebootIdentity, ledger.serviceIDBefore == current.serviceID, ledger.defaultInterfaceBefore == current.defaultInterface, ledger.defaultRouteBefore == current.defaultRoute, current.resolver == ledger.dnsBefore else { return false }
+        guard stableBootIdentityMatches(ledger.rebootIdentity, current: current), ledger.serviceIDBefore == current.serviceID, ledger.defaultInterfaceBefore == current.defaultInterface, ledger.defaultRouteBefore == current.defaultRoute, current.resolver == ledger.dnsBefore else { return false }
         for record in ledger.routeRecords {
             let currentRoute = current.routes.first { routeKey($0) == routeKey(record.applied) }
             if currentRoute != record.before { return false }
@@ -783,7 +787,8 @@ public struct NetworkWrapperRunner {
     private struct StaleNetworkDNSRepairPlan { let restoreServers: Bool; let restoreSearchDomains: Bool }
 
     private func staleNetworkLedgerDNSRepairPlan(ledger: NetworkLedger, current: NetworkSnapshotData) -> StaleNetworkDNSRepairPlan? {
-        guard staleNetworkContextSafe(ledger: ledger, current: current),
+        guard stableBootIdentityMatches(ledger.rebootIdentity, current: current),
+              staleNetworkContextSafe(ledger: ledger, current: current),
               let before = ledger.dnsBefore,
               let applied = ledger.dnsApplied,
               let restoreServers = staleResolverFieldRestoreDecision(before: before.servers, beforePresent: before.serversPresent, applied: applied.servers, appliedPresent: applied.serversPresent, current: current.resolver.servers, currentPresent: current.resolver.serversPresent),
@@ -794,19 +799,36 @@ public struct NetworkWrapperRunner {
     }
 
     private func staleNetworkLedgerRetirementSafe(ledger: NetworkLedger, current: NetworkSnapshotData) -> Bool {
-        guard staleNetworkContextSafe(ledger: ledger, current: current),
+        guard staleNetworkRetirementBootIdentitySafe(ledger: ledger, current: current),
+              staleNetworkContextSafe(ledger: ledger, current: current),
               let before = ledger.dnsBefore,
               current.resolver.servers == before.servers,
               current.resolver.serversPresent == before.serversPresent,
               current.resolver.searchDomains == before.searchDomains,
-              current.resolver.searchDomainsPresent == before.searchDomainsPresent
+              current.resolver.searchDomainsPresent == before.searchDomainsPresent,
+              setupResolverSurfaceMatchesBaseline(ledger: ledger, before: before, current: current.resolver)
         else { return false }
         return true
     }
 
+    private func setupResolverSurfaceMatchesBaseline(ledger: NetworkLedger, before: ResolverSnapshot, current: ResolverSnapshot) -> Bool {
+        guard let serviceID = ledger.serviceIDBefore else { return false }
+        let setupKey = "Setup:/Network/Service/\(serviceID)/DNS"
+        let beforeSetup = before.surfaces[setupKey] ?? before.surfaces["setup"]
+        let currentSetup = current.surfaces[setupKey] ?? current.surfaces["setup"]
+        return beforeSetup != nil && beforeSetup == currentSetup
+    }
+
+    private func staleNetworkRetirementBootIdentitySafe(ledger: NetworkLedger, current: NetworkSnapshotData) -> Bool {
+        // Legacy low values came from wall-clock-derived kern.boottime seconds and
+        // can never authorize a mutation. They are accepted only by the
+        // artifact-free, deletion-only retirement path guarded below.
+        if ledger.rebootIdentity & stableBootIdentityMarker == 0 { return true }
+        return stableBootIdentityMatches(ledger.rebootIdentity, current: current)
+    }
+
     private func staleNetworkContextSafe(ledger: NetworkLedger, current: NetworkSnapshotData) -> Bool {
         guard ledger.status == "repair-required",
-              ledger.rebootIdentity == current.rebootIdentity,
               ledger.serviceIDBefore == current.serviceID,
               ledger.defaultInterfaceBefore == current.defaultInterface,
               ledger.defaultRouteBefore != current.defaultRoute,
@@ -818,6 +840,10 @@ public struct NetworkWrapperRunner {
               !tunnelSurface.keyPresent
         else { return false }
         return true
+    }
+
+    private func stableBootIdentityMatches(_ recorded: UInt64, current: NetworkSnapshotData) -> Bool {
+        recorded & stableBootIdentityMarker != 0 && recorded == current.rebootIdentity
     }
 
     private func staleResolverFieldRestoreDecision(before: [String], beforePresent: Bool, applied: [String], appliedPresent: Bool, current: [String], currentPresent: Bool) -> Bool? {

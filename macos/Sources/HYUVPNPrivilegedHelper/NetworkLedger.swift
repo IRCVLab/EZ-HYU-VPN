@@ -1,6 +1,8 @@
 import Foundation
 import Darwin
 
+private let networkLedgerStableBootIdentityMarker: UInt64 = 1 << 63
+
 public struct RouteSnapshot: Codable, Hashable, Comparable {
     public let destination: String
     public let gateway: String?
@@ -260,7 +262,7 @@ public struct NetworkLedgerRepairPlan: Equatable {
 
 public enum NetworkLedgerRepairPlanner {
     public static func plan(for ledger: NetworkLedger, current: NetworkSnapshot) -> NetworkLedgerRepairPlan {
-        guard ledger.status != "repair-required", ledger.rebootIdentity == current.rebootIdentity, ledger.serviceIDBefore == current.serviceID, ledger.defaultInterfaceBefore == current.defaultInterface else { return NetworkLedgerRepairPlan(status: "repair-required", routesToRemove: [], resolverToRestore: nil) }
+        guard ledger.status != "repair-required", ledger.rebootIdentity & networkLedgerStableBootIdentityMarker != 0, ledger.rebootIdentity == current.rebootIdentity, ledger.serviceIDBefore == current.serviceID, ledger.defaultInterfaceBefore == current.defaultInterface else { return NetworkLedgerRepairPlan(status: "repair-required", routesToRemove: [], resolverToRestore: nil) }
         var removals: [RouteDelta] = []
         for record in ledger.routeRecords {
             if let currentRoute = current.routes.first(where: { $0.destination == record.applied.destination }) {

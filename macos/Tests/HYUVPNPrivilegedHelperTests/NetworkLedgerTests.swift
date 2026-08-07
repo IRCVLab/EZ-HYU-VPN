@@ -3,6 +3,8 @@ import Darwin
 import Testing
 @testable import HYUVPNPrivilegedHelper
 
+private let stableTestBootIdentity: UInt64 = 0x8000_0000_0000_1092
+
 @Suite struct NetworkLedgerModelTests {
     @Test func atomicLedgerWriteUsesExactBoundedSchemaAnd0600Mode() throws {
         let directory = try temporaryDirectory()
@@ -47,7 +49,7 @@ import Testing
     @Test func repairPlanRequiresExactRebootServiceRouteAndResolverMatch() throws {
         let ledger = NetworkLedger(
             sessionNonce: "nonceabc123",
-            rebootIdentity: 42,
+            rebootIdentity: stableTestBootIdentity,
             serviceIDBefore: "service-wifi",
             defaultInterfaceBefore: "en0",
             defaultRouteBefore: RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: "0.0.0.0", protocol: "ipv4"),
@@ -58,7 +60,7 @@ import Testing
             status: "recorded",
             timestamp: Date(timeIntervalSince1970: 1_775_000_000)
         )
-        let matching = NetworkSnapshot(rebootIdentity: 42, serviceID: "service-wifi", defaultInterface: "en0", tunnelInterface: "utun7", routes: ledger.routeDeltasApplied.map(\.routeSnapshot), resolver: ledger.dnsApplied!)
+        let matching = NetworkSnapshot(rebootIdentity: stableTestBootIdentity, serviceID: "service-wifi", defaultInterface: "en0", tunnelInterface: "utun7", routes: ledger.routeDeltasApplied.map(\.routeSnapshot), resolver: ledger.dnsApplied!)
         #expect(NetworkLedgerRepairPlanner.plan(for: ledger, current: matching).status == "healed")
         var changedService = matching
         changedService.serviceID = "service-ethernet"
@@ -72,6 +74,10 @@ import Testing
         var changedDNS = matching
         changedDNS.resolver = ResolverSnapshot(serviceID: "service-wifi", servers: ["1.1.1.1"], searchDomains: ["hanyang.ac.kr"], activeInterface: "utun7")
         #expect(NetworkLedgerRepairPlanner.plan(for: ledger, current: changedDNS).status == "repair-required")
+        let legacyLedger = NetworkLedger(sessionNonce: ledger.sessionNonce, rebootIdentity: 42, serviceIDBefore: ledger.serviceIDBefore, defaultInterfaceBefore: ledger.defaultInterfaceBefore, defaultRouteBefore: ledger.defaultRouteBefore, tunnelInterface: ledger.tunnelInterface, routeDeltasApplied: ledger.routeDeltasApplied, routeRecords: ledger.routeRecords, dnsBefore: ledger.dnsBefore, dnsApplied: ledger.dnsApplied, status: ledger.status, timestamp: ledger.timestamp)
+        var legacySnapshot = matching
+        legacySnapshot.rebootIdentity = 42
+        #expect(NetworkLedgerRepairPlanner.plan(for: legacyLedger, current: legacySnapshot).status == "repair-required")
     }
 
     @Test func canonicalRuntimeContractSeparatesWrapperAndUpstreamScript() throws {
@@ -439,6 +445,15 @@ esac
         }
         do {
             let fixture = try staleNetworkEpochFixture()
+            let setupKey = "Setup:/Network/Service/service-wifi/DNS"
+            fixture.tools.resolverSurfaces?[setupKey] = ResolverFieldSnapshot(servers: [], searchDomains: [], serversPresent: false, searchDomainsPresent: false, keyPresent: true, otherFingerprint: "foreign-setup-state")
+            #expect(throws: (any Error).self) { try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger) }
+            #expect(FileManager.default.fileExists(atPath: fixture.ledger.path))
+            #expect(fixture.tools.restoredDNSServers.isEmpty)
+            #expect(fixture.tools.restoredSearchDomains.isEmpty)
+        }
+        do {
+            let fixture = try staleNetworkEpochFixture()
             let foreign = RouteSnapshot(destination: fixture.tunnelRoute.destination, gateway: "192.0.2.254", interface: "en0", netmask: fixture.tunnelRoute.netmask, protocol: fixture.tunnelRoute.protocol)
             fixture.tools.routes = [foreign]
             #expect(throws: (any Error).self) { try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger) }
@@ -447,9 +462,8 @@ esac
         }
     }
 
-    @Test func staleNetworkRetirementRequiresSameBootServiceAndInterface() throws {
+    @Test func staleNetworkRetirementRequiresSameServiceAndInterface() throws {
         let mutations: [(TunnelSurfaceNetworkTools) -> Void] = [
-            { $0.rebootIdentityValue = 4243 },
             { $0.primaryServiceIDValue = "service-other" },
             { $0.defaultInterface = "en1" },
         ]
@@ -459,6 +473,56 @@ esac
             #expect(throws: (any Error).self) { try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger) }
             #expect(FileManager.default.fileExists(atPath: fixture.ledger.path))
         }
+    }
+
+    @Test func cleanLegacyLedgerRetiresWithoutClaimingBootMatch() throws {
+        let fixture = try staleNetworkEpochFixture(ledgerBootIdentity: 4242)
+
+        try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.ledger.path))
+        #expect(fixture.tools.restoredRoutes.isEmpty)
+        #expect(fixture.tools.restoredDNSServers.isEmpty)
+    }
+
+    @Test func legacyBootIdentityNeverAuthorizesDNSMutation() throws {
+        let fixture = try staleNetworkEpochFixture(ledgerBootIdentity: 4242)
+        fixture.tools.resolverServers = fixture.appliedDNS.servers
+        fixture.tools.resolverServersPresent = fixture.appliedDNS.serversPresent
+
+        #expect(throws: (any Error).self) { try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger) }
+        #expect(FileManager.default.fileExists(atPath: fixture.ledger.path))
+        #expect(fixture.tools.restoredRoutes.isEmpty)
+        #expect(fixture.tools.restoredDNSServers.isEmpty)
+    }
+
+    @Test func stableLedgerRetirementRequiresExactBootIdentity() throws {
+        let fixture = try staleNetworkEpochFixture()
+        fixture.tools.rebootIdentityValue = 0x8000_0000_0000_1093
+
+        #expect(throws: (any Error).self) { try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger) }
+        #expect(FileManager.default.fileExists(atPath: fixture.ledger.path))
+        #expect(fixture.tools.restoredRoutes.isEmpty)
+        #expect(fixture.tools.restoredDNSServers.isEmpty)
+    }
+
+    @Test func systemNetworkToolsUsesStableBootSessionUUID() throws {
+        let dir = try temporaryDirectory()
+        let sysctl = dir.appendingPathComponent("sysctl")
+        let calls = dir.appendingPathComponent("sysctl-calls")
+        try writeExecutable(sysctl, """
+        #!/bin/sh
+        printf '%s\n' "$*" >> '\(calls.path)'
+        [ "$1" = "-n" ] && [ "$2" = "kern.bootsessionuuid" ] || exit 1
+        printf '%s\n' '01234567-89AB-CDEF-0123-456789ABCDEF'
+        """)
+        let paths = RuntimePaths(ledgerRoot: dir, upstream: dir.appendingPathComponent("vpnc-script"), route: dir.appendingPathComponent("route"), scutil: dir.appendingPathComponent("scutil"), sysctl: sysctl, networksetup: dir.appendingPathComponent("networksetup"))
+
+        let identity = try SystemNetworkTools(paths: paths).rebootIdentity()
+        let arguments = try String(contentsOf: calls, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        #expect(identity == 0x8123_4567_89AB_CDEF)
+        #expect(arguments == "-n kern.bootsessionuuid")
     }
 
     @Test func systemNetworkToolsRestoresGatewayRouteWithoutDirectInterfaceModifier() throws {
@@ -657,7 +721,7 @@ private final class TunnelSurfaceApplyingUpstream: VpncUpstreamRunning {
 }
 
 private final class TunnelSurfaceNetworkTools: NetworkTooling {
-    var rebootIdentityValue: UInt64 = 4242
+    var rebootIdentityValue: UInt64 = stableTestBootIdentity
     var primaryServiceIDValue = "service-wifi"
     var defaultInterface = "en0"
     var defaultGateway = "192.0.2.1"
@@ -721,7 +785,7 @@ private struct StaleNetworkEpochFixture {
     let appliedDNS: ResolverSnapshot
 }
 
-private func staleNetworkEpochFixture() throws -> StaleNetworkEpochFixture {
+private func staleNetworkEpochFixture(ledgerBootIdentity: UInt64 = stableTestBootIdentity) throws -> StaleNetworkEpochFixture {
     let dir = try temporaryDirectory()
     let ledger = dir.appendingPathComponent("nonceabc123.ledger")
     let tools = TunnelSurfaceNetworkTools()
@@ -756,7 +820,7 @@ private func staleNetworkEpochFixture() throws -> StaleNetworkEpochFixture {
     try NetworkLedgerStore(path: ledger, expectedOwnerUID: UInt32(getuid())).save(
         NetworkLedger(
             sessionNonce: "nonceabc123",
-            rebootIdentity: 4242,
+            rebootIdentity: ledgerBootIdentity,
             serviceIDBefore: "service-wifi",
             defaultInterfaceBefore: "en0",
             defaultRouteBefore: oldDefault,
