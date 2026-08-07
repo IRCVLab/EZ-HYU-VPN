@@ -388,6 +388,46 @@ final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
         #expect(reconnects == 0)
     }
 
+
+    @Test func credentialResetLifecycleOrdersDisconnectTransactionAndSingleReconnect() {
+        var coordinator = AppLifecycleCoordinator()
+        #expect(coordinator.handle(.credentialResetRequested) == .init(terminationDirective: .none, effects: [.runControl(command: .disconnect, operation: .credentialSave, timeout: 3)]))
+        #expect(coordinator.handle(.credentialResetRequested).effects.isEmpty)
+        #expect(coordinator.handle(.primaryConnectRequested).effects.isEmpty)
+        #expect(coordinator.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.runCredentialTransaction]))
+        #expect(coordinator.handle(.credentialTransactionCompleted(.success)) == .init(terminationDirective: .none, effects: [.runControl(command: .connect, operation: .credentialSave, timeout: 3)]))
+        #expect(coordinator.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))).effects.isEmpty)
+        #expect(coordinator.handle(.primaryConnectRequested).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)])
+    }
+
+    @Test func credentialResetLifecycleSuppressesWritesReconnectAndTerminatesSafely() {
+        var disconnectFailure = AppLifecycleCoordinator()
+        _ = disconnectFailure.handle(.credentialResetRequested)
+        #expect(disconnectFailure.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE"))) == .init(terminationDirective: .none, effects: [.showCredentialResetError("CONTROL_UNAVAILABLE")]))
+
+        var transactionFailure = AppLifecycleCoordinator()
+        _ = transactionFailure.handle(.credentialResetRequested)
+        _ = transactionFailure.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil)))
+        #expect(transactionFailure.handle(.credentialTransactionCompleted(.failure(code: .rollbackFailed))) == .init(terminationDirective: .none, effects: [.showCredentialResetError("ROLLBACK_FAILED")]))
+
+        var terminateBeforeWrites = AppLifecycleCoordinator()
+        _ = terminateBeforeWrites.handle(.credentialResetRequested)
+        #expect(terminateBeforeWrites.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: [.dismissCredentialReset]))
+        #expect(terminateBeforeWrites.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.replyToTermination(true)]))
+
+        var terminateDisconnectFailure = AppLifecycleCoordinator()
+        _ = terminateDisconnectFailure.handle(.credentialResetRequested)
+        _ = terminateDisconnectFailure.handle(.terminateRequested)
+        #expect(terminateDisconnectFailure.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT"))) == .init(terminationDirective: .none, effects: [.replyToTermination(false), .showTerminationFailureAlert("CONTROL_TIMEOUT")]))
+
+        var terminateDuringTransaction = AppLifecycleCoordinator()
+        _ = terminateDuringTransaction.handle(.credentialResetRequested)
+        _ = terminateDuringTransaction.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil)))
+        #expect(terminateDuringTransaction.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: [.dismissCredentialReset]))
+        #expect(terminateDuringTransaction.handle(.credentialTransactionCompleted(.success)) == .init(terminationDirective: .none, effects: [.replyToTermination(true)]))
+        #expect(terminateDuringTransaction.handle(.terminateRequested) == .init(terminationDirective: .terminateNow, effects: []))
+    }
+
     @Test func startupPolicyRetriesOnlyFirstTwentyNineTransientOutcomesAndStopsAtThirtyAttempts() {
         var policy = StartupConnectPolicy()
         for _ in 0..<29 { #expect(policy.next(after: .controlUnavailable) == .retry(after: 1)) }

@@ -2,6 +2,11 @@ import AppKit
 import Foundation
 import HYUVPNMenuCore
 
+final class ResetPayloadBox: @unchecked Sendable {
+    var value: ValidatedCredentials?
+    init(_ value: ValidatedCredentials) { self.value = value }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, StatusValueSink {
     private var statusItem: NSStatusItem?
@@ -12,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private let control = SecureVPNControlClient()
     private var lifecycle = AppLifecycleCoordinator()
     private var startupRetryWorkItem: DispatchWorkItem?
+    private var resetController: CredentialResetController?
+    private var pendingResetPayload: ValidatedCredentials?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
@@ -21,6 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        resetController?.dismissWithoutSaving()
+        pendingResetPayload = nil
         let transition = lifecycle.handle(.terminateRequested)
         apply(transition)
         switch transition.terminationDirective {
@@ -85,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         menu.addItem(NSMenuItem.separator())
         addPrimaryAction(to: menu)
         addDisconnectAction(to: menu)
+        addResetAction(to: menu)
         menu.addItem(NSMenuItem.separator())
         addDiagnosticsAction(to: menu)
         menu.addItem(NSMenuItem.separator())
@@ -105,6 +115,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         let item = NSMenuItem(title: "Disconnect", action: #selector(disconnect), keyEquivalent: "")
         item.target = self
         item.isEnabled = disconnectEnabled()
+        menu.addItem(item)
+    }
+
+    private func addResetAction(to menu: NSMenu) {
+        let item = NSMenuItem(title: "Reset Login Information…", action: #selector(resetLoginInformation), keyEquivalent: "")
+        item.target = self
+        item.isEnabled = !lifecycle.controlsDisabled
         menu.addItem(item)
     }
 
@@ -176,6 +193,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         apply(lifecycle.handle(.disconnectRequested))
     }
 
+    @objc private func resetLoginInformation() {
+        guard resetController == nil, !lifecycle.controlsDisabled else { return }
+        let controller = CredentialResetController(prefillUsername: SystemCredentialBootstrap.currentID()) { [weak self] controller, value in
+            guard let self else { return }
+            self.resetController = nil
+            guard let value else { return }
+            self.pendingResetPayload = value
+            let transition = self.lifecycle.handle(.credentialResetRequested)
+            if transition.effects.isEmpty {
+                self.pendingResetPayload = nil
+            }
+            self.apply(transition)
+            _ = controller
+        }
+        resetController = controller
+        NSApp.activate(ignoringOtherApps: true)
+        controller.present()
+    }
+
     @objc private func showDiagnostics() {
         let alert = NSAlert()
         alert.alertStyle = .informational
@@ -199,9 +235,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
             case .cancelStartupRetry:
                 cancelStartupRetry()
             case .replyToTermination(let allow):
+                pendingResetPayload = nil
                 NSApp.reply(toApplicationShouldTerminate: allow)
             case .showTerminationFailureAlert(let code):
                 presentQuitFailure(code)
+            case .runCredentialTransaction:
+                runCredentialTransaction()
+            case .showCredentialResetError(let code):
+                pendingResetPayload = nil
+                presentCredentialResetFailure(code)
+            case .dismissCredentialReset:
+                pendingResetPayload = nil
+                resetController?.dismissWithoutSaving()
             }
         }
         refreshStatusButton()
@@ -225,6 +270,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         }
     }
 
+    private func runCredentialTransaction() {
+        guard let payload = pendingResetPayload else {
+            apply(lifecycle.handle(.credentialTransactionCompleted(.failure(code: .readFailed))))
+            return
+        }
+        pendingResetPayload = nil
+        let box = ResetPayloadBox(payload)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let transaction = SystemCredentialTransactionFactory.make()
+            let result: CredentialTransactionResult
+            if let value = box.value {
+                result = transaction.apply(value)
+            } else {
+                result = .failure(code: .readFailed)
+            }
+            box.value = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.apply(self?.lifecycle.handle(.credentialTransactionCompleted(result)) ?? AppLifecycleTransition(terminationDirective: .none, effects: []))
+            }
+        }
+    }
+
     private func scheduleStartupRetry(after delay: TimeInterval) {
         cancelStartupRetry()
         let workItem = DispatchWorkItem { [weak self] in
@@ -238,6 +305,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private func cancelStartupRetry() {
         startupRetryWorkItem?.cancel()
         startupRetryWorkItem = nil
+    }
+
+    private func presentCredentialResetFailure(_ code: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Unable to reset HYU VPN login information"
+        alert.informativeText = "Credential Reset Result: \(code)"
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func presentQuitFailure(_ code: String) {

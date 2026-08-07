@@ -47,7 +47,10 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("menu-core-has-no-direct-foundation-process-run-surface", menuCoreHasNoDirectFoundationProcessRunSurface),
                 ("spawn-setup-seam-is-not-public-production-api", spawnSetupSeamIsNotPublicProductionAPI),
                 ("control-tower-credential-validation", controlTowerCredentialValidation),
-                ("control-tower-transaction-policy-gate", controlTowerTransactionPolicyGate)
+                ("control-tower-transaction-policy-gate", controlTowerTransactionPolicyGate),
+                ("native-credential-reset-source-contract", nativeCredentialResetSourceContract),
+                ("security-keychain-and-totp-source-contract", securityKeychainAndTOTPSourceContract),
+                ("credential-reset-lifecycle-runtime", credentialResetLifecycleRuntime)
             ]
             for (name, test) in tests { print("RUN \(name)"); try test(); print("PASS \(name)") }
             print("HARNESS PASS \(tests.count) tests")
@@ -615,6 +618,70 @@ time.sleep(20)
         gate.finish(.connect)
         try expect(gate.begin(.quit), "finish permits new operation")
         try expect(LoginItemState.approvalRequired == .approvalRequired, "login item model available")
+    }
+
+    static func nativeCredentialResetSourceContract() throws {
+        let root = packageRoot().deletingLastPathComponent()
+        let appSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        let controllerSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/CredentialResetController.swift"))
+        try expect(appSource.contains("Reset Login Information…"), "exact reset menu copy present")
+        try expect(appSource.range(of: "Disconnect")!.lowerBound < appSource.range(of: "Reset Login Information…")!.lowerBound, "reset follows disconnect")
+        try expect(appSource.range(of: "Reset Login Information…")!.lowerBound < appSource.range(of: "Diagnostics…")!.lowerBound, "reset precedes diagnostics")
+        for label in ["HYU ID", "Password", "Confirm Password", "TOTP Setup Secret", "Confirm TOTP Secret"] {
+            try expect(controllerSource.contains(label), "native sheet contains label \(label)")
+        }
+        try expect(controllerSource.components(separatedBy: "NSSecureTextField").count - 1 >= 4, "four secure text field references")
+        try expect(controllerSource.contains("CredentialValidator.validate"), "existing validator used")
+        try expect(controllerSource.contains("validationMessage"), "validation remains in native sheet")
+        try expect(controllerSource.contains("prefillUsername"), "username prefill seam exists")
+        try expect(appSource.contains("resetController?.dismissWithoutSaving()"), "quit while form open cancels native form before lifecycle termination")
+        try expect(appSource.contains("pendingResetPayload = nil"), "submitted reset payload cleared on cancellation and failure effects")
+        try expect(appSource.contains("NSApp.activate") && appSource.contains("controller.present()"), "reset uses standalone native window activation")
+        try expect(!appSource.contains("button?.window") && !controllerSource.contains("beginSheet"), "reset does not attach to status bar private window")
+        try expect(!controllerSource.contains("Terminal") && !controllerSource.contains("installer"), "reset controller avoids terminal and installer")
+    }
+
+    static func securityKeychainAndTOTPSourceContract() throws {
+        let root = packageRoot().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/SystemAdapters.swift"))
+        for required in ["import Security", "SecItemCopyMatching", "SecItemUpdate", "SecItemAdd", "SecItemDelete", "hyu-vpn", "gp-vpn-username", "gp-vpn-password", "gp-vpn-totp", "O_NOFOLLOW", "O_CLOEXEC", "flock", "LOCK_EX", "fstatat", "AT_SYMLINK_NOFOLLOW", "unlinkat", "totp-counter.json.lock", "totp-counter.json", "0o600", "0o700"] {
+            try expect(source.contains(required), "system adapter source contains \(required)")
+        }
+        for forbidden in ["/usr/bin/security", "Process(", "posix_spawn", "NSTask", "NSLog", "os_log", "print(", "SecCopyErrorMessageString"] {
+            try expect(!source.contains(forbidden), "system adapter source omits \(forbidden)")
+        }
+        try expect(source.contains("private static let services: [CredentialKey: String]"), "closed service map by CredentialKey")
+        try expect(source.contains("Set(CredentialKey.allCases)"), "service map covers only enum keys")
+        try expect(!source.contains("createDirectory") && !source.contains("setAttributes"), "totp reset does not chmod or create through unverified paths")
+    }
+
+    static func credentialResetLifecycleRuntime() throws {
+        var coordinator = AppLifecycleCoordinator()
+        try expect(coordinator.handle(.credentialResetRequested).effects == [.runControl(command: .disconnect, operation: .credentialSave, timeout: 3)], "reset starts verified disconnect")
+        try expect(coordinator.handle(.credentialResetRequested).effects.isEmpty, "duplicate reset suppressed")
+        try expect(coordinator.handle(.disconnectRequested).effects.isEmpty, "disconnect suppressed during reset")
+        try expect(coordinator.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))).effects == [.runCredentialTransaction], "transaction follows disconnect success")
+        try expect(coordinator.handle(.credentialTransactionCompleted(.success)).effects == [.runControl(command: .connect, operation: .credentialSave, timeout: 3)], "connect follows transaction success")
+        try expect(coordinator.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))).effects.isEmpty, "reset completes after one connect")
+
+        var failedDisconnect = AppLifecycleCoordinator()
+        _ = failedDisconnect.handle(.credentialResetRequested)
+        try expect(failedDisconnect.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT"))).effects == [.showCredentialResetError("CONTROL_TIMEOUT")], "disconnect failure reports no transaction")
+
+        var failedTransaction = AppLifecycleCoordinator()
+        _ = failedTransaction.handle(.credentialResetRequested)
+        _ = failedTransaction.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil)))
+        try expect(failedTransaction.handle(.credentialTransactionCompleted(.failure(code: .totpResetFailed))).effects == [.showCredentialResetError("TOTP_RESET_FAILED")], "transaction failure reports no connect")
+
+        var terminating = AppLifecycleCoordinator()
+        _ = terminating.handle(.credentialResetRequested)
+        try expect(terminating.handle(.terminateRequested).effects == [.dismissCredentialReset], "termination dismisses reset UI before writes")
+        try expect(terminating.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))).effects == [.replyToTermination(true)], "termination before writes skips mutation and replies")
+
+        var terminatingFailedDisconnect = AppLifecycleCoordinator()
+        _ = terminatingFailedDisconnect.handle(.credentialResetRequested)
+        _ = terminatingFailedDisconnect.handle(.terminateRequested)
+        try expect(terminatingFailedDisconnect.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT"))).effects == [.replyToTermination(false), .showTerminationFailureAlert("CONTROL_TIMEOUT")], "quit during reset disconnect preserves safe-quit failure")
     }
 
 }

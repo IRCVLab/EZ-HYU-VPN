@@ -90,6 +90,8 @@ public enum AppLifecycleEvent: Equatable, Sendable {
     case primaryReconnectRequested
     case disconnectRequested
     case terminateRequested
+    case credentialResetRequested
+    case credentialTransactionCompleted(CredentialTransactionResult)
     case startupRetryTimerFired
     case controlCompleted(operation: ControlTowerOperation, result: ControlResult)
 }
@@ -100,6 +102,9 @@ public enum AppLifecycleEffect: Equatable, Sendable {
     case cancelStartupRetry
     case replyToTermination(Bool)
     case showTerminationFailureAlert(String)
+    case runCredentialTransaction
+    case showCredentialResetError(String)
+    case dismissCredentialReset
 }
 
 public struct AppLifecycleTransition: Equatable, Sendable {
@@ -118,6 +123,8 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
         case primaryConnect
         case primaryReconnect
         case disconnect
+        case credentialDisconnect
+        case credentialConnect
         case quit
     }
 
@@ -130,6 +137,8 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
     private var terminationPending: Bool
     private var terminationAttachedToDisconnect: Bool
     private var terminationResolved: Bool
+    private var credentialTransactionRunning: Bool
+    private var credentialCancelledBeforeTransaction: Bool
 
     public init(
         startupPolicy: StartupConnectPolicy = StartupConnectPolicy(),
@@ -140,7 +149,9 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
         pendingDisconnectRequest: Bool = false,
         terminationPending: Bool = false,
         terminationAttachedToDisconnect: Bool = false,
-        terminationResolved: Bool = false
+        terminationResolved: Bool = false,
+        credentialTransactionRunning: Bool = false,
+        credentialCancelledBeforeTransaction: Bool = false
     ) {
         self.startupPolicy = startupPolicy
         self.operationGate = operationGate
@@ -149,7 +160,7 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
             case .connect: return .primaryConnect
             case .reconnect: return .primaryReconnect
             case .disconnect: return .disconnect
-            case .credentialSave: return .primaryConnect
+            case .credentialSave: return .credentialDisconnect
             case .quit: return .quit
             }
         }
@@ -159,6 +170,8 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
         self.terminationPending = terminationPending
         self.terminationAttachedToDisconnect = terminationAttachedToDisconnect
         self.terminationResolved = terminationResolved
+        self.credentialTransactionRunning = credentialTransactionRunning
+        self.credentialCancelledBeforeTransaction = credentialCancelledBeforeTransaction
     }
 
     public var activeOperation: ControlTowerOperation? { operationGate.activeOperation }
@@ -193,10 +206,24 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
                 pendingDisconnectRequest = false
                 let transition = startControlIfPossible(command: .disconnect, operation: .disconnect, timeout: 3, source: .disconnect)
                 effects.append(contentsOf: transition.effects)
-            } else if activeOperation != .disconnect && activeOperation != .quit {
+            } else if activeOperation != .disconnect && activeOperation != .quit && activeOperation != .credentialSave {
                 pendingDisconnectRequest = true
             }
             return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+
+        case .credentialResetRequested:
+            var effects = cancelRetryEffects()
+            startupConnectPaused = true
+            pendingDisconnectRequest = false
+            guard !terminationPending else {
+                return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+            }
+            let transition = startControlIfPossible(command: .disconnect, operation: .credentialSave, timeout: 3, source: .credentialDisconnect)
+            effects.append(contentsOf: transition.effects)
+            return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+
+        case .credentialTransactionCompleted(let result):
+            return handleCredentialTransactionCompleted(result)
 
         case .terminateRequested:
             var effects = cancelRetryEffects()
@@ -209,6 +236,14 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
             if let activeOperation {
                 if activeOperation == .disconnect {
                     terminationAttachedToDisconnect = true
+                }
+                if activeOperation == .credentialSave {
+                    if credentialTransactionRunning {
+                        effects.append(.dismissCredentialReset)
+                    } else if activeSource == .credentialDisconnect {
+                        credentialCancelledBeforeTransaction = true
+                        effects.append(.dismissCredentialReset)
+                    }
                 }
                 return AppLifecycleTransition(terminationDirective: .terminateLater, effects: effects)
             }
@@ -248,6 +283,11 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
             return AppLifecycleTransition(terminationDirective: .none, effects: [])
         }
         let completedSource = activeSource
+
+        if operation == .credentialSave {
+            return handleCredentialControlCompleted(source: completedSource, result: result)
+        }
+
         operationGate.finish(operation)
         activeSource = nil
 
@@ -287,6 +327,75 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
         }
 
         return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+    }
+
+    private mutating func handleCredentialControlCompleted(source: ActiveSource?, result: ControlResult) -> AppLifecycleTransition {
+        switch source {
+        case .credentialDisconnect:
+            guard result.status == .ok else {
+                let code = normalizedControlResult(result)
+                finishCredentialReset()
+                if terminationPending {
+                    terminationPending = false
+                    return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(false), .showTerminationFailureAlert(code)])
+                }
+                return AppLifecycleTransition(terminationDirective: .none, effects: [.showCredentialResetError(code)])
+            }
+            if credentialCancelledBeforeTransaction || terminationPending {
+                finishCredentialReset()
+                terminationResolved = true
+                terminationPending = false
+                return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(true)])
+            }
+            credentialTransactionRunning = true
+            return AppLifecycleTransition(terminationDirective: .none, effects: [.runCredentialTransaction])
+        case .credentialConnect:
+            finishCredentialReset()
+            if terminationPending {
+                return startControlIfPossible(command: .disconnect, operation: .quit, timeout: 15, source: .quit)
+            }
+            if result.status == .ok {
+                return AppLifecycleTransition(terminationDirective: .none, effects: [])
+            }
+            return AppLifecycleTransition(terminationDirective: .none, effects: [.showCredentialResetError(normalizedControlResult(result))])
+        default:
+            finishCredentialReset()
+            return AppLifecycleTransition(terminationDirective: .none, effects: [])
+        }
+    }
+
+    private mutating func handleCredentialTransactionCompleted(_ result: CredentialTransactionResult) -> AppLifecycleTransition {
+        guard activeOperation == .credentialSave, credentialTransactionRunning else {
+            return AppLifecycleTransition(terminationDirective: .none, effects: [])
+        }
+        credentialTransactionRunning = false
+        switch result {
+        case .success:
+            if terminationPending {
+                finishCredentialReset()
+                terminationResolved = true
+                terminationPending = false
+                return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(true)])
+            }
+            activeSource = .credentialConnect
+            return AppLifecycleTransition(terminationDirective: .none, effects: [.runControl(command: .connect, operation: .credentialSave, timeout: 3)])
+        case .failure(let code):
+            finishCredentialReset()
+            if terminationPending {
+                terminationResolved = true
+                terminationPending = false
+                return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(true)])
+            }
+            return AppLifecycleTransition(terminationDirective: .none, effects: [.showCredentialResetError(code.rawValue)])
+        }
+    }
+
+    private mutating func finishCredentialReset() {
+        operationGate.finish(.credentialSave)
+        activeSource = nil
+        credentialTransactionRunning = false
+        credentialCancelledBeforeTransaction = false
+        pendingDisconnectRequest = false
     }
 
     private mutating func startControlIfPossible(command: VPNControlCommand, operation: ControlTowerOperation, timeout: TimeInterval, source: ActiveSource) -> AppLifecycleTransition {
@@ -350,6 +459,8 @@ public struct CredentialResetInput: Equatable, Sendable {
 }
 
 public struct ValidatedCredentials: Equatable, Sendable {
+    public static let cleared = ValidatedCredentials(username: "", password: "", normalizedTOTPSeed: nil)
+
     public let username: String
     public let password: String
     public let normalizedTOTPSeed: String?
