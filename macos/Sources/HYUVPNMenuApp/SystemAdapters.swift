@@ -2,8 +2,9 @@ import Foundation
 import Security
 import Darwin
 import HYUVPNMenuCore
+import HYUVPNKeychainAccessShim
 
-final class KeychainCredentialStore: CredentialStore {
+package final class KeychainCredentialStore: CredentialStore {
     enum AdapterError: Error { case keychainFailure }
 
     private static let account = "hyu-vpn"
@@ -17,7 +18,7 @@ final class KeychainCredentialStore: CredentialStore {
         precondition(Set(Self.services.keys) == Set(CredentialKey.allCases))
     }
 
-    func read(_ key: CredentialKey) throws -> String? {
+    package func read(_ key: CredentialKey) throws -> String? {
         var query = baseQuery(for: key)
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -31,7 +32,7 @@ final class KeychainCredentialStore: CredentialStore {
         return value
     }
 
-    func write(_ value: String, for key: CredentialKey) throws {
+    package func write(_ value: String, for key: CredentialKey) throws {
         guard let data = value.data(using: .utf8) else { throw AdapterError.keychainFailure }
         let query = baseQuery(for: key)
         let attributes: [String: Any] = [kSecValueData as String: data]
@@ -41,6 +42,8 @@ final class KeychainCredentialStore: CredentialStore {
 
         var addQuery = query
         addQuery[kSecValueData as String] = data
+        let access = try KeychainCredentialAccessFactory.make()
+        addQuery[kSecAttrAccess as String] = access
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         if addStatus == errSecSuccess { return }
         if addStatus == errSecDuplicateItem {
@@ -50,7 +53,7 @@ final class KeychainCredentialStore: CredentialStore {
         throw AdapterError.keychainFailure
     }
 
-    func remove(_ key: CredentialKey) throws {
+    package func remove(_ key: CredentialKey) throws {
         let status = SecItemDelete(baseQuery(for: key) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw AdapterError.keychainFailure }
     }
@@ -65,22 +68,40 @@ final class KeychainCredentialStore: CredentialStore {
     }
 }
 
-enum SystemCredentialBootstrap {
-    static func currentID() -> String? {
+package enum KeychainCredentialAccessFactory {
+    package static func make() throws -> SecAccess {
+        var unmanagedAccess: Unmanaged<SecAccess>?
+        let status = HYUVPNCreateCredentialAccess(&unmanagedAccess)
+        guard status == errSecSuccess, let access = unmanagedAccess?.takeRetainedValue() else { throw KeychainCredentialStore.AdapterError.keychainFailure }
+        return access
+    }
+}
+
+package enum SystemCredentialBootstrap {
+    package static func currentID() -> String? {
         try? KeychainCredentialStore().read(.username)
     }
 }
 
-final class FileTOTPStateResetter: TOTPStateResetting {
+package enum FileTOTPMetadataPolicy {
+    package static func isSafe(ownerUID: uid_t, mode: mode_t, directory: Bool, expectedMode: mode_t, currentUID: uid_t = getuid()) -> Bool {
+        guard ownerUID == currentUID else { return false }
+        let expectedType = directory ? S_IFDIR : S_IFREG
+        guard (mode & S_IFMT) == expectedType else { return false }
+        return (mode & 0o777) == expectedMode
+    }
+}
+
+package final class FileTOTPStateResetter: TOTPStateResetting {
     enum AdapterError: Error { case unsafePath }
 
     private let root: URL
 
-    init(home: URL = URL(fileURLWithPath: NSHomeDirectory())) {
+    package init(home: URL = URL(fileURLWithPath: NSHomeDirectory())) {
         self.root = home.appendingPathComponent("Library/Application Support/hyu-openconnect", isDirectory: true)
     }
 
-    func resetTOTPState() throws {
+    package func resetTOTPState() throws {
         let mkdirStatus = mkdir(root.path, 0o700)
         guard mkdirStatus == 0 || errno == EEXIST else { throw AdapterError.unsafePath }
 
@@ -113,18 +134,14 @@ final class FileTOTPStateResetter: TOTPStateResetting {
     }
 
     private func verify(info: stat, directory: Bool, mode: mode_t) throws {
-        guard info.st_uid == getuid() else { throw AdapterError.unsafePath }
-        if directory {
-            guard (info.st_mode & S_IFMT) == S_IFDIR else { throw AdapterError.unsafePath }
-        } else {
-            guard (info.st_mode & S_IFMT) == S_IFREG else { throw AdapterError.unsafePath }
+        guard FileTOTPMetadataPolicy.isSafe(ownerUID: info.st_uid, mode: info.st_mode, directory: directory, expectedMode: mode) else {
+            throw AdapterError.unsafePath
         }
-        guard (info.st_mode & 0o777) == mode else { throw AdapterError.unsafePath }
     }
 }
 
-enum SystemCredentialTransactionFactory {
-    static func make() -> CredentialTransaction {
+package enum SystemCredentialTransactionFactory {
+    package static func make() -> CredentialTransaction {
         CredentialTransaction(store: KeychainCredentialStore(), totpResetter: FileTOTPStateResetter())
     }
 }

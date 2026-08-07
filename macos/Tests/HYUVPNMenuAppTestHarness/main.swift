@@ -1,8 +1,11 @@
+import AppKit
 import Foundation
 import Darwin
 import HYUVPNMenuCore
+import HYUVPNMenuAppSupport
 
 struct HarnessFailure: Error, CustomStringConvertible { let description: String }
+final class LockedResetState: @unchecked Sendable { let lock = NSLock(); var completed = false; var error: Error? }
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw HarnessFailure(description: message) } }
 func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { try body(); throw HarnessFailure(description: "expected throw: \(message)") } catch is HarnessFailure { throw HarnessFailure(description: "expected throw: \(message)") } catch {} }
 func requireIndex(of needle: String, in haystack: String, message: String) throws -> String.Index {
@@ -50,6 +53,11 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("control-tower-transaction-policy-gate", controlTowerTransactionPolicyGate),
                 ("native-credential-reset-source-contract", nativeCredentialResetSourceContract),
                 ("security-keychain-and-totp-source-contract", securityKeychainAndTOTPSourceContract),
+                ("totp-resetter-runtime-secure-delete-and-missing-state", totpResetterRuntimeSecureDeleteAndMissingState),
+                ("totp-resetter-runtime-unsafe-metadata-fails-closed", totpResetterRuntimeUnsafeMetadataFailsClosed),
+                ("totp-resetter-runtime-flock-coordination", totpResetterRuntimeFlockCoordination),
+                ("keychain-add-access-runtime-and-source-contract", keychainAddAccessRuntimeAndSourceContract),
+                ("credential-reset-controller-runtime-behavior", credentialResetControllerRuntimeBehavior),
                 ("credential-reset-lifecycle-runtime", credentialResetLifecycleRuntime)
             ]
             for (name, test) in tests { print("RUN \(name)"); try test(); print("PASS \(name)") }
@@ -599,6 +607,9 @@ time.sleep(20)
         let successResetter = HarnessTOTPResetter()
         let success = CredentialTransaction(store: HarnessCredentialStore(initial: [:]), totpResetter: successResetter) { reconnects += 1 }.apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
         try expect(success == .success && successResetter.resetCount == 1 && reconnects == 1, "success resets after commit and reconnects once")
+        let blankResetter = HarnessTOTPResetter()
+        let blank = CredentialTransaction(store: HarnessCredentialStore(initial: [:]), totpResetter: blankResetter).apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: nil))
+        try expect(blank == .success && blankResetter.resetCount == 0, "blank TOTP transaction does not call resetter")
         let readFailure = CredentialTransaction(store: HarnessCredentialStore(initial: [:], failReadKey: .password), totpResetter: HarnessTOTPResetter()).apply(ValidatedCredentials(username: "canary-user", password: "canary-pass", normalizedTOTPSeed: nil))
         try expect(readFailure == .failure(code: .readFailed) && readFailure.description == "READ_FAILED", "read failure stable code")
         let rollbackStore = HarnessCredentialStore(initial: [:], failRemoveKeys: [.totpSeed])
@@ -653,6 +664,238 @@ time.sleep(20)
         try expect(source.contains("private static let services: [CredentialKey: String]"), "closed service map by CredentialKey")
         try expect(source.contains("Set(CredentialKey.allCases)"), "service map covers only enum keys")
         try expect(!source.contains("createDirectory") && !source.contains("setAttributes"), "totp reset does not chmod or create through unverified paths")
+    }
+
+    static func totpResetterRuntimeSecureDeleteAndMissingState() throws {
+        let first = try makeTOTPFixture()
+        defer { try? FileManager.default.removeItem(at: first.home) }
+        try writeSecureFile(first.lock, Data("lock".utf8), mode: 0o600)
+        try writeSecureFile(first.state, Data("state".utf8), mode: 0o600)
+        try FileTOTPStateResetter(home: first.home).resetTOTPState()
+        try expect(!FileManager.default.fileExists(atPath: first.state.path), "secure state deleted")
+        try expect(FileManager.default.fileExists(atPath: first.lock.path), "lock preserved after state delete")
+
+        let second = try makeTOTPFixture()
+        defer { try? FileManager.default.removeItem(at: second.home) }
+        try writeSecureFile(second.lock, Data("lock".utf8), mode: 0o600)
+        try FileTOTPStateResetter(home: second.home).resetTOTPState()
+        try expect(!FileManager.default.fileExists(atPath: second.state.path), "missing state remains missing")
+        try expect(FileManager.default.fileExists(atPath: second.lock.path), "lock preserved when state missing")
+    }
+
+    static func totpResetterRuntimeUnsafeMetadataFailsClosed() throws {
+        try expect(!FileTOTPMetadataPolicy.isSafe(ownerUID: getuid() + 1, mode: S_IFREG | 0o600, directory: false, expectedMode: 0o600), "wrong owner rejected by real metadata policy")
+
+        let parentSymlink = try makeTOTPFixture(createRoot: false)
+        defer { try? FileManager.default.removeItem(at: parentSymlink.home) }
+        let unsafeTarget = parentSymlink.home.appendingPathComponent("unsafe-target", isDirectory: true)
+        try FileManager.default.createDirectory(at: unsafeTarget, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unsafeTarget.path)
+        try FileManager.default.createSymbolicLink(atPath: parentSymlink.root.path, withDestinationPath: unsafeTarget.path)
+        try writeSecureFile(unsafeTarget.appendingPathComponent("totp-counter.json"), Data("state".utf8), mode: 0o600)
+        try expectThrows("parent symlink") { try FileTOTPStateResetter(home: parentSymlink.home).resetTOTPState() }
+        try expect(FileManager.default.fileExists(atPath: unsafeTarget.appendingPathComponent("totp-counter.json").path), "parent symlink target state preserved")
+
+        try assertUnsafeFixture(name: "parent-wrong-mode", prepare: { fixture in
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fixture.root.path)
+        }, preservedPath: \.state)
+        try assertUnsafeFixture(name: "lock-symlink", prepare: { fixture in
+            try FileManager.default.removeItem(at: fixture.lock)
+            let target = fixture.home.appendingPathComponent("lock-target")
+            try writeSecureFile(target, Data("target".utf8), mode: 0o600)
+            try FileManager.default.createSymbolicLink(atPath: fixture.lock.path, withDestinationPath: target.path)
+        }, preservedPath: \.state)
+        try assertUnsafeFixture(name: "lock-wrong-mode", prepare: { fixture in
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.lock.path)
+        }, preservedPath: \.state)
+        try assertUnsafeFixture(name: "lock-wrong-type", prepare: { fixture in
+            try FileManager.default.removeItem(at: fixture.lock)
+            try FileManager.default.createDirectory(at: fixture.lock, withIntermediateDirectories: false)
+        }, preservedPath: \.state)
+        try assertUnsafeFixture(name: "state-symlink", prepare: { fixture in
+            try FileManager.default.removeItem(at: fixture.state)
+            let target = fixture.home.appendingPathComponent("state-target")
+            try writeSecureFile(target, Data("target".utf8), mode: 0o600)
+            try FileManager.default.createSymbolicLink(atPath: fixture.state.path, withDestinationPath: target.path)
+        }, preservedPath: \.state)
+        try assertUnsafeFixture(name: "state-wrong-mode", prepare: { fixture in
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fixture.state.path)
+        }, preservedPath: \.state)
+        try assertUnsafeFixture(name: "state-wrong-type", prepare: { fixture in
+            try FileManager.default.removeItem(at: fixture.state)
+            try FileManager.default.createDirectory(at: fixture.state, withIntermediateDirectories: false)
+        }, preservedPath: \.state)
+    }
+
+    static func totpResetterRuntimeFlockCoordination() throws {
+        let fixture = try makeTOTPFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        try writeSecureFile(fixture.lock, Data("lock".utf8), mode: 0o600)
+        try writeSecureFile(fixture.state, Data("state".utf8), mode: 0o600)
+        let fd = open(fixture.lock.path, O_RDWR | O_CLOEXEC)
+        try expect(fd >= 0, "lock fd opened")
+        defer { close(fd) }
+        try expect(flock(fd, LOCK_EX) == 0, "exclusive lock held by test")
+        let semaphore = DispatchSemaphore(value: 0)
+        let resetState = LockedResetState()
+        DispatchQueue.global(qos: .utility).async {
+            do { try FileTOTPStateResetter(home: fixture.home).resetTOTPState() }
+            catch { resetState.lock.lock(); resetState.error = error; resetState.lock.unlock() }
+            resetState.lock.lock(); resetState.completed = true; resetState.lock.unlock()
+            semaphore.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.3)
+        resetState.lock.lock(); let blocked = !resetState.completed; resetState.lock.unlock()
+        try expect(blocked, "resetter blocks behind existing flock")
+        try expect(FileManager.default.fileExists(atPath: fixture.state.path), "state not deleted while lock held")
+        try expect(flock(fd, LOCK_UN) == 0, "exclusive lock released")
+        try expect(semaphore.wait(timeout: .now() + 3) == .success, "resetter completed after release")
+        resetState.lock.lock(); let error = resetState.error; resetState.lock.unlock()
+        if let error { throw error }
+        try expect(!FileManager.default.fileExists(atPath: fixture.state.path), "state deleted after lock release")
+        try expect(FileManager.default.fileExists(atPath: fixture.lock.path), "lock preserved after coordinated delete")
+    }
+
+    static func keychainAddAccessRuntimeAndSourceContract() throws {
+        _ = try KeychainCredentialAccessFactory.make()
+        try expect(true, "SecAccess ACL can be created without keychain mutation")
+        let root = packageRoot().deletingLastPathComponent()
+        let shimSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNKeychainAccessShim/HYUVPNKeychainAccessShim.c"))
+        let adapterSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/SystemAdapters.swift"))
+        for required in ["SecTrustedApplicationCreateFromPath(NULL", #"SecTrustedApplicationCreateFromPath("/usr/bin/security""#, "SecAccessCreate", "trustedApplications[2]"] {
+            try expect(shimSource.contains(required), "keychain ACL shim contains \(required)")
+        }
+        try expect(shimSource.contains("-Wdeprecated-declarations") || shimSource.contains("deprecated-declarations"), "deprecation warning is scoped to shim")
+        let addIndex = try requireIndex(of: "SecItemAdd", in: adapterSource, message: "add index")
+        let accessIndex = try requireIndex(of: "kSecAttrAccess", in: adapterSource, message: "access index")
+        let updateIndex = try requireIndex(of: "SecItemUpdate", in: adapterSource, message: "update index")
+        try expect(accessIndex < addIndex, "ACL attached before add")
+        try expect(updateIndex < accessIndex, "update path remains before add-only ACL attachment")
+        try expect(adapterSource.components(separatedBy: "kSecAttrAccess").count - 1 == 1, "ACL attribute used only on add path")
+    }
+
+    static func credentialResetControllerRuntimeBehavior() throws {
+        let result = MainActor.assumeIsolated { runCredentialResetControllerProbe() }
+        try expect(result.editableFieldCount == 5, "actual controller has five editable fields")
+        try expect(result.secureFieldCount == 4, "actual controller has four secure fields")
+        try expect(result.mismatchKeptOpen, "mismatch keeps window open")
+        try expect(result.mismatchCompletionCount == 0, "mismatch does not complete")
+        try expect(result.mismatchMessage == "Passwords do not match.", "mismatch shows stable native validation copy")
+        try expect(!result.mismatchMessage.contains("one") && !result.mismatchMessage.contains("two"), "validation omits submitted values")
+        try expect(result.cancelReturnedNil && result.cancelClearedFields, "cancel returns nil and clears fields")
+        try expect(result.closeReturnedNil && result.closeCompletionCount == 1 && result.closeClearedFields, "window close returns nil exactly once and clears fields")
+        try expect(result.submitReturnedValue && result.submitClearedFields, "successful completion returns value and clears fields")
+    }
+
+    struct ControllerProbeResult {
+        let editableFieldCount: Int
+        let secureFieldCount: Int
+        let mismatchKeptOpen: Bool
+        let mismatchMessage: String
+        let mismatchCompletionCount: Int
+        let cancelReturnedNil: Bool
+        let cancelClearedFields: Bool
+        let closeReturnedNil: Bool
+        let closeCompletionCount: Int
+        let closeClearedFields: Bool
+        let submitReturnedValue: Bool
+        let submitClearedFields: Bool
+    }
+
+    @MainActor static func runCredentialResetControllerProbe() -> ControllerProbeResult {
+        _ = NSApplication.shared
+        var mismatchCompletionCount = 0
+        var mismatchValue: ValidatedCredentials?
+        let mismatch = CredentialResetController(prefillUsername: "prefilled") { _, value in
+            mismatchCompletionCount += 1
+            mismatchValue = value
+        }
+        mismatch.present()
+        let editableCount = inputFields(in: mismatch.harnessWindow?.contentView).count
+        let secureCount = inputFields(in: mismatch.harnessWindow?.contentView).filter { $0 is NSSecureTextField }.count
+        mismatch.harnessSetValues(first: "one", firstConfirmation: "two", second: "", secondConfirmation: "")
+        mismatch.harnessSubmit()
+        let mismatchMessage = mismatch.harnessValidationMessage
+        let mismatchOpen = mismatch.harnessWindow != nil && mismatchValue == nil
+        let mismatchCountBeforeCleanup = mismatchCompletionCount
+
+        var cancelReturnedNil = false
+        let cancel = CredentialResetController(prefillUsername: "prefilled") { _, value in cancelReturnedNil = value == nil }
+        cancel.present()
+        cancel.harnessSetValues(first: "one", firstConfirmation: "one", second: "", secondConfirmation: "")
+        cancel.harnessCancel()
+        let cancelCleared = fieldsCleared(cancel)
+
+        var closeCompletionCount = 0
+        var closeReturnedNil = false
+        let close = CredentialResetController(prefillUsername: "prefilled") { _, value in
+            closeCompletionCount += 1
+            closeReturnedNil = value == nil
+        }
+        close.present()
+        close.harnessSetValues(first: "one", firstConfirmation: "one", second: "", secondConfirmation: "")
+        close.harnessWindow?.close()
+        let closeCleared = fieldsCleared(close)
+
+        var submitReturnedValue = false
+        let submit = CredentialResetController(prefillUsername: "prefilled") { _, value in submitReturnedValue = value != nil }
+        submit.present()
+        submit.harnessSetValues(first: "one", firstConfirmation: "one", second: "", secondConfirmation: "")
+        submit.harnessSubmit()
+        let submitCleared = fieldsCleared(submit)
+        mismatch.dismissWithoutSaving()
+
+        return ControllerProbeResult(editableFieldCount: editableCount, secureFieldCount: secureCount, mismatchKeptOpen: mismatchOpen, mismatchMessage: mismatchMessage, mismatchCompletionCount: mismatchCountBeforeCleanup, cancelReturnedNil: cancelReturnedNil, cancelClearedFields: cancelCleared, closeReturnedNil: closeReturnedNil, closeCompletionCount: closeCompletionCount, closeClearedFields: closeCleared, submitReturnedValue: submitReturnedValue, submitClearedFields: submitCleared)
+    }
+
+    @MainActor static func fieldsCleared(_ controller: CredentialResetController) -> Bool {
+        controller.harnessFieldValues.allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    @MainActor static func inputFields(in root: NSView?) -> [NSTextField] {
+        guard let root else { return [] }
+        var result: [NSTextField] = []
+        if let field = root as? NSTextField, field.isEditable { result.append(field) }
+        for child in root.subviews { result.append(contentsOf: inputFields(in: child)) }
+        return result
+    }
+
+    struct TOTPFixture { let home: URL; let root: URL; let lock: URL; let state: URL }
+
+    static func makeTOTPFixture(createRoot: Bool = true) throws -> TOTPFixture {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-totp-\(UUID().uuidString)", isDirectory: true)
+        let support = home.appendingPathComponent("Library/Application Support", isDirectory: true)
+        let root = support.appendingPathComponent("hyu-openconnect", isDirectory: true)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: home.appendingPathComponent("Library", isDirectory: true).path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: support.path)
+        if createRoot {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        }
+        return TOTPFixture(home: home, root: root, lock: root.appendingPathComponent("totp-counter.json.lock"), state: root.appendingPathComponent("totp-counter.json"))
+    }
+
+    static func writeSecureFile(_ url: URL, _ data: Data, mode: Int) throws {
+        try data.write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+    }
+
+    static func assertUnsafeFixture(name: String, prepare: (TOTPFixture) throws -> Void, preservedPath: KeyPath<TOTPFixture, URL>) throws {
+        let fixture = try makeTOTPFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        try writeSecureFile(fixture.lock, Data("lock".utf8), mode: 0o600)
+        try writeSecureFile(fixture.state, Data("state".utf8), mode: 0o600)
+        try prepare(fixture)
+        try expectThrows(name) { try FileTOTPStateResetter(home: fixture.home).resetTOTPState() }
+        try expect(pathExists(fixture[keyPath: preservedPath]), "\(name) preserved protected path")
+        try expect(pathExists(fixture.lock) || name == "lock-wrong-type", "\(name) did not delete lock unexpectedly")
+    }
+
+    static func pathExists(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0
     }
 
     static func credentialResetLifecycleRuntime() throws {

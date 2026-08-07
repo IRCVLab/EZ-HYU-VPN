@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import HYUVPNMenuCore
+import HYUVPNMenuAppSupport
 
 final class ResetPayloadBox: @unchecked Sendable {
     var value: ValidatedCredentials?

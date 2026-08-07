@@ -2,25 +2,25 @@ import AppKit
 import HYUVPNMenuCore
 
 @MainActor
-final class CredentialResetController: NSObject, NSWindowDelegate {
-    typealias Completion = (CredentialResetController, ValidatedCredentials?) -> Void
+package final class CredentialResetController: NSObject, NSWindowDelegate {
+    package typealias Completion = (CredentialResetController, ValidatedCredentials?) -> Void
 
     private let completion: Completion
-    private var window: NSWindow?
-    private let idField = NSTextField(string: "")
-    private let firstSecretField = NSSecureTextField(string: "")
-    private let firstSecretConfirmationField = NSSecureTextField(string: "")
-    private let secondSecretField = NSSecureTextField(string: "")
-    private let secondSecretConfirmationField = NSSecureTextField(string: "")
-    private let validationMessage = NSTextField(labelWithString: " ")
+    fileprivate var window: NSWindow?
+    fileprivate let idField = NSTextField(string: "")
+    fileprivate let firstSecretField = NSSecureTextField(string: "")
+    fileprivate let firstSecretConfirmationField = NSSecureTextField(string: "")
+    fileprivate let secondSecretField = NSSecureTextField(string: "")
+    fileprivate let secondSecretConfirmationField = NSSecureTextField(string: "")
+    fileprivate let validationMessage = NSTextField(labelWithString: " ")
 
-    init(prefillUsername: String?, completion: @escaping Completion) {
+    package init(prefillUsername: String?, completion: @escaping Completion) {
         self.completion = completion
         super.init()
         idField.stringValue = prefillUsername ?? ""
     }
 
-    func present() {
+    package func present() {
         let resetWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 430, height: 270), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         resetWindow.title = "Reset Login Information"
         resetWindow.delegate = self
@@ -30,11 +30,11 @@ final class CredentialResetController: NSObject, NSWindowDelegate {
         resetWindow.makeKeyAndOrderFront(nil)
     }
 
-    func dismissWithoutSaving() {
+    package func dismissWithoutSaving() {
         finish(with: nil)
     }
 
-    func windowWillClose(_ notification: Notification) {
+    package func windowWillClose(_ notification: Notification) {
         finish(with: nil)
     }
 
@@ -93,11 +93,11 @@ final class CredentialResetController: NSObject, NSWindowDelegate {
         return row
     }
 
-    @objc private func cancelPressed() {
+    @objc fileprivate func cancelPressed() {
         finish(with: nil)
     }
 
-    @objc private func savePressed() {
+    @objc fileprivate func savePressed() {
         do {
             let input = CredentialResetInput(
                 username: idField.stringValue,
@@ -129,7 +129,7 @@ final class CredentialResetController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func finish(with value: ValidatedCredentials?) {
+    fileprivate func finish(with value: ValidatedCredentials?) {
         guard let resetWindow = window else { return }
         window = nil
         idField.stringValue = ""
@@ -145,4 +145,19 @@ final class CredentialResetController: NSObject, NSWindowDelegate {
         }
         completion(self, value)
     }
+
+    package var harnessWindow: NSWindow? { window }
+    package var harnessValidationMessage: String { validationMessage.stringValue }
+    package var harnessInputFields: [NSTextField] { [idField, firstSecretField, firstSecretConfirmationField, secondSecretField, secondSecretConfirmationField] }
+    package var harnessFieldValues: [String] { harnessInputFields.map(\.stringValue) + [validationMessage.stringValue] }
+
+    package func harnessSetValues(first: String, firstConfirmation: String, second: String, secondConfirmation: String) {
+        firstSecretField.stringValue = first
+        firstSecretConfirmationField.stringValue = firstConfirmation
+        secondSecretField.stringValue = second
+        secondSecretConfirmationField.stringValue = secondConfirmation
+    }
+
+    package func harnessSubmit() { savePressed() }
+    package func harnessCancel() { cancelPressed() }
 }

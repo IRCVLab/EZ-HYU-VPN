@@ -40,14 +40,30 @@ let package = Package(
             name: "HYUVPNMenuCore",
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
         ),
+        .target(
+            name: "HYUVPNKeychainAccessShim",
+            publicHeadersPath: "include",
+            cSettings: [.unsafeFlags(["-Wall", "-Wextra", "-Werror"])]
+        ),
+        .target(
+            name: "HYUVPNMenuAppSupport",
+            dependencies: ["HYUVPNMenuCore", "HYUVPNKeychainAccessShim"],
+            path: "Sources/HYUVPNMenuApp",
+            exclude: ["main.swift", "AppDelegate.swift"],
+            sources: ["CredentialResetController.swift", "SystemAdapters.swift"],
+            swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
+        ),
         .executableTarget(
             name: "HYUVPNMenuApp",
-            dependencies: ["HYUVPNMenuCore"],
+            dependencies: ["HYUVPNMenuCore", "HYUVPNMenuAppSupport"],
+            path: "Sources/HYUVPNMenuApp",
+            exclude: ["CredentialResetController.swift", "SystemAdapters.swift"],
+            sources: ["main.swift", "AppDelegate.swift"],
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
         ),
         .executableTarget(
             name: "HYUVPNMenuAppTestHarness",
-            dependencies: ["HYUVPNMenuCore"],
+            dependencies: ["HYUVPNMenuCore", "HYUVPNMenuAppSupport"],
             path: "Tests/HYUVPNMenuAppTestHarness",
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
         ),
