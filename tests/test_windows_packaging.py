@@ -150,6 +150,13 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('x86_64-w64-mingw32-objdump -p "$OUTPUT_DIR/openconnect.exe"', build)
         self.assertIn('libopenconnect-5.dll', build)
 
+    def test_windows_smoke_test_handles_openconnect_help_exit_one(self):
+        workflow = WINDOWS_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("$helpProcess = Start-Process", workflow)
+        self.assertIn("-ArgumentList '--help'", workflow)
+        self.assertIn("if ($helpProcess.ExitCode -ne 1)", workflow)
+        self.assertNotIn("$help = & (Join-Path $install 'runtime/openconnect.exe') --help", workflow)
+
     def test_openconnect_hip_patch_has_wine_end_to_end_test(self):
         test = OPENCONNECT_HIP_TEST.read_text(encoding="utf-8")
         build = OPENCONNECT_BUILD.read_text(encoding="utf-8")

@@ -113,7 +113,12 @@ jobs:
           if ($tray.ExitCode -ne 0) { throw 'Tray smoke test failed' }
           & (Join-Path $install 'runtime/openconnect.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'OpenConnect smoke test failed' }
-          $help = & (Join-Path $install 'runtime/openconnect.exe') --help 2>&1 | Out-String
+          $helpStdout = Join-Path $env:RUNNER_TEMP 'openconnect-help.stdout'
+          $helpStderr = Join-Path $env:RUNNER_TEMP 'openconnect-help.stderr'
+          $helpProcess = Start-Process (Join-Path $install 'runtime/openconnect.exe') -ArgumentList '--help' `
+            -Wait -PassThru -NoNewWindow -RedirectStandardOutput $helpStdout -RedirectStandardError $helpStderr
+          if ($helpProcess.ExitCode -ne 1) { throw "OpenConnect help returned unexpected status: $($helpProcess.ExitCode)" }
+          $help = (Get-Content -LiteralPath $helpStdout -Raw) + (Get-Content -LiteralPath $helpStderr -Raw)
           if ($help -notmatch '--csd-wrapper=SCRIPT') { throw 'Patched OpenConnect HIP option is missing' }
           $acl = (Get-Acl (Join-Path $env:ProgramData 'HYUVPN')).Sddl
           if ($acl -match ';;;BU\)' -or $acl -match ';;;WD\)' -or $acl -match ';;;AU\)') {
