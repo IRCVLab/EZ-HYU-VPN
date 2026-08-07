@@ -4,38 +4,31 @@ import HYUVPNMenuCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, StatusValueSink {
-    private enum ControlFollowUp {
-        case none
-        case startup
-        case quit
-    }
-
     private var statusItem: NSStatusItem?
     private var watcher: StatusWatcher?
     private var currentStatus: VPNStatus?
     private var currentPresentation = MenuPresentation(statusItemTitle: "", primaryText: "Status Unavailable", detailText: "", symbolName: "exclamationmark.shield.fill")
     private var lastControlResult: ControlResult?
     private let control = SecureVPNControlClient()
-    private var operationGate = OperationGate()
-    private var startupConnectPolicy = StartupConnectPolicy()
+    private var lifecycle = AppLifecycleCoordinator()
     private var startupRetryWorkItem: DispatchWorkItem?
-    private var startupConnectPaused = false
-    private var pendingDisconnectRequest = false
-    private var terminationPending = false
-    private var quitReplyPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
         rebuildMenu()
         startWatcher()
-        runControl(command: .connect, operation: .connect, followUp: .startup)
+        apply(lifecycle.handle(.appLaunched))
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        terminationPending = true
-        rebuildMenu()
-        startTerminationIfPossible()
-        return .terminateLater
+        let transition = lifecycle.handle(.terminateRequested)
+        apply(transition)
+        switch transition.terminationDirective {
+        case .none, .terminateLater:
+            return .terminateLater
+        case .terminateNow:
+            return .terminateNow
+        }
     }
 
     nonisolated func applyStatusValue(_ status: VPNStatus?) {
@@ -118,14 +111,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private func addDiagnosticsAction(to menu: NSMenu) {
         let item = NSMenuItem(title: "Diagnostics…", action: #selector(showDiagnostics), keyEquivalent: "")
         item.target = self
-        item.isEnabled = !controlsDisabled
+        item.isEnabled = !lifecycle.controlsDisabled
         menu.addItem(item)
     }
 
     private func addQuitAction(to menu: NSMenu) {
         let item = NSMenuItem(title: "Quit HYU VPN", action: #selector(quit), keyEquivalent: "q")
         item.target = self
-        item.isEnabled = !controlsDisabled
+        item.isEnabled = !lifecycle.controlsDisabled
         menu.addItem(item)
     }
 
@@ -135,35 +128,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         return item
     }
 
-    private var controlsDisabled: Bool {
-        operationGate.isBusy || terminationPending || quitReplyPending
-    }
-
     private func primaryAction() -> (title: String, command: VPNControlCommand?, isEnabled: Bool) {
         guard let status = currentStatus else {
             return ("Connect", nil, false)
         }
         switch status.state {
         case .connected:
-            return ("Reconnect", controlsDisabled ? nil : .reconnect, !controlsDisabled)
+            return ("Reconnect", lifecycle.controlsDisabled ? nil : .reconnect, !lifecycle.controlsDisabled)
         case .connecting:
             return ("Connecting…", nil, false)
         case .disconnecting:
             return ("Disconnecting…", nil, false)
         case .disabled:
-            return ("Connect", controlsDisabled ? nil : .connect, !controlsDisabled)
+            return ("Connect", lifecycle.controlsDisabled ? nil : .connect, !lifecycle.controlsDisabled)
         case .waitingForNetwork:
             return ("Waiting for Network", nil, false)
         case .backoff:
-            return ("Reconnect Now", controlsDisabled ? nil : .reconnect, !controlsDisabled)
+            return ("Reconnect Now", lifecycle.controlsDisabled ? nil : .reconnect, !lifecycle.controlsDisabled)
         case .error:
-            return ("Reconnect", controlsDisabled ? nil : .reconnect, !controlsDisabled)
+            return ("Reconnect", lifecycle.controlsDisabled ? nil : .reconnect, !lifecycle.controlsDisabled)
         }
     }
 
     private func disconnectEnabled() -> Bool {
         guard let status = currentStatus else { return false }
-        guard !controlsDisabled else { return false }
+        guard !lifecycle.controlsDisabled else { return false }
         switch status.state {
         case .connected, .connecting, .backoff, .error:
             return true
@@ -179,20 +168,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
 
     @objc private func primaryConnection(_ sender: NSMenuItem) {
         guard let command = sender.representedObject as? VPNControlCommand else { return }
-        startupRetryWorkItem?.cancel()
-        startupRetryWorkItem = nil
-        startupConnectPaused = false
-        pendingDisconnectRequest = false
-        let operation: ControlTowerOperation = command == .connect ? .connect : .reconnect
-        runControl(command: command, operation: operation)
+        let event: AppLifecycleEvent = command == .connect ? .primaryConnectRequested : .primaryReconnectRequested
+        apply(lifecycle.handle(event))
     }
 
     @objc private func disconnect() {
-        startupRetryWorkItem?.cancel()
-        startupRetryWorkItem = nil
-        startupConnectPaused = true
-        pendingDisconnectRequest = true
-        startPendingDisconnectIfNeeded()
+        apply(lifecycle.handle(.disconnectRequested))
     }
 
     @objc private func showDiagnostics() {
@@ -208,14 +189,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: nil, from: self)
     }
 
-    private func runControl(
-        command: VPNControlCommand,
-        operation: ControlTowerOperation,
-        timeout: TimeInterval = 3,
-        followUp: ControlFollowUp = .none
-    ) {
-        guard operationGate.begin(operation) else { return }
+    private func apply(_ transition: AppLifecycleTransition) {
+        for effect in transition.effects {
+            switch effect {
+            case .runControl(let command, let operation, let timeout):
+                runControl(command: command, operation: operation, timeout: timeout)
+            case .scheduleStartupRetry(let delay):
+                scheduleStartupRetry(after: delay)
+            case .cancelStartupRetry:
+                cancelStartupRetry()
+            case .replyToTermination(let allow):
+                NSApp.reply(toApplicationShouldTerminate: allow)
+            case .showTerminationFailureAlert(let code):
+                presentQuitFailure(code)
+            }
+        }
+        refreshStatusButton()
         rebuildMenu()
+    }
+
+    private func runControl(command: VPNControlCommand, operation: ControlTowerOperation, timeout: TimeInterval) {
         let client = control
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let result: ControlResult
@@ -227,99 +220,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.lastControlResult = result
-                self.operationGate.finish(operation)
-                self.rebuildMenu()
-                switch followUp {
-                case .none:
-                    break
-                case .startup:
-                    self.handleStartupConnectResult(result)
-                case .quit:
-                    self.handleQuitDisconnectResult(result)
-                }
-                if self.terminationPending, followUp != .quit {
-                    self.startTerminationIfPossible()
-                }
-                self.startPendingDisconnectIfNeeded()
+                self.apply(self.lifecycle.handle(.controlCompleted(operation: operation, result: result)))
             }
         }
     }
 
-    private func handleStartupConnectResult(_ result: ControlResult) {
-        guard !startupConnectPaused else { return }
-        switch startupConnectPolicy.next(after: startupOutcome(for: result)) {
-        case .retry(let delay):
-            scheduleStartupRetry(after: delay)
-        case .stop:
-            startupRetryWorkItem?.cancel()
-            startupRetryWorkItem = nil
-        }
-    }
-
-    private func startPendingDisconnectIfNeeded() {
-        guard pendingDisconnectRequest else { return }
-        guard !operationGate.isBusy else { return }
-        pendingDisconnectRequest = false
-        runControl(command: .disconnect, operation: .disconnect)
-    }
-
     private func scheduleStartupRetry(after delay: TimeInterval) {
-        guard !startupConnectPaused else { return }
-        startupRetryWorkItem?.cancel()
+        cancelStartupRetry()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            guard !startupConnectPaused else { return }
-            runControl(command: .connect, operation: .connect, followUp: .startup)
+            self.apply(self.lifecycle.handle(.startupRetryTimerFired))
         }
         startupRetryWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    private func startupOutcome(for result: ControlResult) -> StartupConnectOutcome {
-        switch result.status {
-        case .ok:
-            return .success
-        case .timeout:
-            return .failure(code: result.errorCode ?? "CONTROL_TIMEOUT")
-        case .failed:
-            switch result.errorCode {
-            case "CONTROL_LAUNCH_FAILED":
-                return .launchFailure
-            case "CONTROL_UNAVAILABLE":
-                return .controlUnavailable
-            default:
-                return .failure(code: result.errorCode ?? "CONTROL_FAILED")
-            }
-        }
+    private func cancelStartupRetry() {
+        startupRetryWorkItem?.cancel()
+        startupRetryWorkItem = nil
     }
 
-    private func startTerminationIfPossible() {
-        guard terminationPending else { return }
-        guard !quitReplyPending else { return }
-        guard !operationGate.isBusy else { return }
-        quitReplyPending = true
-        runControl(command: .disconnect, operation: .quit, timeout: 15, followUp: .quit)
-    }
-
-    private func handleQuitDisconnectResult(_ result: ControlResult) {
-        quitReplyPending = false
-        switch result.status {
-        case .ok:
-            terminationPending = false
-            NSApp.reply(toApplicationShouldTerminate: true)
-        case .failed, .timeout:
-            terminationPending = false
-            rebuildMenu()
-            presentQuitFailure(result)
-            NSApp.reply(toApplicationShouldTerminate: false)
-        }
-    }
-
-    private func presentQuitFailure(_ result: ControlResult) {
+    private func presentQuitFailure(_ code: String) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Unable to quit HYU VPN"
-        alert.informativeText = "Last Control Result: \(normalizedControlResult(result))"
+        alert.informativeText = "Last Control Result: \(code)"
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }

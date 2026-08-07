@@ -78,6 +78,261 @@ public struct OperationGate: Equatable, Sendable {
     }
 }
 
+public enum AppLifecycleTerminationDirective: Equatable, Sendable {
+    case none
+    case terminateLater
+    case terminateNow
+}
+
+public enum AppLifecycleEvent: Equatable, Sendable {
+    case appLaunched
+    case primaryConnectRequested
+    case primaryReconnectRequested
+    case disconnectRequested
+    case terminateRequested
+    case startupRetryTimerFired
+    case controlCompleted(operation: ControlTowerOperation, result: ControlResult)
+}
+
+public enum AppLifecycleEffect: Equatable, Sendable {
+    case runControl(command: VPNControlCommand, operation: ControlTowerOperation, timeout: TimeInterval)
+    case scheduleStartupRetry(after: TimeInterval)
+    case cancelStartupRetry
+    case replyToTermination(Bool)
+    case showTerminationFailureAlert(String)
+}
+
+public struct AppLifecycleTransition: Equatable, Sendable {
+    public let terminationDirective: AppLifecycleTerminationDirective
+    public let effects: [AppLifecycleEffect]
+
+    public init(terminationDirective: AppLifecycleTerminationDirective, effects: [AppLifecycleEffect]) {
+        self.terminationDirective = terminationDirective
+        self.effects = effects
+    }
+}
+
+public struct AppLifecycleCoordinator: Equatable, Sendable {
+    private enum ActiveSource: Equatable, Sendable {
+        case startup
+        case primaryConnect
+        case primaryReconnect
+        case disconnect
+        case quit
+    }
+
+    private var startupPolicy: StartupConnectPolicy
+    private var operationGate: OperationGate
+    private var activeSource: ActiveSource?
+    private var startupRetryScheduled: Bool
+    private var startupConnectPaused: Bool
+    private var pendingDisconnectRequest: Bool
+    private var terminationPending: Bool
+    private var terminationAttachedToDisconnect: Bool
+    private var terminationResolved: Bool
+
+    public init(
+        startupPolicy: StartupConnectPolicy = StartupConnectPolicy(),
+        operationGate: OperationGate = OperationGate(),
+        activeSource: ControlTowerOperation? = nil,
+        startupRetryScheduled: Bool = false,
+        startupConnectPaused: Bool = false,
+        pendingDisconnectRequest: Bool = false,
+        terminationPending: Bool = false,
+        terminationAttachedToDisconnect: Bool = false,
+        terminationResolved: Bool = false
+    ) {
+        self.startupPolicy = startupPolicy
+        self.operationGate = operationGate
+        self.activeSource = activeSource.map {
+            switch $0 {
+            case .connect: return .primaryConnect
+            case .reconnect: return .primaryReconnect
+            case .disconnect: return .disconnect
+            case .credentialSave: return .primaryConnect
+            case .quit: return .quit
+            }
+        }
+        self.startupRetryScheduled = startupRetryScheduled
+        self.startupConnectPaused = startupConnectPaused
+        self.pendingDisconnectRequest = pendingDisconnectRequest
+        self.terminationPending = terminationPending
+        self.terminationAttachedToDisconnect = terminationAttachedToDisconnect
+        self.terminationResolved = terminationResolved
+    }
+
+    public var activeOperation: ControlTowerOperation? { operationGate.activeOperation }
+    public var controlsDisabled: Bool { operationGate.isBusy || terminationPending }
+
+    public mutating func handle(_ event: AppLifecycleEvent) -> AppLifecycleTransition {
+        if terminationResolved {
+            if case .terminateRequested = event {
+                return AppLifecycleTransition(terminationDirective: .terminateNow, effects: [])
+            }
+            return AppLifecycleTransition(terminationDirective: .none, effects: [])
+        }
+
+        switch event {
+        case .appLaunched:
+            return startControlIfPossible(command: .connect, operation: .connect, timeout: 3, source: .startup)
+
+        case .primaryConnectRequested:
+            return startPrimary(command: .connect, operation: .connect, source: .primaryConnect)
+
+        case .primaryReconnectRequested:
+            return startPrimary(command: .reconnect, operation: .reconnect, source: .primaryReconnect)
+
+        case .disconnectRequested:
+            var effects = cancelRetryEffects()
+            startupConnectPaused = true
+            guard !terminationPending else {
+                pendingDisconnectRequest = false
+                return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+            }
+            if activeOperation == nil {
+                pendingDisconnectRequest = false
+                let transition = startControlIfPossible(command: .disconnect, operation: .disconnect, timeout: 3, source: .disconnect)
+                effects.append(contentsOf: transition.effects)
+            } else if activeOperation != .disconnect && activeOperation != .quit {
+                pendingDisconnectRequest = true
+            }
+            return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+
+        case .terminateRequested:
+            var effects = cancelRetryEffects()
+            startupConnectPaused = true
+            pendingDisconnectRequest = false
+            if terminationPending {
+                return AppLifecycleTransition(terminationDirective: .terminateLater, effects: effects)
+            }
+            terminationPending = true
+            if let activeOperation {
+                if activeOperation == .disconnect {
+                    terminationAttachedToDisconnect = true
+                }
+                return AppLifecycleTransition(terminationDirective: .terminateLater, effects: effects)
+            }
+            let transition = startControlIfPossible(command: .disconnect, operation: .quit, timeout: 15, source: .quit)
+            effects.append(contentsOf: transition.effects)
+            return AppLifecycleTransition(terminationDirective: .terminateLater, effects: effects)
+
+        case .startupRetryTimerFired:
+            guard startupRetryScheduled else {
+                return AppLifecycleTransition(terminationDirective: .none, effects: [])
+            }
+            startupRetryScheduled = false
+            guard !startupConnectPaused, !terminationPending else {
+                return AppLifecycleTransition(terminationDirective: .none, effects: [])
+            }
+            return startControlIfPossible(command: .connect, operation: .connect, timeout: 3, source: .startup)
+
+        case .controlCompleted(let operation, let result):
+            return handleControlCompleted(operation: operation, result: result)
+        }
+    }
+
+    private mutating func startPrimary(command: VPNControlCommand, operation: ControlTowerOperation, source: ActiveSource) -> AppLifecycleTransition {
+        var effects = cancelRetryEffects()
+        startupConnectPaused = false
+        pendingDisconnectRequest = false
+        if terminationPending {
+            return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+        }
+        let transition = startControlIfPossible(command: command, operation: operation, timeout: 3, source: source)
+        effects.append(contentsOf: transition.effects)
+        return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+    }
+
+    private mutating func handleControlCompleted(operation: ControlTowerOperation, result: ControlResult) -> AppLifecycleTransition {
+        guard activeOperation == operation else {
+            return AppLifecycleTransition(terminationDirective: .none, effects: [])
+        }
+        let completedSource = activeSource
+        operationGate.finish(operation)
+        activeSource = nil
+
+        if operation == .quit || (operation == .disconnect && terminationAttachedToDisconnect) {
+            terminationAttachedToDisconnect = false
+            terminationPending = false
+            pendingDisconnectRequest = false
+            startupRetryScheduled = false
+            switch result.status {
+            case .ok:
+                terminationResolved = true
+                return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(true)])
+            case .failed, .timeout:
+                return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(false), .showTerminationFailureAlert(normalizedControlResult(result))])
+            }
+        }
+
+        if terminationPending {
+            return startControlIfPossible(command: .disconnect, operation: .quit, timeout: 15, source: .quit)
+        }
+
+        var effects: [AppLifecycleEffect] = []
+        if completedSource == .startup, !startupConnectPaused {
+            switch startupPolicy.next(after: startupOutcome(for: result)) {
+            case .retry(let delay):
+                startupRetryScheduled = true
+                effects.append(.scheduleStartupRetry(after: delay))
+            case .stop:
+                startupRetryScheduled = false
+            }
+        }
+
+        if pendingDisconnectRequest, self.activeOperation == nil {
+            pendingDisconnectRequest = false
+            let transition = startControlIfPossible(command: .disconnect, operation: .disconnect, timeout: 3, source: .disconnect)
+            effects.append(contentsOf: transition.effects)
+        }
+
+        return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+    }
+
+    private mutating func startControlIfPossible(command: VPNControlCommand, operation: ControlTowerOperation, timeout: TimeInterval, source: ActiveSource) -> AppLifecycleTransition {
+        guard !terminationResolved, operationGate.begin(operation) else {
+            return AppLifecycleTransition(terminationDirective: .none, effects: [])
+        }
+        activeSource = source
+        return AppLifecycleTransition(terminationDirective: .none, effects: [.runControl(command: command, operation: operation, timeout: timeout)])
+    }
+
+    private mutating func cancelRetryEffects() -> [AppLifecycleEffect] {
+        guard startupRetryScheduled else { return [] }
+        startupRetryScheduled = false
+        return [.cancelStartupRetry]
+    }
+
+    private func startupOutcome(for result: ControlResult) -> StartupConnectOutcome {
+        switch result.status {
+        case .ok:
+            return .success
+        case .timeout:
+            return .failure(code: result.errorCode ?? "CONTROL_TIMEOUT")
+        case .failed:
+            switch result.errorCode {
+            case "CONTROL_LAUNCH_FAILED":
+                return .launchFailure
+            case "CONTROL_UNAVAILABLE":
+                return .controlUnavailable
+            default:
+                return .failure(code: result.errorCode ?? "CONTROL_FAILED")
+            }
+        }
+    }
+
+    private func normalizedControlResult(_ result: ControlResult) -> String {
+        switch result.status {
+        case .ok:
+            return "CONTROL_OK"
+        case .timeout:
+            return result.errorCode ?? "CONTROL_TIMEOUT"
+        case .failed:
+            return result.errorCode ?? "CONTROL_FAILED"
+        }
+    }
+}
+
 public struct CredentialResetInput: Equatable, Sendable {
     public let username: String
     public let password: String

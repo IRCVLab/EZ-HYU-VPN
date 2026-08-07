@@ -423,6 +423,65 @@ final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
         #expect(LoginItemState.approvalRequired == .approvalRequired)
         #expect(LoginItemState.unavailable(code: "SM_UNAVAILABLE") == .unavailable(code: "SM_UNAVAILABLE"))
     }
+
+    @Test func lifecycleCoordinatorHandlesStartupRetryAndRetryBound() {
+        var coordinator = AppLifecycleCoordinator()
+        #expect(coordinator.handle(.appLaunched) == .init(terminationDirective: .none, effects: [.runControl(command: .connect, operation: .connect, timeout: 3)]))
+        #expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE"))) == .init(terminationDirective: .none, effects: [.scheduleStartupRetry(after: 1)]))
+        #expect(coordinator.handle(.startupRetryTimerFired) == .init(terminationDirective: .none, effects: [.runControl(command: .connect, operation: .connect, timeout: 3)]))
+
+        var bounded = AppLifecycleCoordinator()
+        _ = bounded.handle(.appLaunched)
+        for _ in 0..<29 {
+            let transition = bounded.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE")))
+            #expect(transition.effects == [.scheduleStartupRetry(after: 1)])
+            #expect(bounded.handle(.startupRetryTimerFired).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)])
+        }
+        #expect(bounded.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE"))).effects.isEmpty)
+    }
+
+    @Test func lifecycleCoordinatorDisconnectPauseAbsorbsCancelledRetryAndPendingDisconnect() {
+        var coordinator = AppLifecycleCoordinator()
+        _ = coordinator.handle(.appLaunched)
+        #expect(coordinator.handle(.disconnectRequested) == .init(terminationDirective: .none, effects: []))
+        #expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.runControl(command: .disconnect, operation: .disconnect, timeout: 3)]))
+
+        var retry = AppLifecycleCoordinator()
+        _ = retry.handle(.appLaunched)
+        _ = retry.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE")))
+        #expect(retry.handle(.disconnectRequested) == .init(terminationDirective: .none, effects: [.cancelStartupRetry, .runControl(command: .disconnect, operation: .disconnect, timeout: 3)]))
+        #expect(retry.handle(.startupRetryTimerFired).effects.isEmpty)
+
+        var terminateAbsorbsPending = AppLifecycleCoordinator()
+        _ = terminateAbsorbsPending.handle(.appLaunched)
+        _ = terminateAbsorbsPending.handle(.disconnectRequested)
+        #expect(terminateAbsorbsPending.handle(.terminateRequested).terminationDirective == .terminateLater)
+        #expect(terminateAbsorbsPending.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]))
+    }
+
+    @Test func lifecycleCoordinatorHandlesTerminateIdleInFlightDuplicateAndReplyOrdering() {
+        var idle = AppLifecycleCoordinator()
+        _ = idle.handle(.appLaunched)
+        _ = idle.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
+        #expect(idle.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]))
+        #expect(idle.handle(.controlCompleted(operation: .quit, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.replyToTermination(true)]))
+        #expect(idle.handle(.terminateRequested) == .init(terminationDirective: .terminateNow, effects: []))
+        #expect(idle.handle(.startupRetryTimerFired).effects.isEmpty)
+        #expect(idle.handle(.disconnectRequested).effects.isEmpty)
+
+        var inFlightConnect = AppLifecycleCoordinator()
+        _ = inFlightConnect.handle(.appLaunched)
+        #expect(inFlightConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []))
+        #expect(inFlightConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []))
+        #expect(inFlightConnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]))
+
+        var existingDisconnect = AppLifecycleCoordinator()
+        _ = existingDisconnect.handle(.appLaunched)
+        _ = existingDisconnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
+        _ = existingDisconnect.handle(.disconnectRequested)
+        #expect(existingDisconnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []))
+        #expect(existingDisconnect.handle(.controlCompleted(operation: .disconnect, result: ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT"))) == .init(terminationDirective: .none, effects: [.replyToTermination(false), .showTerminationFailureAlert("CONTROL_TIMEOUT")]))
+    }
 }
 
 final class RecordingCredentialStore: CredentialStore {

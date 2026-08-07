@@ -5,6 +5,10 @@ import HYUVPNMenuCore
 struct HarnessFailure: Error, CustomStringConvertible { let description: String }
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw HarnessFailure(description: message) } }
 func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { try body(); throw HarnessFailure(description: "expected throw: \(message)") } catch is HarnessFailure { throw HarnessFailure(description: "expected throw: \(message)") } catch {} }
+func requireIndex(of needle: String, in haystack: String, message: String) throws -> String.Index {
+    guard let index = haystack.range(of: needle)?.lowerBound else { throw HarnessFailure(description: message) }
+    return index
+}
 
 @main struct Harness {
     static func main() {
@@ -20,7 +24,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
                 ("control-security-timeout-and-normalized-errors", controlSecurityTimeoutAndErrors),
                 ("bootstrap-splits-appkit-and-argument-gate", bootstrapSplitsAppKitAndArgumentGate),
                 ("control-tower-menu-copy-and-icon-contract", controlTowerMenuCopyAndIconContract),
-                ("startup-connect-and-disconnect-pause-contract", startupConnectAndDisconnectPauseContract),
+                ("lifecycle-coordinator-runtime", lifecycleCoordinatorRuntime),
                 ("safe-quit-and-diagnostics-contract", safeQuitAndDiagnosticsContract),
                 ("watcher-initial-event-and-tick", watcherInitialEventAndTick),
                 ("bundle-assembler-produces-lsuielement-app", bundleAssembler),
@@ -177,8 +181,21 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try expect(mainSource.contains("--unregister-login-item"), "unregister-login-item mode recognized")
         try expect(mainSource.contains("EX_USAGE"), "invalid argv exits EX_USAGE")
         try expect(mainSource.contains("LOGIN_ITEM_UNAVAILABLE"), "login item mode returns stable unavailable code")
+        let argsIndex = try requireIndex(of: "ProcessInfo.processInfo.arguments", in: mainSource, message: "argv parse source index")
+        let appKitIndex = try requireIndex(of: "NSApplication.shared", in: mainSource, message: "AppKit source index")
+        try expect(argsIndex < appKitIndex, "argv gate precedes AppKit startup")
+        try expect(mainSource.contains("withExtendedLifetime(delegate)"), "delegate retained strongly through app run")
         try expect(mainSource.contains("let application = NSApplication.shared"), "AppKit bootstrap remains in main")
         try expect(appDelegateSource.contains("final class AppDelegate"), "AppDelegate moved to dedicated file")
+        let binary = packageRoot().appendingPathComponent(".build/debug/HYUVPNMenuApp")
+        if FileManager.default.isExecutableFile(atPath: binary.path) {
+            let process = Process()
+            process.executableURL = binary
+            process.arguments = ["--bad"]
+            try process.run()
+            process.waitUntilExit()
+            try expect(process.terminationStatus == EX_USAGE, "bad args exit 64 before AppKit startup")
+        }
     }
 
     static func controlTowerMenuCopyAndIconContract() throws {
@@ -196,25 +213,56 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try expect(source.contains("Disconnect"), "disconnect row present")
     }
 
-    static func startupConnectAndDisconnectPauseContract() throws {
-        let root = packageRoot().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
-        for required in ["StartupConnectPolicy", "OperationGate", "startupRetryWorkItem?.cancel()", "startupConnectPaused = true", "startupConnectPaused = false", "pendingDisconnectRequest = true", "pendingDisconnectRequest = false", "DispatchQueue.global(qos: .utility).async", "DispatchQueue.main.async", "scheduleStartupRetry", "runControl(command: .connect", "runControl(command: .disconnect"] {
-            try expect(source.contains(required), "startup/control contract contains \(required)")
-        }
-        try expect(source.contains("guard !startupConnectPaused"), "startup retries stop after explicit disconnect")
-        try expect(source.contains("guard operationGate.begin(operation)"), "overlapping operations suppressed by gate")
-        try expect(source.contains("startPendingDisconnectIfNeeded"), "explicit disconnect handoff exists after startup connect")
+    static func lifecycleCoordinatorRuntime() throws {
+        var coordinator = AppLifecycleCoordinator()
+        try expect(coordinator.handle(.appLaunched).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)], "launch starts startup connect")
+        try expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE"))).effects == [.scheduleStartupRetry(after: 1)], "transient startup failure schedules retry")
+        try expect(coordinator.handle(.startupRetryTimerFired).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)], "scheduled retry fires once")
+
+        var paused = AppLifecycleCoordinator()
+        _ = paused.handle(.appLaunched)
+        try expect(paused.handle(.disconnectRequested).effects.isEmpty, "disconnect during startup connect waits for in-flight result")
+        try expect(paused.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))).effects == [.runControl(command: .disconnect, operation: .disconnect, timeout: 3)], "explicit disconnect handoff runs after startup connect")
+
+        var cancelled = AppLifecycleCoordinator()
+        _ = cancelled.handle(.appLaunched)
+        _ = cancelled.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE")))
+        try expect(cancelled.handle(.disconnectRequested).effects == [.cancelStartupRetry, .runControl(command: .disconnect, operation: .disconnect, timeout: 3)], "disconnect cancels scheduled retry then runs disconnect")
+        try expect(cancelled.handle(.startupRetryTimerFired).effects.isEmpty, "cancelled retry firing is absorbed")
+
+        var terminateIdle = AppLifecycleCoordinator()
+        _ = terminateIdle.handle(.appLaunched)
+        _ = terminateIdle.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
+        try expect(terminateIdle.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]), "idle terminate starts one quit disconnect")
+        try expect(terminateIdle.handle(.controlCompleted(operation: .quit, result: ControlResult(status: .ok, errorCode: nil))).effects == [.replyToTermination(true)], "quit success replies true")
+        try expect(terminateIdle.handle(.terminateRequested) == .init(terminationDirective: .terminateNow, effects: []), "post-success terminate returns terminateNow")
+        try expect(terminateIdle.handle(.startupRetryTimerFired).effects.isEmpty, "no effects after reply true")
+
+        var terminateConnect = AppLifecycleCoordinator()
+        _ = terminateConnect.handle(.appLaunched)
+        try expect(terminateConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "terminate during connect waits")
+        try expect(terminateConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "duplicate terminate adds nothing")
+        try expect(terminateConnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))).effects == [.runControl(command: .disconnect, operation: .quit, timeout: 15)], "post-connect terminate starts one quit disconnect")
+
+        var terminateDisconnect = AppLifecycleCoordinator()
+        _ = terminateDisconnect.handle(.appLaunched)
+        _ = terminateDisconnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
+        _ = terminateDisconnect.handle(.disconnectRequested)
+        try expect(terminateDisconnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "terminate attaches to existing disconnect")
+        try expect(terminateDisconnect.handle(.controlCompleted(operation: .disconnect, result: ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT"))).effects == [.replyToTermination(false), .showTerminationFailureAlert("CONTROL_TIMEOUT")], "failure replies false before alert")
     }
 
     static func safeQuitAndDiagnosticsContract() throws {
         let root = packageRoot().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
-        for required in ["applicationShouldTerminate", ".terminateLater", "timeout: 15", "NSApp.reply(toApplicationShouldTerminate: true)", "NSApp.reply(toApplicationShouldTerminate: false)", "NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: nil, from: self)", "State:", "Tunnel Interface:", "Backend Error:", "Last Control Result:", "Build Version:"] {
-            try expect(source.contains(required), "safe quit/diagnostics contract contains \(required)")
+        let appSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        let coreSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuCore/ControlTowerCore.swift"))
+        for required in ["applicationShouldTerminate", ".terminateLater", ".terminateNow", ".replyToTermination(let allow)", "NSApp.reply(toApplicationShouldTerminate: allow)", "NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: nil, from: self)", "State:", "Tunnel Interface:", "Backend Error:", "Last Control Result:", "Build Version:"] {
+            try expect(appSource.contains(required), "safe quit/diagnostics contract contains \(required)")
         }
+        try expect(coreSource.contains("timeout: 15"), "quit disconnect timeout remains 15 seconds in core coordinator")
+        try expect(coreSource.contains(".replyToTermination(false), .showTerminationFailureAlert"), "reply(false) is ordered before alert effect")
         for forbidden in ["NSApp.terminate(nil)", "password", "otp", "cookie", "authcookie", "seed", "username", "gateway", "MAC"] {
-            try expect(!source.contains(forbidden), "safe quit/diagnostics omits forbidden token \(forbidden)")
+            try expect(!appSource.contains(forbidden), "safe quit/diagnostics omits forbidden token \(forbidden)")
         }
     }
 
