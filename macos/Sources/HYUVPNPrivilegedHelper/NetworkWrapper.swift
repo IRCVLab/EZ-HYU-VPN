@@ -831,7 +831,6 @@ public struct NetworkWrapperRunner {
         guard ledger.status == "repair-required",
               ledger.serviceIDBefore == current.serviceID,
               ledger.defaultInterfaceBefore == current.defaultInterface,
-              ledger.defaultRouteBefore != current.defaultRoute,
               current.routes.isEmpty,
               current.tunnelInterface.isEmpty,
               current.resolver.activeInterface == current.defaultInterface,

@@ -377,6 +377,19 @@ esac
         #expect(fixture.tools.resolverSurfaces?["State:/Network/Service/service-wifi/DNS"]?.servers == ["166.104.100.100", "166.104.100.200"])
     }
 
+    @Test func repairRetiresArtifactFreeLedgerWhenDefaultRouteReturnedToRecordedValue() throws {
+        let fixture = try staleNetworkEpochFixture()
+        fixture.tools.defaultGateway = "192.0.2.1"
+
+        try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.ledger.path))
+        #expect(fixture.tools.restoredRoutes.isEmpty)
+        #expect(fixture.tools.restoredDNSServers.isEmpty)
+        #expect(fixture.tools.restoredSearchDomains.isEmpty)
+        #expect(fixture.tools.resolverSurfaces?["State:/Network/Service/service-wifi/DNS"]?.servers == ["166.104.100.100", "166.104.100.200"])
+    }
+
     @Test func repairRestoresOnlyExactRetainedSetupDNSAfterDefaultNetworkChange() throws {
         let fixture = try staleNetworkEpochFixture()
         fixture.tools.resolverServers = fixture.appliedDNS.servers
