@@ -225,11 +225,11 @@ class Supervisor:
                 self._control_event.set()
                 return True, None
             if command == "connect":
-                self._connector_failure_code = None
                 automatic_was_enabled = self.preference.read(default=False)
                 if automatic_was_enabled:
                     self._write_current_status(state=self._status.state, automatic=True)
                     return True, None
+                self._connector_failure_code = None
                 self.preference.write(True)
                 if self._child is None or self._child.poll() is not None:
                     self._write_current_status(state="connecting", automatic=True)

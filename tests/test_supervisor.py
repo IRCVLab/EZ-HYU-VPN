@@ -341,6 +341,50 @@ class SupervisorLoopTests(unittest.TestCase):
             self.assertTrue(status.automatic_reconnect_enabled)
             self.assertEqual(status.next_retry_at, retry_at)
 
+    def test_idempotent_connect_when_automatic_already_enabled_preserves_error_latch_without_wake(self):
+        with tempfile.TemporaryDirectory() as td:
+            pref_path = Path(td) / "auto.json"
+            status_path = Path(td) / "status.json"
+            enable_auto_reconnect(pref_path)
+            supervisor = Supervisor(
+                isolated_supervisor_config(
+                    self,
+                    status_path=str(status_path),
+                    preference_path=str(pref_path),
+                    control_socket_path=str(Path(td) / "control.sock"),
+                ),
+                conflict_detector=mock.Mock(conflict_active=lambda: False),
+            )
+            error_code = "NETWORK_SCRIPT_POSTCONDITION_FAILED"
+            supervisor._connector_failure_code = error_code
+            supervisor._write_current_status(state="error", automatic=True, error_code=error_code)
+
+            class RecordingControlEvent:
+                def __init__(self):
+                    self.set_calls = 0
+
+                def set(self):
+                    self.set_calls += 1
+
+                def wait(self, timeout=None):
+                    return False
+
+                def clear(self):
+                    pass
+
+            event = RecordingControlEvent()
+            supervisor._control_event = event
+
+            self.assertEqual(supervisor.handle_control_command("connect"), (True, None))
+
+            from hyu_vpn.status import read_status
+            status = read_status(status_path)
+            self.assertEqual(event.set_calls, 0)
+            self.assertEqual(supervisor._connector_failure_code, error_code)
+            self.assertEqual(status.state, "error")
+            self.assertTrue(status.automatic_reconnect_enabled)
+            self.assertEqual(status.error_code, error_code)
+
     def test_connect_when_automatic_disabled_enables_and_wakes_supervisor(self):
         with tempfile.TemporaryDirectory() as td:
             pref_path = Path(td) / "auto.json"
