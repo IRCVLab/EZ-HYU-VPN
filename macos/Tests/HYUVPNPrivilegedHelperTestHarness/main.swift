@@ -927,8 +927,10 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         let records = [
             RouteRecord(before: nil, applied: RouteDelta(operation: "add", destination: tunnelRoute.destination, gateway: tunnelRoute.gateway, interface: tunnelRoute.interface, netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol), after: tunnelRoute),
         ]
-        let beforeDNS = ResolverSnapshot(serviceID: "service-wifi", servers: [], searchDomains: [], activeInterface: "en0", serversPresent: false, searchDomainsPresent: false)
-        let appliedDNS = ResolverSnapshot(serviceID: "service-wifi", servers: ["166.104.100.100"], searchDomains: [], activeInterface: "utun10", serversPresent: true, searchDomainsPresent: false)
+        let setupKey = "Setup:/Network/Service/service-wifi/DNS"
+        let setupBefore = ResolverFieldSnapshot(servers: [], searchDomains: [], serversPresent: false, searchDomainsPresent: false, keyPresent: false)
+        let beforeDNS = ResolverSnapshot(serviceID: "service-wifi", servers: [], searchDomains: [], activeInterface: "en0", serversPresent: false, searchDomainsPresent: false, surfaces: [setupKey: setupBefore])
+        let appliedDNS = ResolverSnapshot(serviceID: "service-wifi", servers: ["166.104.100.100"], searchDomains: [], activeInterface: "utun10", serversPresent: true, searchDomainsPresent: false, surfaces: [setupKey: setupBefore])
         try NetworkLedgerStore(path: fixture.ledger, expectedOwnerUID: UInt32(getuid())).save(
             NetworkLedger(
                 sessionNonce: fixture.nonce,
@@ -950,6 +952,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         fixture.tools.resolverSearchDomains = []
         fixture.tools.resolverServersPresent = true
         fixture.tools.resolverSearchDomainsPresent = false
+        fixture.tools.resolverSurfaces = [setupKey: setupBefore]
         fixture.tools.includeTunnelSurface = true
         fixture.tools.routes = []
 

@@ -814,8 +814,8 @@ public struct NetworkWrapperRunner {
     private func setupResolverSurfaceMatchesBaseline(ledger: NetworkLedger, before: ResolverSnapshot, current: ResolverSnapshot) -> Bool {
         guard let serviceID = ledger.serviceIDBefore else { return false }
         let setupKey = "Setup:/Network/Service/\(serviceID)/DNS"
-        let beforeSetup = before.surfaces[setupKey] ?? before.surfaces["setup"]
-        let currentSetup = current.surfaces[setupKey] ?? current.surfaces["setup"]
+        let beforeSetup = before.surfaces[setupKey]
+        let currentSetup = current.surfaces[setupKey]
         return beforeSetup != nil && beforeSetup == currentSetup
     }
 

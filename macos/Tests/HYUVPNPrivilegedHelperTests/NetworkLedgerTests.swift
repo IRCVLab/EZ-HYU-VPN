@@ -46,40 +46,6 @@ private let stableTestBootIdentity: UInt64 = 0x8000_0000_0000_1092
         #expect(decoded.routeDeltasApplied.first?.destination == "10.0.0.0")
     }
 
-    @Test func repairPlanRequiresExactRebootServiceRouteAndResolverMatch() throws {
-        let ledger = NetworkLedger(
-            sessionNonce: "nonceabc123",
-            rebootIdentity: stableTestBootIdentity,
-            serviceIDBefore: "service-wifi",
-            defaultInterfaceBefore: "en0",
-            defaultRouteBefore: RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: "0.0.0.0", protocol: "ipv4"),
-            tunnelInterface: "utun7",
-            routeDeltasApplied: [RouteDelta(operation: "add", destination: "10.0.0.0", gateway: "10.10.0.1", interface: "utun7", netmask: "255.0.0.0", protocol: "ipv4")],
-            dnsBefore: ResolverSnapshot(serviceID: "service-wifi", servers: ["9.9.9.9"], searchDomains: ["home.example"], activeInterface: "en0"),
-            dnsApplied: ResolverSnapshot(serviceID: "service-wifi", servers: ["166.104.1.1"], searchDomains: ["hanyang.ac.kr"], activeInterface: "utun7"),
-            status: "recorded",
-            timestamp: Date(timeIntervalSince1970: 1_775_000_000)
-        )
-        let matching = NetworkSnapshot(rebootIdentity: stableTestBootIdentity, serviceID: "service-wifi", defaultInterface: "en0", tunnelInterface: "utun7", routes: ledger.routeDeltasApplied.map(\.routeSnapshot), resolver: ledger.dnsApplied!)
-        #expect(NetworkLedgerRepairPlanner.plan(for: ledger, current: matching).status == "healed")
-        var changedService = matching
-        changedService.serviceID = "service-ethernet"
-        #expect(NetworkLedgerRepairPlanner.plan(for: ledger, current: changedService).status == "repair-required")
-        var changedBoot = matching
-        changedBoot.rebootIdentity = 43
-        #expect(NetworkLedgerRepairPlanner.plan(for: ledger, current: changedBoot).status == "repair-required")
-        var changedRoute = matching
-        changedRoute.routes = [RouteSnapshot(destination: "10.0.0.0", gateway: "10.10.0.99", interface: "utun7", netmask: "255.0.0.0", protocol: "ipv4")]
-        #expect(NetworkLedgerRepairPlanner.plan(for: ledger, current: changedRoute).status == "repair-required")
-        var changedDNS = matching
-        changedDNS.resolver = ResolverSnapshot(serviceID: "service-wifi", servers: ["1.1.1.1"], searchDomains: ["hanyang.ac.kr"], activeInterface: "utun7")
-        #expect(NetworkLedgerRepairPlanner.plan(for: ledger, current: changedDNS).status == "repair-required")
-        let legacyLedger = NetworkLedger(sessionNonce: ledger.sessionNonce, rebootIdentity: 42, serviceIDBefore: ledger.serviceIDBefore, defaultInterfaceBefore: ledger.defaultInterfaceBefore, defaultRouteBefore: ledger.defaultRouteBefore, tunnelInterface: ledger.tunnelInterface, routeDeltasApplied: ledger.routeDeltasApplied, routeRecords: ledger.routeRecords, dnsBefore: ledger.dnsBefore, dnsApplied: ledger.dnsApplied, status: ledger.status, timestamp: ledger.timestamp)
-        var legacySnapshot = matching
-        legacySnapshot.rebootIdentity = 42
-        #expect(NetworkLedgerRepairPlanner.plan(for: legacyLedger, current: legacySnapshot).status == "repair-required")
-    }
-
     @Test func canonicalRuntimeContractSeparatesWrapperAndUpstreamScript() throws {
         let wrapper = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).deletingLastPathComponent().appendingPathComponent("privileged/hyu-vpnc-wrapper")
         let source = try String(contentsOf: wrapper, encoding: .utf8)

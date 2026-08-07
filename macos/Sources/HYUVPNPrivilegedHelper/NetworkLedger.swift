@@ -1,8 +1,6 @@
 import Foundation
 import Darwin
 
-private let networkLedgerStableBootIdentityMarker: UInt64 = 1 << 63
-
 public struct RouteSnapshot: Codable, Hashable, Comparable {
     public let destination: String
     public let gateway: String?
@@ -233,46 +231,6 @@ public struct NetworkLedger: Codable, Equatable {
 
     public func withStatus(_ newStatus: String) -> NetworkLedger {
         NetworkLedger(schemaVersion: schemaVersion, sessionNonce: sessionNonce, rebootIdentity: rebootIdentity, serviceIDBefore: serviceIDBefore, defaultInterfaceBefore: defaultInterfaceBefore, defaultRouteBefore: defaultRouteBefore, tunnelInterface: tunnelInterface, routeDeltasApplied: routeDeltasApplied, routeRecords: routeRecords, dnsBefore: dnsBefore, dnsApplied: dnsApplied, status: newStatus, timestamp: timestamp)
-    }
-}
-
-public struct NetworkSnapshot: Equatable {
-    public var rebootIdentity: UInt64
-    public var serviceID: String?
-    public var defaultInterface: String?
-    public var tunnelInterface: String?
-    public var routes: [RouteSnapshot]
-    public var resolver: ResolverSnapshot?
-
-    public init(rebootIdentity: UInt64, serviceID: String?, defaultInterface: String?, tunnelInterface: String?, routes: [RouteSnapshot], resolver: ResolverSnapshot?) {
-        self.rebootIdentity = rebootIdentity
-        self.serviceID = serviceID
-        self.defaultInterface = defaultInterface
-        self.tunnelInterface = tunnelInterface
-        self.routes = routes.sorted()
-        self.resolver = resolver
-    }
-}
-
-public struct NetworkLedgerRepairPlan: Equatable {
-    public let status: String
-    public let routesToRemove: [RouteDelta]
-    public let resolverToRestore: ResolverSnapshot?
-}
-
-public enum NetworkLedgerRepairPlanner {
-    public static func plan(for ledger: NetworkLedger, current: NetworkSnapshot) -> NetworkLedgerRepairPlan {
-        guard ledger.status != "repair-required", ledger.rebootIdentity & networkLedgerStableBootIdentityMarker != 0, ledger.rebootIdentity == current.rebootIdentity, ledger.serviceIDBefore == current.serviceID, ledger.defaultInterfaceBefore == current.defaultInterface else { return NetworkLedgerRepairPlan(status: "repair-required", routesToRemove: [], resolverToRestore: nil) }
-        var removals: [RouteDelta] = []
-        for record in ledger.routeRecords {
-            if let currentRoute = current.routes.first(where: { $0.destination == record.applied.destination }) {
-                guard currentRoute == record.applied.routeSnapshot else { return NetworkLedgerRepairPlan(status: "repair-required", routesToRemove: [], resolverToRestore: nil) }
-                removals.append(record.applied)
-            }
-        }
-        if current.resolver == ledger.dnsBefore { return NetworkLedgerRepairPlan(status: "healed", routesToRemove: removals, resolverToRestore: nil) }
-        if current.resolver == ledger.dnsApplied { return NetworkLedgerRepairPlan(status: "healed", routesToRemove: removals, resolverToRestore: ledger.dnsBefore) }
-        return NetworkLedgerRepairPlan(status: "repair-required", routesToRemove: [], resolverToRestore: nil)
     }
 }
 
