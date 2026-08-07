@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+fi
+if [ "${1:-}" = purge ]; then
+    rm -rf /etc/hyu-vpn /var/lib/hyu-vpn /run/hyu-vpn
+fi
+exit 0

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=HYU VPN
+Comment=Reliable HYU VPN with automatic reconnect
+Exec=/usr/bin/hyu-vpn
+Icon=hyu-vpn
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupNotify=false

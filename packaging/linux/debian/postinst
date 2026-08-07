@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+owner_uid=""
+if [ -f /etc/hyu-vpn/owner.uid ]; then
+    owner_uid="$(tr -d '\n' </etc/hyu-vpn/owner.uid)"
+fi
+case "$owner_uid" in
+    ''|*[!0-9]*|0) owner_uid="" ;;
+esac
+if [ -z "$owner_uid" ] && [ -n "${SUDO_UID:-}" ]; then
+    case "$SUDO_UID" in
+        *[!0-9]*|0) ;;
+        *) owner_uid="$SUDO_UID" ;;
+    esac
+fi
+if [ -z "$owner_uid" ]; then
+    owner_uid="$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/ { print $3; exit }')"
+fi
+case "$owner_uid" in
+    ''|*[!0-9]*|0) echo "HYU VPN: unable to identify the desktop user" >&2; exit 1 ;;
+esac
+install -d -o root -g root -m 0700 /etc/hyu-vpn /var/lib/hyu-vpn
+printf '%s\n' "$owner_uid" > /etc/hyu-vpn/owner.uid
+chown root:root /etc/hyu-vpn/owner.uid
+chmod 0644 /etc/hyu-vpn/owner.uid
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable hyu-vpn.service >/dev/null 2>&1 || true
+    systemctl restart hyu-vpn.service || true
+fi
+exit 0
