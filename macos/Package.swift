@@ -13,6 +13,7 @@ let package = Package(
         .executable(name: "hyu-vpnc-wrapperd", targets: ["HYUVPNCWrapperD"]),
         .library(name: "HYUVPNMenuCore", targets: ["HYUVPNMenuCore"]),
         .executable(name: "HYUVPNMenuApp", targets: ["HYUVPNMenuApp"]),
+        .executable(name: "hyu-vpn-keychain-reader", targets: ["HYUVPNCredentialReader"]),
         .executable(name: "hyu-vpn-menu-harness", targets: ["HYUVPNMenuAppTestHarness"]),
         .library(name: "HYUVPNInstallerCore", targets: ["HYUVPNInstallerCore"]),
         .executable(name: "HYUVPNInstallerApp", targets: ["HYUVPNInstallerApp"]),
@@ -62,6 +63,11 @@ let package = Package(
             path: "Sources/HYUVPNMenuApp",
             exclude: ["CredentialResetController.swift", "SystemAdapters.swift"],
             sources: ["main.swift", "AppDelegate.swift"],
+            swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
+        ),
+        .executableTarget(
+            name: "HYUVPNCredentialReader",
+            dependencies: ["HYUVPNMenuAppSupport"],
             swiftSettings: [.unsafeFlags(["-warnings-as-errors"])]
         ),
         .target(

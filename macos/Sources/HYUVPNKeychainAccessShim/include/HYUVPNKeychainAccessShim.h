@@ -6,5 +6,6 @@
 
 OSStatus HYUVPNCreateCredentialAccess(SecAccessRef _Nullable * _Nonnull accessOut);
 OSStatus HYUVPNCreateCredentialAccessWithPath(const char * _Nullable extraTrustedPath, SecAccessRef _Nullable * _Nonnull accessOut);
+OSStatus HYUVPNCreateCredentialAccessWithPaths(const char * _Nullable firstTrustedPath, const char * _Nullable secondTrustedPath, SecAccessRef _Nullable * _Nonnull accessOut);
 
 #endif

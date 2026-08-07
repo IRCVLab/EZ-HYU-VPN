@@ -4,41 +4,47 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 OSStatus HYUVPNCreateCredentialAccess(SecAccessRef _Nullable * _Nonnull accessOut) {
-    return HYUVPNCreateCredentialAccessWithPath(NULL, accessOut);
+    return HYUVPNCreateCredentialAccessWithPaths(NULL, NULL, accessOut);
 }
 
 OSStatus HYUVPNCreateCredentialAccessWithPath(const char * _Nullable extraTrustedPath, SecAccessRef _Nullable * _Nonnull accessOut) {
+    return HYUVPNCreateCredentialAccessWithPaths(extraTrustedPath, NULL, accessOut);
+}
+
+OSStatus HYUVPNCreateCredentialAccessWithPaths(const char * _Nullable firstTrustedPath, const char * _Nullable secondTrustedPath, SecAccessRef _Nullable * _Nonnull accessOut) {
     if (accessOut == NULL) { return errSecParam; }
     *accessOut = NULL;
 
     SecTrustedApplicationRef currentApplication = NULL;
-    SecTrustedApplicationRef securityTool = NULL;
-    SecTrustedApplicationRef extraApplication = NULL;
+    SecTrustedApplicationRef firstApplication = NULL;
+    SecTrustedApplicationRef secondApplication = NULL;
     OSStatus status = SecTrustedApplicationCreateFromPath(NULL, &currentApplication);
     if (status != errSecSuccess) { return status; }
 
-    status = SecTrustedApplicationCreateFromPath("/usr/bin/security", &securityTool);
-    if (status != errSecSuccess) {
-        if (currentApplication != NULL) { CFRelease(currentApplication); }
-        return status;
-    }
-
-    const void *trustedApplications[3] = { currentApplication, securityTool, NULL };
-    CFIndex trustedCount = 2;
-    if (extraTrustedPath != NULL && extraTrustedPath[0] != '\0') {
-        status = SecTrustedApplicationCreateFromPath(extraTrustedPath, &extraApplication);
+    const void *trustedApplications[3] = { currentApplication, NULL, NULL };
+    CFIndex trustedCount = 1;
+    if (firstTrustedPath != NULL && firstTrustedPath[0] != '\0') {
+        status = SecTrustedApplicationCreateFromPath(firstTrustedPath, &firstApplication);
         if (status != errSecSuccess) {
             CFRelease(currentApplication);
-            CFRelease(securityTool);
             return status;
         }
-        trustedApplications[trustedCount++] = extraApplication;
+        trustedApplications[trustedCount++] = firstApplication;
+    }
+    if (secondTrustedPath != NULL && secondTrustedPath[0] != '\0') {
+        status = SecTrustedApplicationCreateFromPath(secondTrustedPath, &secondApplication);
+        if (status != errSecSuccess) {
+            CFRelease(currentApplication);
+            if (firstApplication != NULL) { CFRelease(firstApplication); }
+            return status;
+        }
+        trustedApplications[trustedCount++] = secondApplication;
     }
     CFArrayRef trustedList = CFArrayCreate(kCFAllocatorDefault, trustedApplications, trustedCount, &kCFTypeArrayCallBacks);
     if (trustedList == NULL) {
         CFRelease(currentApplication);
-        CFRelease(securityTool);
-        if (extraApplication != NULL) { CFRelease(extraApplication); }
+        if (firstApplication != NULL) { CFRelease(firstApplication); }
+        if (secondApplication != NULL) { CFRelease(secondApplication); }
         return errSecAllocate;
     }
 
@@ -46,8 +52,8 @@ OSStatus HYUVPNCreateCredentialAccessWithPath(const char * _Nullable extraTruste
 
     CFRelease(trustedList);
     CFRelease(currentApplication);
-    CFRelease(securityTool);
-    if (extraApplication != NULL) { CFRelease(extraApplication); }
+    if (firstApplication != NULL) { CFRelease(firstApplication); }
+    if (secondApplication != NULL) { CFRelease(secondApplication); }
     return status;
 }
 

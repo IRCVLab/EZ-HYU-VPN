@@ -226,9 +226,9 @@ struct InstallerController {
             case .username:
                 return try promptText(title: "HYU VPN ID", message: "Enter your HYU ID.", secure: false)
             case .password:
-                return try promptConfirmedSecret(title: "HYU VPN Password", message: "Enter your HYU VPN password.")
+                return try promptConfirmedSecret(title: "HYU VPN Password", message: "Enter your HYU VPN password twice.", fieldLabel: "Password")
             case .totpSeed:
-                return try promptConfirmedSecret(title: "TOTP Setup Secret", message: "Enter the authenticator setup secret, not the current 6-digit code.")
+                return try promptConfirmedSecret(title: "TOTP Setup Secret", message: "Enter the authenticator setup secret twice, not the current 6-digit code.", fieldLabel: "Setup secret")
             }
         }
     }
@@ -327,9 +327,35 @@ struct InstallerController {
         return secure ? field.stringValue : field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func promptConfirmedSecret(title: String, message: String) throws -> String {
-        let first = try promptText(title: title, message: message, secure: true)
-        let second = try promptText(title: "Confirm \(title)", message: "Enter it again to confirm.", secure: true)
+    private func promptConfirmedSecret(title: String, message: String, fieldLabel: String) throws -> String {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+
+        let firstField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        let confirmationField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        firstField.placeholderString = fieldLabel
+        confirmationField.placeholderString = "Confirm \(fieldLabel.lowercased())"
+        firstField.widthAnchor.constraint(equalToConstant: 320).isActive = true
+        confirmationField.widthAnchor.constraint(equalToConstant: 320).isActive = true
+
+        let fields = NSStackView(views: [
+            NSTextField(labelWithString: fieldLabel),
+            firstField,
+            NSTextField(labelWithString: "Confirm \(fieldLabel.lowercased())"),
+            confirmationField,
+        ])
+        fields.orientation = .vertical
+        fields.alignment = .leading
+        fields.spacing = 6
+        alert.accessoryView = fields
+        alert.window.initialFirstResponder = firstField
+        guard alert.runModal() == .alertFirstButtonReturn else { throw InstallerAppError.cancelled }
+
+        let first = firstField.stringValue
+        let second = confirmationField.stringValue
         guard !first.isEmpty else { throw InstallerCoreError.invalidInput("SECRET_REQUIRED") }
         guard first == second else { throw InstallerCoreError.invalidInput("SECRET_MISMATCH") }
         return first

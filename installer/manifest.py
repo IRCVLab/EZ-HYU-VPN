@@ -132,33 +132,6 @@ def safe_join(base: Path, relative: str, require_safe_parents: bool = False) -> 
     return target
 
 
-def _ensure_payload_launchers(payload: Path) -> None:
-    launchers = {
-        "Install HYU VPN.command": "install.sh",
-        "Uninstall HYU VPN.command": "uninstall.sh",
-    }
-    for name, target in launchers.items():
-        path = payload / name
-        if path.exists():
-            continue
-        path.write_text(
-            "#!/bin/zsh\n"
-            "set -euo pipefail\n"
-            'SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"\n'
-            f'exec "$SCRIPT_DIR/installer/{target}" "$@"\n',
-            encoding="utf-8",
-        )
-        path.chmod(0o755)
-    readme = payload / "README-lab.md"
-    if not readme.exists():
-        readme.write_text(
-            "# HYU VPN internal lab installer\n\n"
-            "For named internal lab users only. The default mode is a package audit; "
-            "live installation requires an explicit nonce and one administrator authentication.\n",
-            encoding="utf-8",
-        )
-
-
 class PayloadManifest:
     @staticmethod
     def build(payload: Path) -> Dict[str, object]:
@@ -182,7 +155,6 @@ class PayloadManifest:
 
     @staticmethod
     def write_for_tree(payload: Path, manifest: Path) -> Path:
-        _ensure_payload_launchers(payload)
         (payload / "installer").mkdir(exist_ok=True)
         placeholder = payload / "installer" / "manifest.py"
         if not placeholder.exists():
@@ -293,9 +265,13 @@ def _stage_into(payload: Path, manifest: Path, stage: Path) -> Path:
     _copy_tree(payload / "src/hyu_vpn", stage / "src/hyu_vpn", file_mode=0o644, executable_mode=0o755)
     _copy_tree(payload / "HYU VPN.app", stage / "HYU VPN.app", file_mode=0o644, executable_mode=0o755)
     menu_exec = stage / "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
+    credential_reader = stage / "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader"
     if not menu_exec.exists():
         raise FileNotFoundError("missing app executable: HYUVPNMenuApp")
+    if not credential_reader.exists():
+        raise FileNotFoundError("missing app executable: HYUVPNCredentialReader")
     menu_exec.chmod(0o755)
+    credential_reader.chmod(0o755)
     (stage / ".hyu-vpn-dry-run-root").write_text("hyu-vpn-installer-stage\n", encoding="utf-8")
     _write_stage_manifest(stage)
     return stage
@@ -310,8 +286,6 @@ def stage_user_payload(env: DryRunEnvironment, recorder: Optional[CommandRecorde
     stage = env.root / "Users" / env.user / "Library/Application Support/HYU VPN/staged-payload"
     result = _stage_into(env.payload, manifest, stage)
     if recorder:
-        for service in ["gp-vpn-password", "gp-vpn-totp"]:
-            recorder.record(["/usr/bin/security", "add-generic-password", "-U", "-s", service, "-a", "hyu-vpn", "-w"])
         recorder.record(["/usr/bin/sudo", "/bin/zsh", "installer/root-admin.sh", "--administrator-phase", "install"])
     return result
 

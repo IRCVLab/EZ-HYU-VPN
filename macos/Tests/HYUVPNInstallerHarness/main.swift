@@ -115,6 +115,19 @@ private func installerAppProvidesStandardEditShortcutsForCredentialFields() thro
     try expect(source.contains("keyEquivalent: \"v\""), "installer edit menu binds Command-V")
 }
 
+private func installerCollectsEachConfirmedSecretInOneDialog() throws {
+    let source = try String(contentsOfFile: "macos/Sources/HYUVPNInstallerApp/main.swift", encoding: .utf8)
+    guard let start = source.range(of: "private func promptConfirmedSecret"),
+          let end = source.range(of: "private func run(_ argv:", range: start.upperBound..<source.endIndex) else {
+        throw HarnessError.failure("confirmed secret prompt source boundary missing")
+    }
+    let body = String(source[start.lowerBound..<end.lowerBound])
+    try expect(body.components(separatedBy: "NSSecureTextField(").count - 1 == 2, "confirmed secret dialog contains two secure fields")
+    try expect(body.components(separatedBy: "alert.runModal()").count - 1 == 1, "confirmed secret uses one modal")
+    try expect(body.contains("NSStackView"), "confirmed secret fields share one accessory view")
+    try expect(!body.contains("promptText("), "confirmed secret does not open sequential dialogs")
+}
+
 
 private func rootAdminAuthorizationScriptQuotesCommandInOSAScriptArgv() throws {
     let commandArgv = ["/bin/echo", "space value", "apostrophe'", "quote\"", "back\\slash"]
@@ -190,6 +203,7 @@ do {
     try activationPolicyClassifiesMenuStartAsWarning()
     try installerAppUsesExplicitAppKitDelegateBootstrap()
     try installerAppProvidesStandardEditShortcutsForCredentialFields()
+    try installerCollectsEachConfirmedSecretInOneDialog()
     try rootAdminAuthorizationScriptQuotesCommandInOSAScriptArgv()
     try rootAdminHarmlessParserVariantExecutesViaArgv()
     try privilegedArgvAndSingleAuthorization()

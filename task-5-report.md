@@ -45,7 +45,7 @@ Other agents' Task 2 files were not modified or staged.
 
 ## Implemented behavior checklist
 
-- Reads existing macOS Keychain services `gp-vpn-username`, `gp-vpn-password`, and `gp-vpn-totp` through argv-array `/usr/bin/security find-generic-password -s <service> -w`.
+- Reads existing macOS Keychain services `gp-vpn-username`, `gp-vpn-password`, and `gp-vpn-totp` through the fixed bundled native credential reader.
 - Generates TOTP through argv-array `/opt/homebrew/bin/oathtool --totp -b <seed>` by default.
 - Redacts secret material from raised/printed errors; no password, seed, OTP, cookie, host ID, or raw HIP XML logging was added.
 - Uses PTY output handling for split prompts.

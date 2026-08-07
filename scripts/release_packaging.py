@@ -58,12 +58,11 @@ INSTALLER_EXEC_REL = "Install HYU VPN.app/Contents/MacOS/HYUVPNInstallerApp"
 
 REQUIRED_PAYLOAD_FILES = {
     "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+    "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader",
     "HYU VPN.app/Contents/Info.plist",
     INSTALLER_EXEC_REL,
     "Install HYU VPN.app/Contents/Info.plist",
     "README-lab.md",
-    "installer/install.sh",
-    "installer/uninstall.sh",
     "installer/root-admin.sh",
     "installer/manifest.py",
     "launchd/com.hyu.vpn.service.plist.in",
@@ -93,6 +92,7 @@ EXECUTABLE_RELATIVE_FILES = {
     "runtime/vpnc/hyu-vpnc-wrapperd",
     "com.hyu.vpn.helper",
     "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+    "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader",
 }
 
 
@@ -675,7 +675,7 @@ def assemble_payload_from_repo(
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         dst.chmod(mode)
-    for rel in ["install.sh", "uninstall.sh", "root-admin.sh", "manifest.py"]:
+    for rel in ["root-admin.sh", "manifest.py"]:
         copy_file_rel(repo_root / "installer" / rel, f"installer/{rel}", 0o755 if rel.endswith(".sh") else 0o644)
     for rel in ["com.hyu.vpn.service.plist.in"]:
         copy_file_rel(repo_root / "launchd" / rel, f"launchd/{rel}", 0o644)
@@ -880,6 +880,7 @@ def mach_o_payload_files(stage_dir: Path) -> List[str]:
         "runtime/vpnc/hyu-vpnc-wrapperd",
         "com.hyu.vpn.helper",
         "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+        "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader",
         INSTALLER_EXEC_REL,
     ]
     seen: set[str] = set()

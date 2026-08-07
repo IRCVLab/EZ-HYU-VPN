@@ -5,6 +5,7 @@ exe=$1
 dest=$2
 case "$exe" in /*) ;; *) exe="$PWD/$exe" ;; esac
 case "$dest" in /*) ;; *) dest="$PWD/$dest" ;; esac
+reader="$(dirname "$exe")/hyu-vpn-keychain-reader"
 /usr/bin/python3 - "$dest" "$(cd "$(dirname "$0")/../.." && pwd -P)" <<'PY'
 import pathlib, stat, sys
 dest = pathlib.Path(sys.argv[1])
@@ -41,13 +42,17 @@ macos_dir="$contents/MacOS"
 resources="$contents/Resources"
 plist="$contents/Info.plist"
 if [ ! -x "$exe" ]; then echo "missing executable: $exe" >&2; exit 66; fi
+if [ ! -x "$reader" ]; then echo "missing executable: $reader" >&2; exit 66; fi
 rm -rf "$app"
 mkdir -p "$macos_dir" "$resources"
 cp "$exe" "$macos_dir/HYUVPNMenuApp"
+cp "$reader" "$macos_dir/HYUVPNCredentialReader"
 chmod 0755 "$macos_dir/HYUVPNMenuApp"
+chmod 0755 "$macos_dir/HYUVPNCredentialReader"
 cp "$(dirname "$0")/../Resources/HYUVPNMenuApp/Info.plist" "$plist"
 plutil -lint "$plist" >/dev/null
 codesign --force --sign - "$macos_dir/HYUVPNMenuApp" >/dev/null
+codesign --force --sign - "$macos_dir/HYUVPNCredentialReader" >/dev/null
 codesign --force --sign - "$app" >/dev/null
 codesign --verify --deep --strict "$app" >/dev/null
 printf '%s\n' "$app"

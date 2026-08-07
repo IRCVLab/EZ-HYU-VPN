@@ -65,7 +65,7 @@ Stop and rollback procedure:
 
 ## Recovery
 
-If startup fails, check that `/opt/homebrew/bin/openconnect`, `/opt/homebrew/bin/oathtool`, `/usr/bin/security`, and `/opt/homebrew/etc/vpnc/vpnc-script` exist and are executable. Re-run the offline suite before another live attempt. The supervisor lock lives under `~/Library/Application Support/hyu-openconnect/` and prevents concurrent service instances.
+If startup fails, check that the installed native credential reader and the bundled OpenConnect, oathtool, and vpnc-script runtime files exist and are executable. Re-run the offline suite before another live attempt. The supervisor lock lives under `~/Library/Application Support/hyu-openconnect/` and prevents concurrent service instances.
 
 ## Logs and privacy
 

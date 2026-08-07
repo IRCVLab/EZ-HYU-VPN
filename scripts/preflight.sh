@@ -17,7 +17,6 @@ REQUIRED_TOOLS = {
     "codesign": "/usr/bin/codesign",
     "hdiutil": "/usr/bin/hdiutil",
     "plutil": "/usr/bin/plutil",
-    "security": "/usr/bin/security",
     "visudo": "/usr/sbin/visudo",
 }
 BREW_DEPENDENCIES = [

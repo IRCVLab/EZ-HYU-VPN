@@ -26,7 +26,7 @@ from hyu_vpn.connector import (
     main,
     parse_connector_event_line,
 )
-from hyu_vpn.otp import KEYCHAIN_ACCOUNT, Keychain, TotpError, TotpProvider
+from hyu_vpn.otp import KEYCHAIN_READER, Keychain, TotpError, TotpProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENCONNECT = ROOT / "tests" / "helpers" / "fake_openconnect.py"
@@ -730,14 +730,14 @@ class ConnectorTests(unittest.TestCase):
             _write_runtime_config(config_path, oathtool)
             with mock.patch("hyu_vpn.otp.subprocess.run") as security_run, \
                  mock.patch("hyu_vpn.connector.PromptSession") as session_cls:
-                def fake_security(argv, **kwargs):
-                    service = argv[argv.index("-s") + 1]
+                def fake_reader(argv, **kwargs):
+                    service = argv[1]
                     return mock.Mock(returncode=0, stdout={
                         "gp-vpn-username": "alice\n",
                         "gp-vpn-password": "pw\n",
                         "gp-vpn-totp": "seed\n",
                     }[service], stderr="")
-                security_run.side_effect = fake_security
+                security_run.side_effect = fake_reader
                 session_cls.return_value.run.return_value = 0
 
                 rc = main(
@@ -753,11 +753,11 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(provider.oathtool_path, str(oathtool))
         self.assertNotEqual(provider.oathtool_path, "/opt/homebrew/bin/oathtool")
 
-    def test_main_reads_keychain_services_by_absolute_security_argv(self):
+    def test_main_reads_keychain_services_by_absolute_native_reader_argv(self):
         calls = []
         def fake_run(argv, **kwargs):
             calls.append(tuple(argv))
-            service = argv[argv.index("-s") + 1]
+            service = argv[1]
             return mock.Mock(returncode=0, stdout={
                 "gp-vpn-username": "alice\n",
                 "gp-vpn-password": "pw\n",
@@ -782,9 +782,9 @@ class ConnectorTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [
-            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-username", "-a", "hyu-vpn", "-w"),
-            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-password", "-a", "hyu-vpn", "-w"),
-            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-totp", "-a", "hyu-vpn", "-w"),
+            (KEYCHAIN_READER, "gp-vpn-username"),
+            (KEYCHAIN_READER, "gp-vpn-password"),
+            (KEYCHAIN_READER, "gp-vpn-totp"),
         ])
         provider = session_cls.call_args.kwargs["totp_provider"]
         self.assertEqual(provider.state_path.name, "totp-counter.json")
@@ -796,7 +796,7 @@ class ConnectorTests(unittest.TestCase):
 
 
 
-    def test_keychain_reads_use_fixed_singleton_account(self):
+    def test_keychain_reads_use_fixed_native_reader(self):
         calls = []
         def fake_run(argv, **kwargs):
             calls.append(tuple(argv))
@@ -804,14 +804,14 @@ class ConnectorTests(unittest.TestCase):
 
         self.assertEqual(Keychain(runner=fake_run).read("gp-vpn-password"), "value")
 
-        self.assertEqual(KEYCHAIN_ACCOUNT, "hyu-vpn")
+        self.assertEqual(KEYCHAIN_READER, "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader")
         self.assertEqual(calls, [
-            ("/usr/bin/security", "find-generic-password", "-s", "gp-vpn-password", "-a", "hyu-vpn", "-w"),
+            (KEYCHAIN_READER, "gp-vpn-password"),
         ])
 
     def test_keychain_missing_item_error_is_redacted_and_does_not_expose_account_query_output(self):
         def fake_run(argv, **kwargs):
-            self.assertEqual(argv[argv.index("-a") + 1], "hyu-vpn")
+            self.assertEqual(argv, [KEYCHAIN_READER, "gp-vpn-password"])
             return mock.Mock(returncode=44, stdout="", stderr="multiple accounts PASSWORD-CANARY SEED-CANARY hyu-vpn")
 
         with self.assertRaisesRegex(RuntimeError, "gp-vpn-password") as cm:

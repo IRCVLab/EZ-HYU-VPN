@@ -13,11 +13,11 @@ For named internal lab users only. The DMG is a native GUI distribution; normal 
    - TOTP authenticator setup secret twice; do not enter the current 6-digit OTP code.
 5. Approve the single macOS administrator authorization dialog.
 
-Existing HYU VPN Keychain credentials are retained. Missing credentials are collected in memory before elevation and written after the root install succeeds using the Security.framework Keychain path with ACL entries for the installer, `/usr/bin/security`, and the installed menu executable.
+Existing HYU VPN Keychain credentials are retained. Missing credentials are collected in memory before elevation and written after the root install succeeds using Security.framework with access limited to the signed installer, installed menu app, and bundled native credential reader. The generic Keychain command-line tool is not used.
 
 ## What the installer does
 
-The native app uses the fixed system Python prerequisite `/usr/bin/python3` to verify `manifest.json`, stages the immutable payload, and then runs the existing transactional `installer/root-admin.sh` root phase once through the macOS administrator authorization UI. The shell scripts under `installer/` are implementation details for the app and are not user-facing launchers.
+The native app uses the fixed system Python prerequisite `/usr/bin/python3` to verify `manifest.json`, stages the immutable payload, and then runs the transactional `installer/root-admin.sh` root phase once through the macOS administrator authorization UI. No Terminal installer or uninstaller is packaged.
 
 After the root transaction succeeds, the user phase writes auto-reconnect enabled, bootstraps/kickstarts the per-user service, stops any older menu process with bounded TERM/KILL fallback, opens `/Applications/HYU VPN.app`, and waits for exactly one menu process. Normal connect, reconnect, and disconnect operations use the installed helper/sudoers setup and should not request the Mac administrator password.
 
@@ -32,4 +32,4 @@ Each release includes:
 
 ## Internal implementation notes
 
-`installer/install.sh`, `installer/uninstall.sh`, and `installer/root-admin.sh` remain packaged for manifest verification, root transaction reuse, recovery, and internal diagnostics. They are not the DMG entry point for lab users.
+Only `installer/root-admin.sh` and `installer/manifest.py` remain as private implementation resources for the native installer.

@@ -9,6 +9,7 @@ package final class KeychainCredentialStore: CredentialStore {
     enum AdapterError: Error { case keychainFailure }
 
     private static let account = "hyu-vpn"
+    package static let credentialReaderPath = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader"
     private static let services: [CredentialKey: String] = [
         .username: "gp-vpn-username",
         .password: "gp-vpn-password",
@@ -49,7 +50,7 @@ package final class KeychainCredentialStore: CredentialStore {
     package func write(_ value: String, for key: CredentialKey) throws {
         guard let data = value.data(using: .utf8) else { throw AdapterError.keychainFailure }
         let query = baseQuery(for: key)
-        let access = try KeychainCredentialAccessFactory.make(additionalTrustedApplicationPath: additionalTrustedApplicationPath)
+        let access = try KeychainCredentialAccessFactory.make(firstTrustedApplicationPath: Self.credentialReaderPath, secondTrustedApplicationPath: additionalTrustedApplicationPath)
         let attributes: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccess as String: access,
@@ -86,16 +87,39 @@ package final class KeychainCredentialStore: CredentialStore {
 }
 
 package enum KeychainCredentialAccessFactory {
-    package static func make(additionalTrustedApplicationPath: String? = nil) throws -> SecAccess {
+    package static func make(firstTrustedApplicationPath: String? = nil, secondTrustedApplicationPath: String? = nil) throws -> SecAccess {
         var unmanagedAccess: Unmanaged<SecAccess>?
-        let status: OSStatus
-        if let additionalTrustedApplicationPath {
-            status = additionalTrustedApplicationPath.withCString { HYUVPNCreateCredentialAccessWithPath($0, &unmanagedAccess) }
-        } else {
-            status = HYUVPNCreateCredentialAccess(&unmanagedAccess)
+        let status = withOptionalCString(firstTrustedApplicationPath) { firstPath in
+            withOptionalCString(secondTrustedApplicationPath) { secondPath in
+                HYUVPNCreateCredentialAccessWithPaths(firstPath, secondPath, &unmanagedAccess)
+            }
         }
         guard status == errSecSuccess, let access = unmanagedAccess?.takeRetainedValue() else { throw KeychainCredentialStore.AdapterError.keychainFailure }
         return access
+    }
+
+    private static func withOptionalCString<T>(_ value: String?, body: (UnsafePointer<CChar>?) -> T) -> T {
+        guard let value else { return body(nil) }
+        return value.withCString(body)
+    }
+}
+
+package enum CredentialReaderCommand {
+    private static let services: [String: CredentialKey] = [
+        "gp-vpn-username": .username,
+        "gp-vpn-password": .password,
+        "gp-vpn-totp": .totpSeed,
+    ]
+
+    package static func run(arguments: [String], store: CredentialStore, output: (String) -> Void) -> Int32 {
+        guard arguments.count == 1, let key = services[arguments[0]] else { return 64 }
+        do {
+            guard let value = try store.read(key), !value.isEmpty else { return 1 }
+            output(value)
+            return 0
+        } catch {
+            return 1
+        }
     }
 }
 

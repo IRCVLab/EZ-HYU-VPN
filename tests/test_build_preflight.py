@@ -112,11 +112,12 @@ class BuildPreflightTests(unittest.TestCase):
         self.assertGreaterEqual(int(metadata["swift"]["major_version"]), 6)
         self.assertTrue(metadata["swift"]["appkit_compiles"])
 
-        for tool in ["codesign", "hdiutil", "plutil", "security", "visudo"]:
+        for tool in ["codesign", "hdiutil", "plutil", "visudo"]:
             with self.subTest(tool=tool):
                 self.assertTrue(metadata["tools"][tool]["available"])
                 self.assertTrue(Path(metadata["tools"][tool]["path"]).is_absolute())
                 self.assertTrue(os.access(metadata["tools"][tool]["path"], os.X_OK))
+        self.assertNotIn("security", metadata["tools"])
 
     def test_preflight_discovers_homebrew_dependencies_from_stable_prefixes(self):
         metadata = self.run_preflight()

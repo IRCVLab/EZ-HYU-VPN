@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 
-SECURITY = "/usr/bin/security"
-KEYCHAIN_ACCOUNT = "hyu-vpn"
+KEYCHAIN_READER = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader"
 OATHTOOL = "/opt/homebrew/bin/oathtool"
 SUBPROCESS_TIMEOUT = 5.0
 
@@ -24,12 +23,12 @@ class TotpError(RuntimeError):
 
 
 class Keychain:
-    def __init__(self, *, security_path: str = SECURITY, runner: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None) -> None:
-        self.security_path = security_path
+    def __init__(self, *, reader_path: str = KEYCHAIN_READER, runner: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None) -> None:
+        self.reader_path = reader_path
         self.runner = runner or subprocess.run
 
     def read(self, service: str) -> str:
-        argv = [self.security_path, "find-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT, "-w"]
+        argv = [self.reader_path, service]
         try:
             completed = self.runner(
                 argv,

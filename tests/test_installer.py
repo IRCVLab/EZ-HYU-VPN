@@ -93,6 +93,9 @@ esac
         app_exec.parent.mkdir(parents=True)
         app_exec.write_text("app", encoding="utf-8")
         app_exec.chmod(0o755)
+        credential_reader = self.payload / "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader"
+        credential_reader.write_text("reader", encoding="utf-8")
+        credential_reader.chmod(0o755)
 
     def env(self):
         return DryRunEnvironment(root=self.root / "dry root", payload=self.payload, home=self.root / "home dir", manifest=self.manifest_path)
@@ -165,6 +168,7 @@ class StageAndCliTests(InstallerTestCase):
             "bin/hyu-vpn-native-client",
             "src/hyu_vpn/__init__.py",
             "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+            "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader",
             "manifest.json",
         ]:
             self.assertTrue((stage / rel).exists(), rel)
@@ -751,7 +755,7 @@ resolver #1
         self.assertFalse((env.root / "etc/sudoers.d/hyu-vpn").exists())
         self.assertEqual(list((env.root / "private/var/db/hyu-vpn").glob("sudoers-candidate.*")), [])
 
-    def test_uninstall_is_idempotent_allowlisted_and_uses_singleton_keychain_account(self):
+    def test_root_uninstall_is_idempotent_and_allowlisted(self):
         env = self.env()
         stage = stage_user_payload(env)
         self.assertEqual(self.run_root_admin(env, stage).returncode, 0)
@@ -764,9 +768,6 @@ resolver #1
         self.assertTrue(unrelated.exists())
         self.assertFalse((env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper").exists())
         self.assertFalse((env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper").exists())
-        uninstall = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
-        for item in ["gp-vpn-username", "gp-vpn-password", "gp-vpn-totp"]:
-            self.assertIn(f"delete-generic-password -s {item} -a hyu-vpn", uninstall)
 
 
     def test_native_snapshot_validator_accepts_actual_manager_record_schema(self):
@@ -829,256 +830,24 @@ resolver #1
 
 
 class LauncherAndTemplateTests(InstallerTestCase):
+    def test_legacy_terminal_installers_are_removed(self):
+        for rel in [
+            "installer/install.sh",
+            "installer/uninstall.sh",
+            "installer/Install HYU VPN.command",
+            "installer/Uninstall HYU VPN.command",
+        ]:
+            self.assertFalse((REPO / rel).exists(), rel)
 
-    def _write_fake_install_tools(self, root: Path):
-        tools = root / "fake-install-tools"
-        tools.mkdir(parents=True)
-        security = tools / "security"
-        security.write_text('#!/bin/sh\nlog="$FAKE_INSTALL_LOG"\nprintf \'security\' >> "$log"\nfor arg in "$@"; do printf \' [%s]\' "$arg" >> "$log"; done\nprintf \'\n\' >> "$log"\nif [ "$1" = "find-generic-password" ]; then\n  want_password=0\n  while [ $# -gt 0 ]; do [ "$1" = "-w" ] && want_password=1; shift; done\n  [ "$want_password" = 1 ] && { printf \'secret-from-temp\n\'; exit 0; }\n  exit 1\nfi\nif [ "$1" = "add-generic-password" ]; then\n  service=""\n  while [ $# -gt 0 ]; do [ "$1" = "-s" ] && { shift; service="$1"; }; shift; done\n  [ "$service" = "gp-vpn-totp" ] && exit 44\n  exit 0\nfi\nif [ "$1" = "delete-generic-password" ]; then exit 0; fi\nexit 0\n', encoding="utf-8")
-        security.chmod(0o755)
-        sudo = tools / "sudo"
-        sudo.write_text('#!/bin/sh\nlog="$FAKE_INSTALL_LOG"\nprintf \'sudo\' >> "$log"\nfor arg in "$@"; do printf \' [%s]\' "$arg" >> "$log"; done\nprintf \'\n\' >> "$log"\n[ "$1" = "-v" ] && exit 0\ncase " $* " in\n  *" --administrator-phase install "*) exit 0 ;;\n  *" --administrator-phase uninstall "*) exit "${FAKE_UNINSTALL_STATUS:-0}" ;;\nesac\nexit 99\n', encoding="utf-8")
-        sudo.chmod(0o755)
-        date = tools / "date"
-        date.write_text('#!/bin/sh\nlog="$FAKE_INSTALL_LOG"\nprintf \'date\' >> "$log"\nfor arg in "$@"; do printf \' [%s]\' "$arg" >> "$log"; done\nprintf \'\n\' >> "$log"\nprintf \'%s\\n\' "${FAKE_DATE_EPOCH:-1785881401}"\n', encoding="utf-8")
-        date.chmod(0o755)
-        pgrep = tools / "pgrep"
-        pgrep.write_text("""#!/bin/sh
-log="$FAKE_INSTALL_LOG"
-printf 'pgrep' >> "$log"
-for arg in "$@"; do printf ' [%s]' "$arg" >> "$log"; done
-printf '\n' >> "$log"
-exit 1
-""", encoding="utf-8")
-        pgrep.chmod(0o755)
-        pkill = tools / "pkill"
-        pkill.write_text("""#!/bin/sh
-log="$FAKE_INSTALL_LOG"
-printf 'pkill' >> "$log"
-for arg in "$@"; do printf ' [%s]' "$arg" >> "$log"; done
-printf '\n' >> "$log"
-exit 0
-""", encoding="utf-8")
-        pkill.chmod(0o755)
-        id_tool = tools / "id"
-        id_tool.write_text("""#!/bin/sh
-printf '501\n'
-""", encoding="utf-8")
-        id_tool.chmod(0o755)
-        sleep = tools / "sleep"
-        sleep.write_text("""#!/bin/sh
-exit 0
-""", encoding="utf-8")
-        sleep.chmod(0o755)
-        return tools
-
-    def _patched_install_script_for_fake_tools(self, tools: Path) -> Path:
-        script = self.payload / "installer/install.fake-tools.sh"
-        text = (REPO / "installer/install.sh").read_text(encoding="utf-8")
-        text = text.replace("/usr/bin/security", str(tools / "security"))
-        text = text.replace("/usr/bin/sudo", str(tools / "sudo"))
-        text = text.replace("/bin/date", str(tools / "date"))
-        text = text.replace("/usr/bin/pgrep", str(tools / "pgrep"))
-        text = text.replace("/usr/bin/pkill", str(tools / "pkill"))
-        text = text.replace("/usr/bin/id", str(tools / "id"))
-        text = text.replace("/bin/sleep", str(tools / "sleep"))
-        script.write_text(text, encoding="utf-8")
-        script.chmod(0o755)
-        self.manifest_path = PayloadManifest.write_for_tree(self.payload, self.payload / "manifest.json")
-        return script
-
-    def _fake_uninstall_app_exec(self, status: int = 0, output: str = "LOGIN_ITEM_UNREGISTERED", *, create: bool = True) -> Path:
-        app_exec = self.root / "fixture Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
-        app_exec.parent.mkdir(parents=True, exist_ok=True)
-        if create:
-            app_exec.write_text(
-                f"#!/bin/sh\n"
-                f"log=\"$FAKE_INSTALL_LOG\"\n"
-                f"printf 'app-exec [%s]' \"$0\" >> \"$log\"\n"
-                f"for arg in \"$@\"; do printf ' [%s]' \"$arg\" >> \"$log\"; done\n"
-                f"printf '\\n' >> \"$log\"\n"
-                f"printf '%s\\n' {output!r}\n"
-                f"exit {status}\n",
-                encoding="utf-8",
-            )
-            app_exec.chmod(0o755)
-        self.assertTrue(app_exec.parent.resolve().is_relative_to(self.root.resolve()))
-        self.assertNotEqual(app_exec, Path("/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"))
-        return app_exec
-
-    def _patched_uninstall_script_for_fake_tools(self, tools: Path, *, app_status: int = 0, app_output: str = "LOGIN_ITEM_UNREGISTERED", create_app: bool = True) -> tuple[Path, Path]:
-        script = self.payload / "installer/uninstall.fake-tools.sh"
-        text = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
-        text = text.replace("/usr/bin/security", str(tools / "security"))
-        text = text.replace("/usr/bin/sudo", str(tools / "sudo"))
-        text = text.replace("/bin/date", str(tools / "date"))
-        text = text.replace("/usr/bin/pgrep", str(tools / "pgrep"))
-        text = text.replace("/usr/bin/pkill", str(tools / "pkill"))
-        text = text.replace("/usr/bin/id", str(tools / "id"))
-        app_exec = self._fake_uninstall_app_exec(status=app_status, output=app_output, create=create_app)
-        exact_app = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
-        self.assertIn(exact_app, text)
-        text = text.replace(exact_app, str(app_exec))
-        text = text.replace("/bin/sleep", str(tools / "sleep"))
-        script.write_text(text, encoding="utf-8")
-        script.chmod(0o755)
-        self.manifest_path = PayloadManifest.write_for_tree(self.payload, self.payload / "manifest.json")
-        return script, app_exec
-
-    def test_install_promotion_failure_executes_root_cleanup_and_reports_successful_cleanup(self):
-        tools = self._write_fake_install_tools(self.root)
-        script = self._patched_install_script_for_fake_tools(tools)
-        log = self.root / "fake-install.log"
-        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="tester\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "FAKE_UNINSTALL_STATUS": "0", "HOME": str(self.root / "home")})
-        self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
-        logged = log.read_text(encoding="utf-8")
-        self.assertIn("sudo [-n] [/bin/zsh]", logged)
-        self.assertIn("--administrator-phase] [install]", logged)
-        self.assertIn("--administrator-phase] [uninstall]", logged)
-        self.assertNotIn("rollback incomplete", proc.stderr.lower())
-
-    def test_install_promotion_failure_reports_rollback_incomplete_when_root_cleanup_fails(self):
-        tools = self._write_fake_install_tools(self.root)
-        script = self._patched_install_script_for_fake_tools(tools)
-        log = self.root / "fake-install-fail.log"
-        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="tester\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "FAKE_UNINSTALL_STATUS": "42", "HOME": str(self.root / "home")})
-        self.assertEqual(proc.returncode, 70, proc.stderr + proc.stdout)
-        self.assertIn("HYU VPN root rollback incomplete", proc.stderr)
-        logged = log.read_text(encoding="utf-8")
-        self.assertIn("--administrator-phase] [uninstall]", logged)
-
-    def test_live_nonce_is_generated_after_admin_auth_and_used_noninteractively(self):
-        tools = self._write_fake_install_tools(self.root)
-        script = self._patched_install_script_for_fake_tools(tools)
-        log = self.root / "fake-install-nonce.log"
-        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="tester\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
-        self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
-        logged = log.read_text(encoding="utf-8")
-        auth = logged.index("sudo [-v]")
-        nonce = logged.index("date [+%s]", auth)
-        root_admin = logged.index("sudo [-n] [/bin/zsh]", nonce)
-        self.assertLess(auth, nonce)
-        self.assertLess(nonce, root_admin)
-        self.assertIn("[--live-install] [hyu-install-mutation-1785881401]", logged[root_admin:])
-
-
-    def test_uninstall_uses_literal_installed_app_and_has_no_environment_override(self):
-        uninstall = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
-        exact_app = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
-        self.assertIn(f'local app_exec="{exact_app}"', uninstall)
-        self.assertNotIn("HYU_VPN_TEST_APP_EXEC", uninstall)
-
-    def test_uninstall_missing_installed_app_blocks_before_sudo(self):
-        tools = self._write_fake_install_tools(self.root)
-        script, app_exec = self._patched_uninstall_script_for_fake_tools(tools, create_app=False)
-        log = self.root / "fake-uninstall-missing-app.log"
-        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn(str(app_exec), proc.stderr)
-        self.assertFalse(log.exists(), "sudo must not run when exact app executable is missing")
-
-    def test_uninstall_tolerates_only_normalized_absent_login_item_outcomes(self):
-        for output in ["LOGIN_ITEM_NOT_REGISTERED", "LOGIN_ITEM_NOT_FOUND"]:
-            with self.subTest(output=output):
-                tools = self._write_fake_install_tools(self.root / output)
-                script, app_exec = self._patched_uninstall_script_for_fake_tools(tools, app_status=7, app_output=output)
-                log = self.root / f"fake-uninstall-{output}.log"
-                proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
-                self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-                logged = log.read_text(encoding="utf-8")
-                self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
-                self.assertIn("sudo [-n] [/bin/zsh]", logged)
-
-    def test_uninstall_other_login_item_failure_blocks_before_sudo(self):
-        tools = self._write_fake_install_tools(self.root)
-        script, app_exec = self._patched_uninstall_script_for_fake_tools(tools, app_status=42, app_output="LOGIN_ITEM_AUTHORIZATION_FAILED")
-        log = self.root / "fake-uninstall-fatal-app.log"
-        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("LOGIN_ITEM_AUTHORIZATION_FAILED", proc.stderr)
-        logged = log.read_text(encoding="utf-8")
-        self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
-        self.assertNotIn("sudo [-n] [/bin/zsh]", logged)
-
-    def test_uninstall_live_nonce_is_generated_after_admin_auth_and_used_noninteractively(self):
-        tools = self._write_fake_install_tools(self.root)
-        script, app_exec = self._patched_uninstall_script_for_fake_tools(tools)
-        log = self.root / "fake-uninstall-nonce.log"
-        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
-        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        logged = log.read_text(encoding="utf-8")
-        self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
-        self.assertNotIn("app-exec [/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp]", logged)
-        auth = logged.index("sudo [-v]")
-        nonce = logged.index("date [+%s]", auth)
-        root_admin = logged.index("sudo [-n] [/bin/zsh]", nonce)
-        self.assertLess(auth, nonce)
-        self.assertLess(nonce, root_admin)
-        self.assertIn("[--live-install] [hyu-install-mutation-1785881401]", logged[root_admin:])
-
-    def test_install_uninstall_default_to_audit_and_single_sudo_after_credentials(self):
-        install = (REPO / "installer/install.sh").read_text(encoding="utf-8")
-        uninstall = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
-        self.assertIn("--package-audit", install)
-        self.assertIn("--live-install", install)
-        self.assertIn("hyu-install-mutation-$(/bin/date +%s)", install)
-        self.assertNotIn("HYU_VPN_INSTALL_NONCE", install)
-        nonce_assignment = 'LIVE_NONCE="hyu-install-mutation-$(/bin/date +%s)"'
-        self.assertEqual(install.count(nonce_assignment), 1)
-        self.assertIn("/usr/bin/sudo -v", install)
-        self.assertIn("/usr/bin/sudo -n /bin/zsh", install)
-        self.assertGreater(install.index(nonce_assignment), install.index("/usr/bin/sudo -v"))
-        self.assertLess(install.index(nonce_assignment), install.index('/usr/bin/sudo -n /bin/zsh'))
-        self.assertNotIn("HYU_VPN_USERNAME", install)
-        self.assertNotIn("IFS= read -r HYU", install)
-        self.assertNotIn("-w \"$HYU", install)
-        self.assertIn("HYU VPN username: enter it twice at the next prompts.", install)
-        self.assertIn('/usr/bin/security add-generic-password -s "$TMP_USER_SERVICE" -a hyu-vpn -w', install)
-        self.assertNotIn('/usr/bin/security add-generic-password -s "$TMP_USER_SERVICE" -a hyu-vpn -w "', install)
-        self.assertIn('validate_temp_username() {', install)
-        self.assertIn('find-generic-password -w -s "$TMP_USER_SERVICE" -a hyu-vpn | /usr/bin/python3 -I -c', install)
-        self.assertIn('value = sys.stdin.read().rstrip("\\n")', install)
-        self.assertIn('if not value or len(value) > 128 or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):', install)
-        self.assertIn('find-generic-password -w -s "$TMP_USER_SERVICE" -a hyu-vpn | /usr/bin/security add-generic-password -s gp-vpn-username -a hyu-vpn -w', install)
-        self.assertIn("hyu-vpn-install-password-", install)
-        self.assertIn("HYU VPN password (not the Mac administrator password)", install)
-        self.assertIn("TOTP secret seed (not the current 6-digit OTP code)", install)
-        self.assertIn("find-generic-password -w -s \"$TMP_PASS_SERVICE\"", install)
-        self.assertIn("AutoReconnectPreference", install)
-        self.assertIn("launchctl bootstrap", install)
-        self.assertIn("launchctl kickstart", install)
-        self.assertIn('launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.service"', install)
-        self.assertNotIn('launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.menubar"', install)
-        self.assertIn("launchctl print", install)
-        self.assertIn("missing installed service LaunchAgent", install)
-        self.assertNotIn("missing installed menu LaunchAgent", install)
-        self.assertIn('/usr/bin/open -gj -a \"/Applications/HYU VPN.app\"', install)
-        self.assertNotIn("/usr/bin/open -a", install)
-        self.assertIn('/usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp', install)
-        self.assertIn("wait_for_single_menubar", install)
-        self.assertLess(install.index("stop_existing_menubar"), install.index('/usr/bin/open -gj -a "/Applications/HYU VPN.app"'))
-        self.assertLess(install.index("AutoReconnectPreference"), install.index("launchctl bootstrap"))
-        self.assertLess(install.index("launchctl bootstrap"), install.index('/usr/bin/open -gj -a \"/Applications/HYU VPN.app\"'))
-        activation = install[install.index("AutoReconnectPreference"):]
-        self.assertNotIn("/opt/homebrew/bin/openconnect", activation)
-        self.assertNotIn("com.hyu.vpn.helper start", activation)
-        self.assertLess(install.index("TMP_PASS_SERVICE"), install.index("/usr/bin/sudo"))
-        self.assertLess(install.index("/usr/bin/sudo"), install.index("record_keychain_created gp-vpn-password"))
-        self.assertGreaterEqual(install.count("/usr/bin/sudo"), 1)
-        self.assertIn("--administrator-phase uninstall", install)
-        self.assertIn("HYU VPN root rollback incomplete", install)
-        root_cleanup = install[install.index("--administrator-phase uninstall")-120:install.index("HYU VPN root rollback incomplete")]
-        self.assertNotIn(">/dev/null 2>&1", root_cleanup)
-        self.assertNotIn("|| true", root_cleanup)
-        self.assertLess(install.index("--verify-manifest"), install.index("/usr/bin/sudo"))
-        self.assertGreater(install.index("record_keychain_created gp-vpn-username"), install.index("--administrator-phase install"))
-        self.assertIn("--package-audit", uninstall)
-        self.assertEqual(uninstall.count("/usr/bin/sudo -v"), 1)
-        self.assertEqual(uninstall.count("/usr/bin/sudo -n /bin/zsh"), 1)
-        self.assertIn("--unregister-login-item", uninstall)
-        self.assertIn('/usr/bin/pkill -TERM -u "$USER_UID" -x HYUVPNMenuApp', uninstall)
-        self.assertIn("LOGIN_ITEM_NOT_REGISTERED", uninstall)
-        self.assertIn("LOGIN_ITEM_NOT_FOUND", uninstall)
+    def test_runtime_sources_do_not_invoke_generic_keychain_cli(self):
+        for rel in [
+            "src/hyu_vpn/otp.py",
+            "installer/manifest.py",
+            "scripts/preflight.sh",
+            "macos/Sources/HYUVPNKeychainAccessShim/HYUVPNKeychainAccessShim.c",
+            "macos/Sources/HYUVPNMenuApp/SystemAdapters.swift",
+        ]:
+            self.assertNotIn("/usr/bin/security", (REPO / rel).read_text(encoding="utf-8"), rel)
 
     def test_launchd_templates_are_valid_safe_defaults(self):
         for rel in ["launchd/com.hyu.vpn.service.plist.in"]:

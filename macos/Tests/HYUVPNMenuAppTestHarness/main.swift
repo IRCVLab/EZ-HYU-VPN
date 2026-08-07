@@ -61,6 +61,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("totp-resetter-runtime-unsafe-metadata-fails-closed", totpResetterRuntimeUnsafeMetadataFailsClosed),
                 ("totp-resetter-runtime-flock-coordination", totpResetterRuntimeFlockCoordination),
                 ("keychain-add-access-runtime-and-source-contract", keychainAddAccessRuntimeAndSourceContract),
+                ("native-keychain-reader-closed-command-surface", nativeKeychainReaderClosedCommandSurface),
                 ("credential-reset-controller-runtime-behavior", credentialResetControllerRuntimeBehavior),
                 ("credential-reset-lifecycle-runtime", credentialResetLifecycleRuntime)
             ]
@@ -474,11 +475,18 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
 
     static func bundleAssembler() throws {
         let root = packageRoot()
-        let executable = root.appendingPathComponent(".build/release/HYUVPNMenuApp")
-        try expect(FileManager.default.isExecutableFile(atPath: executable.path), "release executable exists")
-        let destination = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-bundle-\(UUID().uuidString)")
+        let fixture = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-bundle-\(UUID().uuidString)")
+        let inputs = fixture.appendingPathComponent("inputs")
+        let destination = fixture.appendingPathComponent("output")
+        try FileManager.default.createDirectory(at: inputs, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: destination) }
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let executable = inputs.appendingPathComponent("HYUVPNMenuApp")
+        let reader = inputs.appendingPathComponent("hyu-vpn-keychain-reader")
+        for input in [executable, reader] {
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: input)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: input.path)
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [root.appendingPathComponent("Scripts/assemble-menu-app.sh").path, executable.path, destination.path]
@@ -487,7 +495,9 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         let app = destination.appendingPathComponent("HYU VPN.app")
         let plist = app.appendingPathComponent("Contents/Info.plist")
         let binary = app.appendingPathComponent("Contents/MacOS/HYUVPNMenuApp")
+        let bundledReader = app.appendingPathComponent("Contents/MacOS/HYUVPNCredentialReader")
         try expect(FileManager.default.isExecutableFile(atPath: binary.path), "bundle executable")
+        try expect(FileManager.default.isExecutableFile(atPath: bundledReader.path), "bundled native credential reader")
         let info = NSDictionary(contentsOf: plist) as? [String: Any]
         try expect(info?["CFBundleExecutable"] as? String == "HYUVPNMenuApp", "plist executable")
         try expect(info?["CFBundleName"] as? String == "HYU VPN", "plist name")
@@ -912,23 +922,21 @@ time.sleep(20)
         let shimSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNKeychainAccessShim/HYUVPNKeychainAccessShim.c"))
         let adapterSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/SystemAdapters.swift"))
         for required in [
-            "HYUVPNCreateCredentialAccessWithPath(NULL, accessOut)",
+            "HYUVPNCreateCredentialAccessWithPaths(NULL, NULL, accessOut)",
             "SecTrustedApplicationCreateFromPath(NULL",
-            #"SecTrustedApplicationCreateFromPath("/usr/bin/security""#,
             "trustedApplications[3]",
-            "CFIndex trustedCount = 2",
-            "extraTrustedPath",
-            "SecTrustedApplicationCreateFromPath(extraTrustedPath",
-            "trustedApplications[trustedCount++] = extraApplication",
+            "firstTrustedPath",
+            "secondTrustedPath",
             "CFArrayCreate(kCFAllocatorDefault, trustedApplications, trustedCount",
             "SecAccessCreate",
         ] {
             try expect(shimSource.contains(required), "keychain ACL shim contains \(required)")
         }
+        try expect(!shimSource.contains("/usr/bin/security"), "keychain ACL never trusts the generic security CLI")
         try expect(adapterSource.contains("additionalTrustedApplicationPath"), "keychain adapter accepts optional trusted app path")
-        try expect(adapterSource.contains("HYUVPNCreateCredentialAccessWithPath"), "keychain adapter forwards optional trusted app path")
+        try expect(adapterSource.contains("HYUVPNCreateCredentialAccessWithPaths"), "keychain adapter forwards native trusted app paths")
         try expect(shimSource.contains("-Wdeprecated-declarations") || shimSource.contains("deprecated-declarations"), "deprecation warning is scoped to shim")
-        let accessFactoryIndex = try requireIndex(of: "let access = try KeychainCredentialAccessFactory.make(additionalTrustedApplicationPath: additionalTrustedApplicationPath)", in: adapterSource, message: "access factory before attrs")
+        let accessFactoryIndex = try requireIndex(of: "let access = try KeychainCredentialAccessFactory.make(firstTrustedApplicationPath: Self.credentialReaderPath, secondTrustedApplicationPath: additionalTrustedApplicationPath)", in: adapterSource, message: "access factory before attrs")
         let attributesIndex = try requireIndex(of: "let attributes: [String: Any]", in: adapterSource, message: "attributes dictionary")
         let firstUpdateIndex = try requireIndex(of: "let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)", in: adapterSource, message: "initial update uses shared attributes")
         let addIndex = try requireIndex(of: "SecItemAdd", in: adapterSource, message: "add index")
@@ -941,6 +949,18 @@ time.sleep(20)
         try expect(adapterSource.contains("kSecAttrAccess as String: access"), "attributes contain ACL access")
         try expect(adapterSource.contains("addQuery[kSecValueData as String] = attributes[kSecValueData as String]"), "add reuses data from shared attributes")
         try expect(adapterSource.contains("addQuery[kSecAttrAccess as String] = attributes[kSecAttrAccess as String]"), "add reuses ACL from shared attributes")
+    }
+
+    static func nativeKeychainReaderClosedCommandSurface() throws {
+        let store = HarnessCredentialStore(initial: [.username: "reader-user", .password: "reader-password", .totpSeed: "JBSWY3DPEHPK3PXP"])
+        var output = ""
+        try expect(CredentialReaderCommand.run(arguments: ["gp-vpn-username"], store: store) { output += $0 } == 0, "reader returns success for username")
+        try expect(output == "reader-user", "reader emits only the requested secret")
+        output = ""
+        try expect(CredentialReaderCommand.run(arguments: ["unknown-service"], store: store) { output += $0 } == 64, "reader rejects arbitrary service names")
+        try expect(output.isEmpty, "invalid reader request emits nothing")
+        try expect(CredentialReaderCommand.run(arguments: [], store: store) { output += $0 } == 64, "reader rejects missing service")
+        try expect(CredentialReaderCommand.run(arguments: ["gp-vpn-password", "extra"], store: store) { output += $0 } == 64, "reader rejects extra arguments")
     }
 
     static func credentialResetControllerRuntimeBehavior() throws {
