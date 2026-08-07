@@ -17,6 +17,7 @@ fn builds_fixed_openconnect_arguments_without_credentials() {
         vec![
             "--protocol=gp",
             "--authgroup=student",
+            "--no-dtls",
             "--passwd-on-stdin",
             "--script=/usr/lib/hyu-vpn/vpnc-script",
             "--csd-wrapper=/usr/lib/hyu-vpn/gp-hip-report",

@@ -1,0 +1,94 @@
+#!/bin/sh
+set -eu
+
+UPSTREAM=/usr/share/vpnc-scripts/vpnc-script
+RESOLVECTL=/usr/bin/resolvectl
+STUB=/run/systemd/resolve/stub-resolv.conf
+
+valid_tunnel() {
+    case "${TUNDEV:-}" in
+        tun*) suffix="${TUNDEV#tun}" ;;
+        tap*) suffix="${TUNDEV#tap}" ;;
+        vpn*) suffix="${TUNDEV#vpn}" ;;
+        *) return 1 ;;
+    esac
+    case "$suffix" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+valid_ipv4() {
+    address=$1
+    case "$address" in
+        *[!0-9.]*|'') return 1 ;;
+    esac
+    old_ifs=$IFS
+    IFS=.
+    # Word splitting separates the four validated IPv4 octets.
+    # shellcheck disable=SC2086
+    set -- $address
+    IFS=$old_ifs
+    [ "$#" -eq 4 ] || return 1
+    for octet do
+        [ -n "$octet" ] || return 1
+        [ "$octet" -le 255 ] 2>/dev/null || return 1
+    done
+}
+
+resolved_stub_in_use() {
+    target="$(/usr/bin/readlink /etc/resolv.conf 2>/dev/null || true)"
+    [ "$target" = "../run/systemd/resolve/stub-resolv.conf" ] ||
+        [ "$target" = "/run/systemd/resolve/stub-resolv.conf" ]
+}
+
+restore_stub() {
+    resolved_stub_in_use || return 0
+    /usr/bin/install -d -o root -g root -m 0755 /run/systemd/resolve
+    temporary="/run/systemd/resolve/.stub-resolv.conf.hyu-vpn.$$"
+    trap '/usr/bin/rm -f "$temporary"' EXIT HUP INT TERM
+    umask 022
+    /usr/bin/cat > "$temporary" <<'STUB_EOF'
+# This is /run/systemd/resolve/stub-resolv.conf managed by systemd-resolved.
+nameserver 127.0.0.53
+options edns0 trust-ad
+search .
+STUB_EOF
+    /usr/bin/chmod 0644 "$temporary"
+    /usr/bin/chown root:root "$temporary"
+    /usr/bin/mv -f "$temporary" "$STUB"
+    trap - EXIT HUP INT TERM
+}
+
+configure_resolved() {
+    valid_tunnel || return 1
+    [ -x "$RESOLVECTL" ] || return 0
+    dns_count=0
+    for address in ${INTERNAL_IP4_DNS:-}; do
+        valid_ipv4 "$address" || return 1
+        dns_count=$((dns_count + 1))
+        [ "$dns_count" -le 8 ] || return 1
+    done
+    if [ "$dns_count" -gt 0 ]; then
+        # Word splitting is intentional after strict IPv4 validation.
+        # shellcheck disable=SC2086
+        "$RESOLVECTL" dns "$TUNDEV" ${INTERNAL_IP4_DNS}
+        "$RESOLVECTL" domain "$TUNDEV" '~hanyang.ac.kr' '~hyu.ac.kr'
+        "$RESOLVECTL" default-route "$TUNDEV" no
+        if ! /usr/bin/timeout 4 "$RESOLVECTL" query --interface="$TUNDEV" secure.hanyang.ac.kr >/dev/null 2>&1; then
+            "$RESOLVECTL" revert "$TUNDEV" >/dev/null 2>&1 || true
+        fi
+    fi
+    restore_stub
+}
+
+if [ "${reason:-}" = disconnect ] && valid_tunnel && [ -x "$RESOLVECTL" ]; then
+    "$RESOLVECTL" revert "$TUNDEV" >/dev/null 2>&1 || true
+fi
+
+"$UPSTREAM" "$@"
+
+case "${reason:-}" in
+    connect|reconnect) configure_resolved ;;
+    disconnect) restore_stub ;;
+esac

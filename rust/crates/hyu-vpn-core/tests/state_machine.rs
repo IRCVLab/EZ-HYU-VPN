@@ -152,3 +152,38 @@ fn stale_generation_events_cannot_change_current_connection() {
     );
     assert_eq!(engine.state(), VpnState::Connecting);
 }
+
+#[test]
+fn changed_physical_network_restarts_an_active_generation() {
+    let mut engine = Engine::new(true);
+    let first = NetworkIdentity::new("wlan0", "192.0.2.1");
+    let second = NetworkIdentity::new("wlan0", "192.0.2.254");
+    let started = engine.handle(EngineEvent::NetworkReady(first));
+    let generation = started
+        .iter()
+        .find_map(|action| match action {
+            EngineAction::StartConnection { generation } => Some(*generation),
+            _ => None,
+        })
+        .unwrap();
+    engine.handle(EngineEvent::ConnectorConnected { generation });
+
+    let changed = engine.handle(EngineEvent::NetworkReady(second));
+    assert_eq!(
+        changed[0],
+        EngineAction::PublishState(VpnState::Disconnecting)
+    );
+    assert_eq!(changed[1], EngineAction::StopConnection { generation });
+    let restarted = engine.handle(EngineEvent::ConnectorExited {
+        generation,
+        return_code: 0,
+        runtime_seconds: 60,
+    });
+    assert!(matches!(
+        restarted.as_slice(),
+        [
+            EngineAction::PublishState(VpnState::Connecting),
+            EngineAction::StartConnection { .. }
+        ]
+    ));
+}

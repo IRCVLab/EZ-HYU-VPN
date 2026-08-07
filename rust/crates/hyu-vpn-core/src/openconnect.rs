@@ -31,6 +31,7 @@ pub fn build_openconnect_args(
     Ok(vec![
         "--protocol=gp".to_owned(),
         format!("--authgroup={}", config.authgroup),
+        "--no-dtls".to_owned(),
         "--passwd-on-stdin".to_owned(),
         format!(
             "--script={}",

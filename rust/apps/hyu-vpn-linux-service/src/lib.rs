@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use hyu_vpn_core::ports::{NetworkMonitor, PortalProbe};
-use hyu_vpn_core::state::{ConnectionGeneration, EngineAction, EngineEvent};
+use hyu_vpn_core::state::{ConnectionGeneration, EngineAction, EngineEvent, NetworkIdentity};
 use hyu_vpn_core::totp::{CounterGuard, TotpError, TotpGenerator, TotpSecret};
 use hyu_vpn_daemon::ipc::{RequestHandler, serve_connection};
 use hyu_vpn_daemon::runtime::{ActionExecutor, CredentialRepository, SystemClock};
@@ -162,8 +162,12 @@ impl ChallengeCodeProvider for GuardedCodes {
                 .code_at(SystemTime::now())
                 .map_err(|_| LaunchError::ProcessFailed)?;
             match self.guard.reserve(code.counter) {
-                Ok(()) => return Ok(Zeroizing::new(code.value)),
+                Ok(()) => {
+                    eprintln!("hyu-vpn-connect-stage: totp-generated");
+                    return Ok(Zeroizing::new(code.value));
+                }
                 Err(TotpError::CounterAlreadyUsed) => {
+                    eprintln!("hyu-vpn-connect-stage: waiting-for-next-totp-step");
                     tokio::time::sleep(
                         Duration::from_secs(u64::from(code.remaining_seconds))
                             + Duration::from_millis(50),
@@ -252,6 +256,7 @@ impl LinuxActionExecutor {
                     () = tokio::time::sleep(Duration::from_millis(250)), if !connected => {
                         if !tunnel_interfaces().is_subset(&baseline) {
                             connected = true;
+                            eprintln!("hyu-vpn-connect-stage: tunnel-detected");
                             let _ = events.send(EngineEvent::ConnectorConnected { generation });
                         }
                     }
@@ -333,6 +338,46 @@ impl ActionExecutor for LinuxActionExecutor {
     }
 }
 
+#[derive(Default)]
+pub struct NetworkReadinessTracker {
+    candidate: Option<NetworkIdentity>,
+    stable_samples: u8,
+    published: Option<NetworkIdentity>,
+}
+
+impl NetworkReadinessTracker {
+    pub fn portal_probe_required(&self, sample: Option<&NetworkIdentity>) -> bool {
+        sample.is_some() && sample != self.published.as_ref()
+    }
+
+    pub fn observe(
+        &mut self,
+        sample: Option<NetworkIdentity>,
+        portal_reachable: bool,
+    ) -> Option<EngineEvent> {
+        let ready = match sample {
+            Some(identity) if self.published.as_ref() == Some(&identity) || portal_reachable => {
+                Some(identity)
+            }
+            _ => None,
+        };
+        if ready == self.candidate {
+            self.stable_samples = self.stable_samples.saturating_add(1);
+        } else {
+            self.candidate = ready.clone();
+            self.stable_samples = 1;
+        }
+        if self.stable_samples < 2 || ready == self.published {
+            return None;
+        }
+        self.published = ready.clone();
+        Some(match ready {
+            Some(identity) => EngineEvent::NetworkReady(identity),
+            None => EngineEvent::NetworkUnavailable,
+        })
+    }
+}
+
 pub async fn run_network_watch<R, C>(
     control: Arc<hyu_vpn_daemon::runtime::ControlPlane<R, C>>,
     monitor: LinuxRouteMonitor,
@@ -342,31 +387,22 @@ pub async fn run_network_watch<R, C>(
     R: CredentialRepository + 'static,
     C: SystemClock + 'static,
 {
-    let mut candidate = None;
-    let mut stable_samples = 0_u8;
-    let mut published = None;
+    let mut tracker = NetworkReadinessTracker::default();
     loop {
         if *shutdown.borrow() {
             return;
         }
-        let sample = match monitor.current_identity().await {
-            Ok(Some(identity)) if portal.reachable(&identity).await.unwrap_or(false) => {
-                Some(identity)
+        let sample = monitor.current_identity().await.ok().flatten();
+        let portal_reachable = if tracker.portal_probe_required(sample.as_ref()) {
+            match sample.as_ref() {
+                Some(identity) => portal.reachable(identity).await.unwrap_or(false),
+                None => false,
             }
-            _ => None,
-        };
-        if sample == candidate {
-            stable_samples = stable_samples.saturating_add(1);
         } else {
-            candidate = sample.clone();
-            stable_samples = 1;
-        }
-        if stable_samples >= 2 && sample != published {
-            match sample.clone() {
-                Some(identity) => control.apply_event(EngineEvent::NetworkReady(identity)),
-                None => control.apply_event(EngineEvent::NetworkUnavailable),
-            }
-            published = sample;
+            sample.is_some()
+        };
+        if let Some(event) = tracker.observe(sample, portal_reachable) {
+            control.apply_event(event);
         }
         tokio::select! {
             _ = shutdown.changed() => {},

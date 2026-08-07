@@ -242,6 +242,14 @@ impl Engine {
             if self.pending_retry_seconds.take().is_some() {
                 actions.push(EngineAction::CancelRetry);
             }
+            if let Some(generation) = self.active_generation {
+                if self.state != VpnState::Disconnecting {
+                    self.reconnect_immediately_after_stop = true;
+                    actions.push(self.publish(VpnState::Disconnecting));
+                    actions.push(EngineAction::StopConnection { generation });
+                }
+                return actions;
+            }
         }
         if self.active_generation.is_none()
             && (changed || self.pending_retry_seconds.is_none())

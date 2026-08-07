@@ -4,7 +4,7 @@ Section: net
 Priority: optional
 Architecture: amd64
 Maintainer: IRCVLab <noreply@github.com>
-Depends: openconnect (>= 8.20), vpnc-scripts, libgtk-4-1 (>= 4.6), libglib2.0-0, dbus-user-session
+Depends: vpnc-scripts, libgnutls30, libxml2 (>= 2.9), libgtk-4-1 (>= 4.6), libglib2.0-0, dbus-user-session
 Description: Reliable HYU VPN tray application
  HYU VPN stores credentials locally in encrypted form, reconnects after
  network changes and VPN session expiry, and provides a native Ubuntu tray UI.

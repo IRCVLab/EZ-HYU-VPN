@@ -27,7 +27,13 @@ class LinuxPackagingTests(unittest.TestCase):
 
     def test_package_declares_runtime_dependencies_and_graphical_entry(self):
         control = (ROOT / "packaging/linux/debian/control").read_text()
-        for dependency in ("openconnect", "vpnc-scripts", "libgtk-4-1", "dbus-user-session"):
+        for dependency in (
+            "vpnc-scripts",
+            "libgnutls30",
+            "libxml2",
+            "libgtk-4-1",
+            "dbus-user-session",
+        ):
             self.assertIn(dependency, control)
         desktop = (ROOT / "packaging/linux/hyu-vpn.desktop").read_text()
         self.assertIn("Exec=/usr/bin/hyu-vpn", desktop)
@@ -42,13 +48,46 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn('if [ "${1:-}" = purge ]', postrm)
         self.assertNotIn("/home/", postrm)
 
+    def test_vpnc_wrapper_integrates_systemd_resolved_without_logging_dns_or_secrets(self):
+        wrapper = (ROOT / "packaging/linux/hyu-vpnc-script").read_text()
+        self.assertIn("/usr/share/vpnc-scripts/vpnc-script", wrapper)
+        self.assertIn('"$RESOLVECTL" dns "$TUNDEV"', wrapper)
+        self.assertIn(
+            '"$RESOLVECTL" domain "$TUNDEV" \'~hanyang.ac.kr\' \'~hyu.ac.kr\'',
+            wrapper,
+        )
+        self.assertIn('"$RESOLVECTL" default-route "$TUNDEV" no', wrapper)
+        self.assertIn(
+            '/usr/bin/timeout 4 "$RESOLVECTL" query '
+            '--interface="$TUNDEV" secure.hanyang.ac.kr',
+            wrapper,
+        )
+        self.assertNotIn('"$RESOLVECTL" domain "$TUNDEV" \'~.\'', wrapper)
+        self.assertIn('suffix="${TUNDEV#tun}"', wrapper)
+        self.assertIn("''|*[!0-9]*) return 1", wrapper)
+        self.assertIn("nameserver 127.0.0.53", wrapper)
+        self.assertNotIn("set -x", wrapper)
+        self.assertNotIn("echo $INTERNAL_IP4_DNS", wrapper)
+
+    def test_openconnect_download_is_bounded_and_cached_atomically(self):
+        script = (ROOT / "scripts/build-openconnect-linux.sh").read_text()
+        self.assertIn("--connect-timeout 15", script)
+        self.assertIn("--max-time 180", script)
+        self.assertIn('mktemp "$ARCHIVE.partial.XXXXXX"', script)
+        self.assertIn('mv -- "$partial" "$ARCHIVE"', script)
+
     def test_packaging_sources_contain_no_credential_fields_or_values(self):
         combined = "\n".join(
             path.read_text(errors="replace")
             for path in (ROOT / "packaging/linux").rglob("*")
             if path.is_file()
         )
-        for forbidden in ("PASSWORD-CANARY", "SEED-CANARY", "credentials.enc", "credentials.key"):
+        for forbidden in (
+            "PASSWORD-CANARY",
+            "SEED-CANARY",
+            "credentials.enc",
+            "credentials.key",
+        ):
             self.assertNotIn(forbidden, combined)
 
     def test_built_deb_has_expected_root_owned_layout_when_requested(self):
@@ -57,11 +96,16 @@ class LinuxPackagingTests(unittest.TestCase):
             self.skipTest("set HYU_VPN_DEB for artifact inspection")
         deb = Path(raw)
         self.assertTrue(deb.is_file())
-        contents = subprocess.check_output(["dpkg-deb", "--contents", str(deb)], text=True)
+        contents = subprocess.check_output(
+            ["dpkg-deb", "--contents", str(deb)], text=True
+        )
         for path in (
             "./usr/bin/hyu-vpn",
             "./usr/lib/hyu-vpn/hyu-vpn-service",
             "./usr/lib/hyu-vpn/hyu-vpn-hip",
+            "./usr/lib/hyu-vpn/hyu-vpnc-script",
+            "./usr/lib/hyu-vpn/runtime/openconnect",
+            "./usr/lib/hyu-vpn/runtime/lib/libopenconnect.so.5",
             "./usr/lib/systemd/system/hyu-vpn.service",
             "./usr/share/applications/hyu-vpn.desktop",
         ):

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -73,10 +74,10 @@ impl OpenConnectLaunch {
 
     pub fn production() -> Result<Self, LaunchError> {
         let config = ConnectorConfig {
-            executable: "/usr/sbin/openconnect".into(),
+            executable: "/usr/lib/hyu-vpn/runtime/openconnect".into(),
             portal: "secure.hanyang.ac.kr".to_owned(),
             authgroup: "HYU-ExternalGW-General".to_owned(),
-            vpnc_script: "/usr/share/vpnc-scripts/vpnc-script".into(),
+            vpnc_script: "/usr/lib/hyu-vpn/hyu-vpnc-script".into(),
             hip_wrapper: "/usr/lib/hyu-vpn/hyu-vpn-hip".into(),
         };
         Ok(Self {
@@ -193,9 +194,11 @@ where
         });
     }
     let mut child = command.spawn().map_err(|_| LaunchError::ProcessFailed)?;
+    eprintln!("hyu-vpn-connect-stage: child-started");
     let pid = child.id().ok_or(LaunchError::ProcessFailed)?;
     let mut stdin = child.stdin.take().ok_or(LaunchError::ProcessFailed)?;
     write_line(&mut stdin, credentials.password().as_bytes()).await?;
+    eprintln!("hyu-vpn-connect-stage: initial-password-sent");
 
     let stdout = child.stdout.take().ok_or(LaunchError::ProcessFailed)?;
     let stderr = child.stderr.take().ok_or(LaunchError::ProcessFailed)?;
@@ -203,6 +206,8 @@ where
     tokio::spawn(pump_output(0, stdout, output_tx.clone()));
     tokio::spawn(pump_output(1, stderr, output_tx));
     let mut detectors = [PromptDetector::default(), PromptDetector::default()];
+    let mut progress_tail = Vec::new();
+    let mut progress_emitted = HashSet::new();
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|_| LaunchError::ProcessFailed)? {
@@ -224,13 +229,22 @@ where
             }
             output = output_rx.recv() => {
                 if let Some((source, chunk)) = output {
+                    emit_progress_stages(&chunk, &mut progress_tail, &mut progress_emitted);
                     if let Some(prompt) = detectors[source].feed(&chunk) {
                         match prompt {
-                            PromptKind::Username => write_line(&mut stdin, credentials.username().as_bytes()).await?,
-                            PromptKind::Password => write_line(&mut stdin, credentials.password().as_bytes()).await?,
+                            PromptKind::Username => {
+                                eprintln!("hyu-vpn-connect-stage: username-prompt");
+                                write_line(&mut stdin, credentials.username().as_bytes()).await?;
+                            }
+                            PromptKind::Password => {
+                                eprintln!("hyu-vpn-connect-stage: password-prompt");
+                                write_line(&mut stdin, credentials.password().as_bytes()).await?;
+                            }
                             PromptKind::Challenge => {
+                                eprintln!("hyu-vpn-connect-stage: challenge-prompt");
                                 let code = codes.next_code().await?;
                                 write_line(&mut stdin, code.as_bytes()).await?;
+                                eprintln!("hyu-vpn-connect-stage: challenge-sent");
                             }
                         }
                     }
@@ -250,10 +264,43 @@ where
             1
         }
     });
+    eprintln!("hyu-vpn-connect-stage: child-exited-{return_code}");
     Ok(InteractiveOutcome {
         return_code,
         runtime_seconds: started.elapsed().as_secs(),
     })
+}
+
+fn emit_progress_stages(chunk: &[u8], tail: &mut Vec<u8>, emitted: &mut HashSet<&'static str>) {
+    tail.extend_from_slice(chunk);
+    if tail.len() > 4096 {
+        tail.drain(..tail.len() - 4096);
+    }
+    let lower = String::from_utf8_lossy(tail).to_ascii_lowercase();
+    const STAGES: [(&str, &str); 14] = [
+        ("connected to https", "https-connected"),
+        ("enter login credentials", "portal-login-form"),
+        ("globalprotect login returned", "login-response-received"),
+        ("please select globalprotect gateway", "gateway-selection"),
+        ("authentication failure", "authentication-failure"),
+        (
+            "failed to complete authentication",
+            "authentication-incomplete",
+        ),
+        ("incorrect device id or password", "credential-rejected"),
+        ("unexpected 512", "server-auth-rejected"),
+        ("invalid authentication cookie", "invalid-auth-cookie"),
+        ("hip script", "hip-script-invoked"),
+        ("hip report submitted successfully", "hip-submitted"),
+        ("hip report submission failed", "hip-submission-failed"),
+        ("gateway disconnected immediately", "gateway-disconnected"),
+        ("fgets (stdin)", "stdin-read-failed"),
+    ];
+    for (needle, stage) in STAGES {
+        if lower.contains(needle) && emitted.insert(stage) {
+            eprintln!("hyu-vpn-connect-stage: {stage}");
+        }
+    }
 }
 
 async fn pump_output<R>(source: usize, mut reader: R, output: mpsc::Sender<(usize, Vec<u8>)>)
