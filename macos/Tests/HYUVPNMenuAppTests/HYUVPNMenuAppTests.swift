@@ -142,6 +142,25 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(config.timerLeeway >= 5)
         #expect(config.allowedReadPurpose == .sanitizedStatusOnly)
     }
+
+    @Test func secureControlClientDecodesStrictCLIJsonAndFallsBackForMalformedOutput() throws {
+        let metadata = UnitTestExecutableMetadata(ownerUID: 0, mode: 0o755, symlink: false, executable: true, parentModes: ["/Library": 0o755, "/Library/Application Support": 0o755, "/Library/Application Support/HYU VPN": 0o755, "/Library/Application Support/HYU VPN/bin": 0o755])
+        let runner = UnitTestProcessRunner(results: [
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE"}"#, stderr: "", stdoutOverflowed: false),
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"REPAIR_REQUIRED"}"#, stderr: "", stdoutOverflowed: false),
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"BROKEN"}"#, stderr: "", stdoutOverflowed: false),
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE","error_code":"REPAIR_REQUIRED"}"#, stderr: "", stdoutOverflowed: false),
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE"}"#, stderr: "", stdoutOverflowed: true),
+            .success(exitCode: 1, stdout: "not-json", stderr: "", stdoutOverflowed: false)
+        ])
+        let client = SecureVPNControlClient(metadata: metadata, runner: runner)
+        #expect(try client.run(.connect).errorCode == "CONTROL_UNAVAILABLE")
+        #expect(try client.run(.disconnect).errorCode == "REPAIR_REQUIRED")
+        #expect(try client.run(.reconnect).errorCode == "CONTROL_EXIT_1")
+        #expect(try client.run(.connect).errorCode == "CONTROL_EXIT_1")
+        #expect(try client.run(.disconnect).errorCode == "CONTROL_EXIT_1")
+        #expect(try client.run(.reconnect).errorCode == "CONTROL_EXIT_1")
+    }
 }
 
 
@@ -446,5 +465,29 @@ final class RecordingTOTPResetter: TOTPStateResetting {
     func resetTOTPState() throws {
         resetCount += 1
         if fail { throw ResetFailure.injected }
+    }
+}
+
+struct UnitTestExecutableMetadata: ExecutableMetadataProviding {
+    var ownerUID: uid_t
+    var mode: mode_t
+    var symlink: Bool
+    var executable: Bool
+    var parentModes: [String: mode_t]
+
+    func metadata(for path: String) throws -> FileMetadata {
+        FileMetadata(ownerUID: path == SecureVPNControlClient.defaultExecutablePath ? ownerUID : uid_t(0), mode: parentModes[path] ?? mode, isSymlink: symlink, isRegularFile: true, isExecutable: executable)
+    }
+}
+
+final class UnitTestProcessRunner: ControlProcessRunning {
+    var results: [ControlProcessOutcome]
+
+    init(results: [ControlProcessOutcome]) {
+        self.results = results
+    }
+
+    func run(_ request: ProcessLaunchRequest, timeout: TimeInterval, maxOutputBytes: Int) throws -> ControlProcessOutcome {
+        results.removeFirst()
     }
 }

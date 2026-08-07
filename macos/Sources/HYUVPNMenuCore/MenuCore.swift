@@ -94,106 +94,11 @@ public enum VPNStatusDecoder {
     }
 
     private static func rejectDuplicateTopLevelKeys(in data: Data) throws {
-        guard let raw = String(data: data, encoding: .utf8) else { throw StatusProtocolError.invalid("malformed status document") }
-        let keys = try topLevelObjectKeys(in: raw)
-        var seen = Set<String>()
-        for key in keys {
-            guard seen.insert(key).inserted else { throw StatusProtocolError.invalid("duplicate status field: \(key)") }
-        }
-    }
-
-    private static func topLevelObjectKeys(in raw: String) throws -> [String] {
-        let chars = Array(raw)
-        var index = skipWhitespace(chars, 0)
-        guard index < chars.count, chars[index] == "{" else { return [] }
-        var depth = 0
-        var keys: [String] = []
-        while index < chars.count {
-            let char = chars[index]
-            if char == "\"" {
-                guard let parsed = parseJSONString(chars, start: index) else { throw StatusProtocolError.invalid("malformed status document") }
-                let afterString = skipWhitespace(chars, parsed.next)
-                if depth == 1, afterString < chars.count, chars[afterString] == ":" { keys.append(parsed.value) }
-                index = parsed.next
-                continue
-            }
-            if char == "{" { depth += 1 }
-            if char == "}" { depth -= 1 }
-            index += 1
-        }
-        return keys
+        try StrictTopLevelJSON.rejectDuplicateTopLevelKeys(in: data, malformedMessage: "malformed status document", duplicateMessagePrefix: "duplicate status field: ")
     }
 
     private static func decodeSchemaVersion(from data: Data) throws -> Int {
-        guard let raw = String(data: data, encoding: .utf8), let token = schemaVersionToken(in: raw) else { throw StatusProtocolError.invalid("schema_version must be an integer") }
-        guard !token.contains("."), !token.contains("e"), !token.contains("E"), let value = Int(token) else { throw StatusProtocolError.invalid("schema_version must be an integer") }
-        return value
-    }
-
-    private static func schemaVersionToken(in raw: String) -> String? {
-        let chars = Array(raw)
-        var index = 0
-        while index < chars.count {
-            if chars[index] == "\"", let parsed = parseJSONString(chars, start: index) {
-                index = parsed.next
-                var cursor = skipWhitespace(chars, index)
-                guard cursor < chars.count, chars[cursor] == ":" else { continue }
-                cursor = skipWhitespace(chars, cursor + 1)
-                if parsed.value == "schema_version" { return readJSONNumberToken(chars, cursor) }
-            } else { index += 1 }
-        }
-        return nil
-    }
-
-    private static func parseJSONString(_ chars: [Character], start: Int) -> (value: String, next: Int)? {
-        var index = start + 1
-        var value = ""
-        while index < chars.count {
-            let char = chars[index]
-            if char == "\"" { return (value, index + 1) }
-            if char == "\\" {
-                index += 1
-                guard index < chars.count else { return nil }
-                let escaped = chars[index]
-                if escaped == "u" {
-                    guard index + 4 < chars.count else { return nil }
-                    let hex = String(chars[(index + 1)...(index + 4)])
-                    guard let scalarValue = UInt32(hex, radix: 16), let scalar = UnicodeScalar(scalarValue) else { return nil }
-                    value.append(Character(scalar)); index += 5; continue
-                }
-                switch escaped {
-                case "\"": value.append("\"")
-                case "\\": value.append("\\")
-                case "/": value.append("/")
-                case "b": value.append("\u{08}")
-                case "f": value.append("\u{0c}")
-                case "n": value.append("\n")
-                case "r": value.append("\r")
-                case "t": value.append("\t")
-                default: return nil
-                }
-            } else { value.append(char) }
-            index += 1
-        }
-        return nil
-    }
-
-    private static func skipWhitespace(_ chars: [Character], _ start: Int) -> Int {
-        var index = start
-        while index < chars.count, [" ", "\n", "\r", "\t"].contains(chars[index]) { index += 1 }
-        return index
-    }
-
-    private static func readJSONNumberToken(_ chars: [Character], _ start: Int) -> String? {
-        guard start < chars.count else { return nil }
-        var index = start
-        if chars[index] == "-" { index += 1 }
-        let numberStart = index
-        while index < chars.count, chars[index].isNumber { index += 1 }
-        guard index > numberStart else { return nil }
-        if index < chars.count, chars[index] == "." { index += 1; while index < chars.count, chars[index].isNumber { index += 1 } }
-        if index < chars.count, chars[index] == "e" || chars[index] == "E" { index += 1; if index < chars.count, chars[index] == "+" || chars[index] == "-" { index += 1 }; while index < chars.count, chars[index].isNumber { index += 1 } }
-        return String(chars[start..<index])
+        try StrictTopLevelJSON.decodeRequiredIntegerToken(in: data, key: "schema_version", invalidMessage: "schema_version must be an integer")
     }
 
     private static func exactInt(_ name: String, _ value: Any?) throws -> Int {
@@ -253,6 +158,128 @@ public struct VPNStatusFileReader {
             guard data.count <= maxBytes else { throw StatusProtocolError.invalid("oversized status document") }
         }
         return try VPNStatusDecoder.decode(data, maxBytes: maxBytes)
+    }
+}
+
+private enum StrictTopLevelJSON {
+    static func rejectDuplicateTopLevelKeys(in data: Data, malformedMessage: String, duplicateMessagePrefix: String) throws {
+        guard let raw = String(data: data, encoding: .utf8) else { throw StatusProtocolError.invalid(malformedMessage) }
+        let keys = try topLevelObjectKeys(in: raw, malformedMessage: malformedMessage)
+        var seen = Set<String>()
+        for key in keys {
+            guard seen.insert(key).inserted else { throw StatusProtocolError.invalid("\(duplicateMessagePrefix)\(key)") }
+        }
+    }
+
+    static func decodeRequiredIntegerToken(in data: Data, key: String, invalidMessage: String) throws -> Int {
+        guard let raw = String(data: data, encoding: .utf8), let token = schemaValueToken(in: raw, key: key) else {
+            throw StatusProtocolError.invalid(invalidMessage)
+        }
+        guard !token.contains("."), !token.contains("e"), !token.contains("E"), let value = Int(token) else {
+            throw StatusProtocolError.invalid(invalidMessage)
+        }
+        return value
+    }
+
+    static func topLevelObjectKeys(in raw: String, malformedMessage: String) throws -> [String] {
+        let chars = Array(raw)
+        var index = skipWhitespace(chars, 0)
+        guard index < chars.count, chars[index] == "{" else { return [] }
+        var depth = 0
+        var keys: [String] = []
+        while index < chars.count {
+            let char = chars[index]
+            if char == "\"" {
+                guard let parsed = parseJSONString(chars, start: index) else { throw StatusProtocolError.invalid(malformedMessage) }
+                let afterString = skipWhitespace(chars, parsed.next)
+                if depth == 1, afterString < chars.count, chars[afterString] == ":" { keys.append(parsed.value) }
+                index = parsed.next
+                continue
+            }
+            if char == "{" { depth += 1 }
+            if char == "}" { depth -= 1 }
+            index += 1
+        }
+        return keys
+    }
+
+    static func schemaValueToken(in raw: String, key: String) -> String? {
+        let chars = Array(raw)
+        var index = 0
+        while index < chars.count {
+            if chars[index] == "\"", let parsed = parseJSONString(chars, start: index) {
+                index = parsed.next
+                var cursor = skipWhitespace(chars, index)
+                guard cursor < chars.count, chars[cursor] == ":" else { continue }
+                cursor = skipWhitespace(chars, cursor + 1)
+                if parsed.value == key { return readJSONNumberToken(chars, cursor) }
+            } else {
+                index += 1
+            }
+        }
+        return nil
+    }
+
+    static func parseJSONString(_ chars: [Character], start: Int) -> (value: String, next: Int)? {
+        var index = start + 1
+        var value = ""
+        while index < chars.count {
+            let char = chars[index]
+            if char == "\"" { return (value, index + 1) }
+            if char == "\\" {
+                index += 1
+                guard index < chars.count else { return nil }
+                let escaped = chars[index]
+                if escaped == "u" {
+                    guard index + 4 < chars.count else { return nil }
+                    let hex = String(chars[(index + 1)...(index + 4)])
+                    guard let scalarValue = UInt32(hex, radix: 16), let scalar = UnicodeScalar(scalarValue) else { return nil }
+                    value.append(Character(scalar))
+                    index += 5
+                    continue
+                }
+                switch escaped {
+                case "\"": value.append("\"")
+                case "\\": value.append("\\")
+                case "/": value.append("/")
+                case "b": value.append("\u{08}")
+                case "f": value.append("\u{0c}")
+                case "n": value.append("\n")
+                case "r": value.append("\r")
+                case "t": value.append("\t")
+                default: return nil
+                }
+            } else {
+                value.append(char)
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    static func skipWhitespace(_ chars: [Character], _ start: Int) -> Int {
+        var index = start
+        while index < chars.count, [" ", "\n", "\r", "\t"].contains(chars[index]) { index += 1 }
+        return index
+    }
+
+    static func readJSONNumberToken(_ chars: [Character], _ start: Int) -> String? {
+        guard start < chars.count else { return nil }
+        var index = start
+        if chars[index] == "-" { index += 1 }
+        let numberStart = index
+        while index < chars.count, chars[index].isNumber { index += 1 }
+        guard index > numberStart else { return nil }
+        if index < chars.count, chars[index] == "." {
+            index += 1
+            while index < chars.count, chars[index].isNumber { index += 1 }
+        }
+        if index < chars.count, chars[index] == "e" || chars[index] == "E" {
+            index += 1
+            if index < chars.count, chars[index] == "+" || chars[index] == "-" { index += 1 }
+            while index < chars.count, chars[index].isNumber { index += 1 }
+        }
+        return String(chars[start..<index])
     }
 }
 
@@ -505,7 +532,7 @@ public enum MenuModel {
 }
 
 public enum ControlProcessOutcome: Equatable, Sendable {
-    case success(exitCode: Int32, stdout: String, stderr: String)
+    case success(exitCode: Int32, stdout: String, stderr: String, stdoutOverflowed: Bool)
     case failure(ControlFailure)
 }
 public enum ControlFailure: Equatable, Sendable { case timeout, launchFailed, insecureExecutable }
@@ -557,7 +584,13 @@ public struct SecureVPNControlClient: @unchecked Sendable {
         try validateExecutable()
         let outcome = try runner.run(request(for: command), timeout: timeout, maxOutputBytes: maxOutputBytes)
         switch outcome {
-        case .success(let exitCode, _, _): return exitCode == 0 ? ControlResult(status: .ok, errorCode: nil) : ControlResult(status: .failed, errorCode: "CONTROL_EXIT_\(exitCode)")
+        case .success(let exitCode, let stdout, _, let stdoutOverflowed):
+            if exitCode == 0 { return ControlResult(status: .ok, errorCode: nil) }
+            guard !stdoutOverflowed else { return ControlResult(status: .failed, errorCode: "CONTROL_EXIT_\(exitCode)") }
+            if let normalized = ControlCommandOutput.normalizeFailure(exitCode: exitCode, stdout: stdout) {
+                return ControlResult(status: .failed, errorCode: normalized)
+            }
+            return ControlResult(status: .failed, errorCode: "CONTROL_EXIT_\(exitCode)")
         case .failure(.timeout): return ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT")
         case .failure(.launchFailed): return ControlResult(status: .failed, errorCode: "CONTROL_LAUNCH_FAILED")
         case .failure(.insecureExecutable): throw StatusProtocolError.invalid("insecure control executable")
@@ -626,8 +659,12 @@ public final class SystemControlProcessRunner: ControlProcessRunning, @unchecked
         let outRead = stdoutPipe[0]; stdoutPipe[0] = -1
         let errRead = stderrPipe[0]; stderrPipe[0] = -1
         let outputGroup = DispatchGroup()
+        let collectedStdout = CollectedPipeOutput()
         let drainPipeFactory = pipeFactory
-        outputGroup.enter(); DispatchQueue.global(qos: .utility).async { discardDrain(outRead, closer: drainPipeFactory); outputGroup.leave() }
+        outputGroup.enter(); DispatchQueue.global(qos: .utility).async {
+            collectedStdout.store(collectDrain(outRead, closer: drainPipeFactory, maxBytes: maxOutputBytes))
+            outputGroup.leave()
+        }
         outputGroup.enter(); DispatchQueue.global(qos: .utility).async { discardDrain(errRead, closer: drainPipeFactory); outputGroup.leave() }
 
         let deadline = Date().addingTimeInterval(timeout)
@@ -635,7 +672,7 @@ public final class SystemControlProcessRunner: ControlProcessRunning, @unchecked
         while Date() < deadline {
             let waited = waiter.wait(pid: pid, status: &status, options: WNOHANG)
             if waited == pid {
-                if outputGroup.wait(timeout: .now() + 0.25) == .success, !processGroupExists(pid) { return .success(exitCode: exitCode(from: status), stdout: "", stderr: "") }
+                if outputGroup.wait(timeout: .now() + 0.25) == .success, !processGroupExists(pid) { return .success(exitCode: exitCode(from: status), stdout: collectedStdout.stringValue, stderr: "", stdoutOverflowed: collectedStdout.overflowed) }
                 cleanupProcessGroup(pid, outputGroup: outputGroup)
                 return .failure(.timeout)
             }
@@ -689,11 +726,103 @@ private func discardDrain(_ fd: Int32, closer: PipeCreating) {
     }
 }
 
+private func collectDrain(_ fd: Int32, closer: PipeCreating, maxBytes: Int) -> (data: Data, overflowed: Bool) {
+    var collected = Data()
+    let bound = max(0, maxBytes)
+    var overflowed = false
+    var buffer = [UInt8](repeating: 0, count: 8192)
+    while true {
+        let count = read(fd, &buffer, buffer.count)
+        if count <= 0 {
+            closer.close(fd)
+            return (collected, overflowed)
+        }
+        let remaining = max(0, bound - collected.count)
+        if remaining > 0 {
+            collected.append(buffer, count: min(remaining, count))
+        }
+        if count > remaining {
+            overflowed = true
+        }
+    }
+}
+
+private final class CollectedPipeOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    private var didOverflow = false
+
+    var stringValue: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    var overflowed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didOverflow
+    }
+
+    func store(_ value: (data: Data, overflowed: Bool)) {
+        lock.lock()
+        data = value.data
+        didOverflow = value.overflowed
+        lock.unlock()
+    }
+}
+
 private func exitCode(from status: Int32) -> Int32 {
     let signal = status & 0x7f
     if signal == 0 { return (status >> 8) & 0xff }
     if signal != 0x7f { return 128 + signal }
     return status
+}
+
+private enum ControlCommandOutput {
+    private static let allowedKeys: Set<String> = ["schema_version", "ok", "error_code"]
+    private static let allowedFailureCodes: Set<String> = ["BAD_REQUEST", "INTERNAL_ERROR", "REPAIR_REQUIRED", "CONTROL_UNAVAILABLE"]
+
+    static func normalizeFailure(exitCode: Int32, stdout: String) -> String? {
+        guard exitCode != 0 else { return nil }
+        guard let decoded = try? decode(stdout), decoded.ok == false else { return nil }
+        return decoded.errorCode
+    }
+
+    private static func decode(_ raw: String) throws -> (ok: Bool, errorCode: String?) {
+        let data = Data(raw.utf8)
+        try StrictTopLevelJSON.rejectDuplicateTopLevelKeys(in: data, malformedMessage: "malformed control output", duplicateMessagePrefix: "duplicate control output field: ")
+        let typedSchema = try StrictTopLevelJSON.decodeRequiredIntegerToken(in: data, key: "schema_version", invalidMessage: "control output schema_version must be an integer")
+        let object = try JSONSerialization.jsonObject(with: data, options: [])
+        guard let document = object as? [String: Any] else { throw StatusProtocolError.invalid("control output must be an object") }
+        let keys = Set(document.keys)
+        for key in keys.subtracting(allowedKeys).sorted() {
+            throw StatusProtocolError.invalid("unknown control output field: \(key)")
+        }
+        for key in allowedKeys.subtracting(keys).sorted() {
+            throw StatusProtocolError.invalid("missing control output field: \(key)")
+        }
+        guard typedSchema == 1 else { throw StatusProtocolError.invalid("unsupported control output schema_version") }
+        guard let okValue = document["ok"] as? NSNumber, CFGetTypeID(okValue) == CFBooleanGetTypeID() else {
+            throw StatusProtocolError.invalid("control output ok must be a bool")
+        }
+        let ok = okValue.boolValue
+        let errorCode = try optionalString("error_code", document["error_code"])
+        if ok {
+            guard errorCode == nil else { throw StatusProtocolError.invalid("successful control output must not include an error_code") }
+        } else {
+            guard let errorCode, allowedFailureCodes.contains(errorCode) else {
+                throw StatusProtocolError.invalid("control output error_code is not allowlisted")
+            }
+        }
+        return (ok, errorCode)
+    }
+
+    private static func optionalString(_ name: String, _ value: Any?) throws -> String? {
+        if value == nil || value is NSNull { return nil }
+        guard let string = value as? String else { throw StatusProtocolError.invalid("\(name) must be a string") }
+        return string
+    }
 }
 
 

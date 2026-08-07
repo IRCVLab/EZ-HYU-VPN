@@ -17,8 +17,12 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
                 ("dynamic-menu-actions-and-checks", dynamicMenuActionsAndChecks),
                 ("primary-action-disabled-transient-states", primaryActionDisabledTransientStates),
                 ("live-menu-omits-unimplemented-actions", liveMenuOmitsUnimplementedActions),
-                ("watcher-initial-event-and-tick", watcherInitialEventAndTick),
                 ("control-security-timeout-and-normalized-errors", controlSecurityTimeoutAndErrors),
+                ("bootstrap-splits-appkit-and-argument-gate", bootstrapSplitsAppKitAndArgumentGate),
+                ("control-tower-menu-copy-and-icon-contract", controlTowerMenuCopyAndIconContract),
+                ("startup-connect-and-disconnect-pause-contract", startupConnectAndDisconnectPauseContract),
+                ("safe-quit-and-diagnostics-contract", safeQuitAndDiagnosticsContract),
+                ("watcher-initial-event-and-tick", watcherInitialEventAndTick),
                 ("bundle-assembler-produces-lsuielement-app", bundleAssembler),
                 ("canonical-production-status-path", canonicalProductionStatusPath),
                 ("schema-float-integers-rejected", schemaFloatIntegersRejected),
@@ -163,6 +167,57 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try expect(!source.contains("toggleLaunchAtLogin()"), "live menu has no in-memory launch toggle")
     }
 
+    static func bootstrapSplitsAppKitAndArgumentGate() throws {
+        let root = packageRoot().deletingLastPathComponent()
+        let mainSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/main.swift"))
+        let appDelegateSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        try expect(!mainSource.contains("final class AppDelegate"), "main split from AppDelegate implementation")
+        try expect(mainSource.contains("ProcessInfo.processInfo.arguments"), "bootstrap reads argv before launch")
+        try expect(mainSource.contains("--register-login-item"), "register-login-item mode recognized")
+        try expect(mainSource.contains("--unregister-login-item"), "unregister-login-item mode recognized")
+        try expect(mainSource.contains("EX_USAGE"), "invalid argv exits EX_USAGE")
+        try expect(mainSource.contains("LOGIN_ITEM_UNAVAILABLE"), "login item mode returns stable unavailable code")
+        try expect(mainSource.contains("let application = NSApplication.shared"), "AppKit bootstrap remains in main")
+        try expect(appDelegateSource.contains("final class AppDelegate"), "AppDelegate moved to dedicated file")
+    }
+
+    static func controlTowerMenuCopyAndIconContract() throws {
+        let root = packageRoot().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        try expect(!source.contains("import UserNotifications"), "control tower removes UserNotifications")
+        for forbidden in ["countdown", "duration", "expiresAt", "sessionExpiresAt"] {
+            try expect(!source.contains(forbidden), "no legacy expiry UI token \(forbidden)")
+        }
+        for required in ["HYU VPN: Status Unavailable", "Diagnostics…", "Quit HYU VPN", "button.title = \"\"", "button.toolTip = textualState", "accessibilityDescription: textualState", "button.setAccessibilityLabel(textualState)", "button.setAccessibilityHelp(textualState)", "\"Connecting…\"", "\"Disconnecting…\"", "\"Waiting for Network\""] {
+            try expect(source.contains(required), "menu/icon contract contains \(required)")
+        }
+        try expect(source.contains("menu.addItem(NSMenuItem.separator())"), "menu keeps approved separators")
+        try expect(source.contains("addPrimaryAction"), "single dynamic primary action helper")
+        try expect(source.contains("Disconnect"), "disconnect row present")
+    }
+
+    static func startupConnectAndDisconnectPauseContract() throws {
+        let root = packageRoot().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        for required in ["StartupConnectPolicy", "OperationGate", "startupRetryWorkItem?.cancel()", "startupConnectPaused = true", "startupConnectPaused = false", "pendingDisconnectRequest = true", "pendingDisconnectRequest = false", "DispatchQueue.global(qos: .utility).async", "DispatchQueue.main.async", "scheduleStartupRetry", "runControl(command: .connect", "runControl(command: .disconnect"] {
+            try expect(source.contains(required), "startup/control contract contains \(required)")
+        }
+        try expect(source.contains("guard !startupConnectPaused"), "startup retries stop after explicit disconnect")
+        try expect(source.contains("guard operationGate.begin(operation)"), "overlapping operations suppressed by gate")
+        try expect(source.contains("startPendingDisconnectIfNeeded"), "explicit disconnect handoff exists after startup connect")
+    }
+
+    static func safeQuitAndDiagnosticsContract() throws {
+        let root = packageRoot().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        for required in ["applicationShouldTerminate", ".terminateLater", "timeout: 15", "NSApp.reply(toApplicationShouldTerminate: true)", "NSApp.reply(toApplicationShouldTerminate: false)", "NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: nil, from: self)", "State:", "Tunnel Interface:", "Backend Error:", "Last Control Result:", "Build Version:"] {
+            try expect(source.contains(required), "safe quit/diagnostics contract contains \(required)")
+        }
+        for forbidden in ["NSApp.terminate(nil)", "password", "otp", "cookie", "authcookie", "seed", "username", "gateway", "MAC"] {
+            try expect(!source.contains(forbidden), "safe quit/diagnostics omits forbidden token \(forbidden)")
+        }
+    }
+
     static func watcherInitialEventAndTick() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-watch-\(UUID().uuidString)")
         let statusURL = root.appendingPathComponent("status.json")
@@ -180,14 +235,30 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
 
     static func controlSecurityTimeoutAndErrors() throws {
         let metadata = FakeExecutableMetadata(ownerUID: 0, mode: 0o755, symlink: false, executable: true, parentModes: ["/Library": 0o755, "/Library/Application Support": 0o755, "/Library/Application Support/HYU VPN": 0o755, "/Library/Application Support/HYU VPN/bin": 0o755])
-        let runner = FakeProcessRunner(results: [.success(exitCode: 0, stdout: "ok\n", stderr: ""), .failure(.timeout), .success(exitCode: 7, stdout: "password=CANARY", stderr: "raw error")])
+        let runner = FakeProcessRunner(results: [
+            .success(exitCode: 0, stdout: #"{"schema_version":1,"ok":true,"error_code":null}"#, stderr: "", stdoutOverflowed: false),
+            .failure(.timeout),
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE"}"#, stderr: "raw error", stdoutOverflowed: false),
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"REPAIR_REQUIRED"}"#, stderr: "", stdoutOverflowed: false),
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"BROKEN"}"#, stderr: "", stdoutOverflowed: false),
+            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE"}"#, stderr: "", stdoutOverflowed: true),
+            .success(exitCode: 7, stdout: "not-json", stderr: "", stdoutOverflowed: false)
+        ])
         let client = SecureVPNControlClient(metadata: metadata, runner: runner)
         let okResult = try client.run(.connect)
         try expect(okResult.status == .ok, "ok")
         let timeoutResult = try client.run(.disconnect)
         try expect(timeoutResult.status == .timeout, "timeout normalized")
-        let exitResult = try client.run(.reconnect)
-        try expect(exitResult.errorCode == "CONTROL_EXIT_7", "exit normalized")
+        let unavailableResult = try client.run(.reconnect)
+        try expect(unavailableResult.errorCode == "CONTROL_UNAVAILABLE", "control unavailable normalized")
+        let repairRequiredResult = try client.run(.connect)
+        try expect(repairRequiredResult.errorCode == "REPAIR_REQUIRED", "repair required normalized")
+        let unknownJSONResult = try client.run(.disconnect)
+        try expect(unknownJSONResult.errorCode == "CONTROL_EXIT_1", "unknown json code falls back to exit")
+        let overflowedJSONResult = try client.run(.reconnect)
+        try expect(overflowedJSONResult.errorCode == "CONTROL_EXIT_1", "overflowed json falls back to exit")
+        let malformedResult = try client.run(.reconnect)
+        try expect(malformedResult.errorCode == "CONTROL_EXIT_7", "malformed output falls back to exit")
         try expect(runner.requests.allSatisfy { !$0.usesShell && $0.executablePath == SecureVPNControlClient.defaultExecutablePath }, "fixed no shell")
         var bad = metadata; bad.symlink = true
         try expectThrows("symlink executable") { _ = try SecureVPNControlClient(metadata: bad, runner: runner).run(.connect) }
@@ -229,12 +300,13 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         let runner = SystemControlProcessRunner()
         let py = "/usr/bin/python3"
         if !FileManager.default.isExecutableFile(atPath: py) { return }
-        let big = "import sys; sys.stdout.write('password=CANARY\\n' + 'A'*200000); sys.stderr.write('cookie=CANARY\\n' + 'B'*200000)"
+        let big = "import sys; sys.stdout.write('A'*200000); sys.stderr.write('cookie=CANARY\\n' + 'B'*200000)"
         let large = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", big], usesShell: false), timeout: 5, maxOutputBytes: 256)
-        guard case .success(let exitCode, let stdout, let stderr) = large else { throw HarnessFailure(description: "large output timed out") }
+        guard case .success(let exitCode, let stdout, let stderr, let stdoutOverflowed) = large else { throw HarnessFailure(description: "large output timed out") }
         try expect(exitCode == 0, "large output child exits")
-        try expect(stdout.utf8.count <= 256 && stderr.utf8.count <= 256, "bounded output")
-        try expect(!stdout.lowercased().contains("password") && !stderr.lowercased().contains("cookie"), "secret output sanitized")
+        try expect(stdout.utf8.count <= 256, "bounded stdout")
+        try expect(stdoutOverflowed, "stdout overflow tracked")
+        try expect(stderr.isEmpty, "stderr discarded")
         let sleepy = try runner.run(ProcessLaunchRequest(executablePath: "/bin/sleep", arguments: ["5"], usesShell: false), timeout: 0.2, maxOutputBytes: 128)
         try expect(sleepy == .failure(.timeout), "timeout killed/reaped")
     }
@@ -283,9 +355,11 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
         try expect(result == .failure(.timeout), "process group timeout")
         let childPID = Int32((try? String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)).flatMap(Int.init) ?? -1)
         if childPID > 0 { Thread.sleep(forTimeInterval: 0.3); try expect(kill(childPID, 0) == -1 && errno == ESRCH, "descendant killed/reaped") }
-        let output = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", "import sys; sys.stdout.write('password=CANARY'); sys.stderr.write('cookie=CANARY')"], usesShell: false), timeout: 5, maxOutputBytes: 256)
-        guard case .success(_, let stdout, let stderr) = output else { throw HarnessFailure(description: "output child failed") }
-        try expect(stdout.isEmpty && stderr.isEmpty, "stdout stderr discarded")
+        let output = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", "import sys; sys.stdout.write('{\\\"schema_version\\\":1,\\\"ok\\\":false,\\\"error_code\\\":\\\"CONTROL_UNAVAILABLE\\\"}'); sys.stderr.write('cookie=CANARY')"], usesShell: false), timeout: 5, maxOutputBytes: 256)
+        guard case .success(_, let stdout, let stderr, let stdoutOverflowed) = output else { throw HarnessFailure(description: "output child failed") }
+        try expect(stdout.contains("CONTROL_UNAVAILABLE"), "stdout retained for strict JSON decoding")
+        try expect(!stdoutOverflowed, "small json does not overflow")
+        try expect(stderr.isEmpty, "stderr discarded")
     }
 
     static func duplicateJSONKeysRejectedBeforeCollapse() throws {
@@ -392,7 +466,7 @@ except OSError:
 """
         let runner = SystemControlProcessRunner()
         let result = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", script, "\(fd)", marker.path], usesShell: false), timeout: 3, maxOutputBytes: 128)
-        guard case .success(let code, _, _) = result, code == 0 else { throw HarnessFailure(description: "fd sentinel child failed") }
+        guard case .success(let code, _, _, _) = result, code == 0 else { throw HarnessFailure(description: "fd sentinel child failed") }
         try expect(!FileManager.default.fileExists(atPath: marker.path), "unrelated parent fd was not inherited")
     }
 

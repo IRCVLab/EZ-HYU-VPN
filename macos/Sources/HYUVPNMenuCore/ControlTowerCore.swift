@@ -63,6 +63,9 @@ public struct OperationGate: Equatable, Sendable {
         self.active = active
     }
 
+    public var activeOperation: ControlTowerOperation? { active }
+    public var isBusy: Bool { active != nil }
+
     public mutating func begin(_ operation: ControlTowerOperation) -> Bool {
         guard active == nil else { return false }
         active = operation
