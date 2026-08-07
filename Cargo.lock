@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "hyu-vpn-core"
+version = "0.2.0"
+dependencies = [
+ "hyu-vpn-protocol",
+]
+
+[[package]]
 name = "hyu-vpn-protocol"
 version = "0.2.0"
 dependencies = [
