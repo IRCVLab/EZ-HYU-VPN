@@ -348,6 +348,8 @@ class DocumentationTests(unittest.TestCase):
         for phrase in required:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
+        self.assertIn("메뉴바", text)
+        self.assertNotIn("메뉴 막대", text)
 
     def test_reverse_engineering_doc_is_sanitized_and_covers_evidence_and_limits(self):
         text = (ROOT / "docs" / "reverse-engineering.md").read_text(encoding="utf-8")
