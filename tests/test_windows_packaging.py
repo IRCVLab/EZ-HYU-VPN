@@ -137,6 +137,19 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("build-openconnect-windows.sh", workflow)
         self.assertIn("download-artifact", workflow)
 
+    def test_patched_openconnect_output_rejects_libtool_launcher(self):
+        build = OPENCONNECT_BUILD.read_text(encoding="utf-8")
+        self.assertIn(
+            'install -m 0755 .libs/openconnect.exe "$OUTPUT_DIR/openconnect.exe"',
+            build,
+        )
+        self.assertNotIn(
+            'install -m 0755 openconnect.exe "$OUTPUT_DIR/openconnect.exe"',
+            build,
+        )
+        self.assertIn('x86_64-w64-mingw32-objdump -p "$OUTPUT_DIR/openconnect.exe"', build)
+        self.assertIn('libopenconnect-5.dll', build)
+
     def test_openconnect_hip_patch_has_wine_end_to_end_test(self):
         test = OPENCONNECT_HIP_TEST.read_text(encoding="utf-8")
         build = OPENCONNECT_BUILD.read_text(encoding="utf-8")

@@ -46,8 +46,12 @@ HELP_OUTPUT=$(WINEDEBUG=-all wine64 ./openconnect.exe --help 2>&1 || true)
 grep -F -- '--csd-wrapper=SCRIPT' <<<"$HELP_OUTPUT"
 "$ROOT/scripts/test-openconnect-windows-hip.sh" "$SOURCE_DIR"
 
-install -m 0755 openconnect.exe "$OUTPUT_DIR/openconnect.exe"
+# The top-level openconnect.exe is a libtool launcher that depends on the
+# build-tree .libs directory. Package the real PE executable instead.
+install -m 0755 .libs/openconnect.exe "$OUTPUT_DIR/openconnect.exe"
 install -m 0755 .libs/libopenconnect-5.dll "$OUTPUT_DIR/libopenconnect-5.dll"
+OPENCONNECT_IMPORTS=$(x86_64-w64-mingw32-objdump -p "$OUTPUT_DIR/openconnect.exe")
+grep -F -- 'DLL Name: libopenconnect-5.dll' <<<"$OPENCONNECT_IMPORTS"
 (
     cd "$OUTPUT_DIR"
     sha256sum openconnect.exe libopenconnect-5.dll > SHA256SUMS
