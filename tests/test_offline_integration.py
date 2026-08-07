@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import plistlib
@@ -24,7 +25,6 @@ from hyu_vpn.supervisor import Supervisor, SupervisorConfig
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OATHTOOL = ROOT / "tests" / "helpers" / "fake_oathtool.py"
 NATIVE_FIXTURE = ROOT / "tests" / "fixtures" / "native_hip_sanitized.xml"
-GP_HIP_REPORT = ROOT / "bin" / "gp-hip-report"
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -280,7 +280,7 @@ class OfflineAdversarialTests(unittest.TestCase):
             sleeps = []
             preference_path = Path(td) / "auto-reconnect.json"
             AutoReconnectPreference(preference_path).write(True)
-            config = SupervisorConfig(connect_path=str(crash), lock_path=str(Path(td) / "lock"), status_path=str(Path(td) / "status.json"), preference_path=str(preference_path), control_socket_path=str(Path(td) / "control.sock"), max_iterations=3)
+            config = SupervisorConfig(connect_path=str(crash), helper_path=str(Path(td) / "helper"), lock_path=str(Path(td) / "lock"), status_path=str(Path(td) / "status.json"), preference_path=str(preference_path), control_socket_path=str(Path(td) / "control.sock"), max_iterations=3)
             rc = Supervisor(config, conflict_detector=type("Detector", (), {"conflict_active": lambda self: False})(), sleep=sleeps.append).run()
             self.assertEqual(rc, 9)
             self.assertEqual(sleeps, [10, 20])
@@ -295,7 +295,7 @@ class OfflineAdversarialTests(unittest.TestCase):
                 from hyu_vpn.supervisor import Supervisor, SupervisorConfig
                 class Detector:
                     def conflict_active(self): return False
-                raise SystemExit(Supervisor(SupervisorConfig(connect_path=sys.argv[2], lock_path=sys.argv[3], status_path=sys.argv[3] + ".status", preference_path=sys.argv[3] + ".auto", control_socket_path=sys.argv[3] + ".sock", max_iterations=1), conflict_detector=Detector()).run())
+                raise SystemExit(Supervisor(SupervisorConfig(connect_path=sys.argv[2], helper_path=sys.argv[3] + ".helper", lock_path=sys.argv[3], status_path=sys.argv[3] + ".status", preference_path=sys.argv[3] + ".auto", control_socket_path=sys.argv[3] + ".sock", max_iterations=1), conflict_detector=Detector()).run())
             ''')
             AutoReconnectPreference(str(lock) + ".auto").write(True)
             first = subprocess.Popen([sys.executable, str(runner), str(ROOT / "src"), str(sleeper), str(lock)])
@@ -316,19 +316,31 @@ class OfflineAdversarialTests(unittest.TestCase):
             cache = home / ".cache" / "hyu-openconnect" / "softwareupdate-cache.json"
             cache.parent.mkdir(parents=True)
             cache.write_text(json.dumps({"created_at": datetime.now(timezone.utc).isoformat(), "patches": []}), encoding="utf-8")
-            env = os.environ.copy()
-            env.update({"HOME": str(home), "APP_VERSION": "OpenConnect TEST"})
-            completed = subprocess.run([
-                str(GP_HIP_REPORT),
-                "--cookie", "user=SYNTH-USER&domain=SYNTH-DOMAIN&computer=SYNTH-HOST",
-                "--md5", "0123456789abcdef0123456789abcdef",
-                "--client-ip", "192.0.2.44",
-                "--client-ipv6", "2001:db8::44",
-                "--client-os", "mac",
-            ], env=env, capture_output=True, check=False, timeout=20)
-            self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
-            self.assertEqual(completed.stderr, b"")
-            generated = ET.fromstring(completed.stdout)
+            stdout = type("Stdout", (), {"buffer": io.BytesIO()})()
+            stderr = io.StringIO()
+            posture = MacPosture(host_info=HostInfo(
+                host_name="SYNTH-HOST",
+                host_id="00:00:00:00:00:00",
+                interfaces=(NetworkInterface(name="en0", description="Wi-Fi", mac_address="00:00:00:00:00:00"),),
+            ))
+            collector = type("Collector", (), {"collect": lambda self: posture})()
+            rc = hip_main(
+                [
+                    "--cookie", "user=SYNTH-USER&domain=SYNTH-DOMAIN&computer=SYNTH-HOST",
+                    "--md5", "0123456789abcdef0123456789abcdef",
+                    "--client-ip", "192.0.2.44",
+                    "--client-ipv6", "2001:db8::44",
+                    "--client-os", "mac",
+                ],
+                environ={"HOME": str(home), "APP_VERSION": "OpenConnect TEST"},
+                _collector_factory=lambda: collector,
+                _stdout=stdout,
+                _stderr=stderr,
+                _now=lambda: datetime(2026, 8, 4, tzinfo=timezone.utc),
+            )
+            self.assertEqual(rc, 0, stderr.getvalue())
+            self.assertEqual(stderr.getvalue(), "")
+            generated = ET.fromstring(stdout.buffer.getvalue())
             native = ET.parse(NATIVE_FIXTURE).getroot()
             generated_paths = _path_signature(generated)
             native_paths = _path_signature(native)

@@ -1,6 +1,5 @@
 import io
-import os
-import subprocess
+import runpy
 import sys
 import unittest
 import xml.etree.ElementTree as ET
@@ -98,24 +97,12 @@ class HipCliTests(unittest.TestCase):
         self.assertEqual(root.findtext("ip-address"), "192.0.2.55")
         collector.collect.assert_called_once_with()
 
-    def test_entrypoint_resolves_repo_src_and_emits_xml_only_stdout(self):
-        completed = subprocess.run(
-            [str(BIN), *ARGV],
-            cwd="/",
-            env={"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8", "APP_VERSION": "OpenConnect TEST"},
-            capture_output=True,
-            check=False,
-        )
+    def test_entrypoint_delegates_to_hip_main_without_collecting_live_posture(self):
+        with mock.patch("hyu_vpn.hip_cli.main", return_value=0) as main_mock, mock.patch.object(sys, "argv", [str(BIN), *ARGV]):
+            with self.assertRaisesRegex(SystemExit, "0"):
+                runpy.run_path(str(BIN), run_name="__main__")
 
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
-        self.assertTrue(completed.stdout.startswith(b"<?xml"))
-        self.assertEqual(completed.stdout.count(b"<?xml"), 1)
-        self.assertEqual(completed.stdout.strip(), completed.stdout)
-        ET.fromstring(completed.stdout)
-        stderr = completed.stderr.decode("utf-8", "replace")
-        self.assertNotIn("user=CLI-USER", stderr)
-        self.assertNotIn("CLI-USER", stderr)
-        self.assertNotIn("CLI-HOST", stderr)
+        main_mock.assert_called_once_with()
 
     def test_missing_arguments_return_nonzero_with_safe_option_names_only(self):
         from hyu_vpn import hip_cli

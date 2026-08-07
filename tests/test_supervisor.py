@@ -246,7 +246,7 @@ class SupervisorTestIsolationContractTests(unittest.TestCase):
         config_lines = [line for line in source.splitlines() if "SupervisorConfig(" in line]
         self.assertGreaterEqual(len(config_lines), 2)
         for line in config_lines:
-            for key in ("lock_path", "status_path", "preference_path", "control_socket_path"):
+            for key in ("connect_path", "helper_path", "lock_path", "status_path", "preference_path", "control_socket_path"):
                 self.assertIn(f"{key}=", line)
 
 
@@ -903,7 +903,7 @@ class SupervisorLoopTests(unittest.TestCase):
                 "from hyu_vpn.supervisor import Supervisor, SupervisorConfig; "
                 "detector=type('Detector', (), {'conflict_active': lambda self: True})(); "
                 f"pref={str(Path(td) / 'auto.json')!r}; AutoReconnectPreference(pref).write(True); "
-                f"raise SystemExit(Supervisor(SupervisorConfig(lock_path={str(Path(td) / 'lock')!r}, status_path={str(Path(td) / 'status.json')!r}, preference_path=pref, control_socket_path={str(Path(td) / 'control.sock')!r}, conflict_poll_interval=120), conflict_detector=detector).run())"
+                f"raise SystemExit(Supervisor(SupervisorConfig(connect_path={str(Path(td) / 'connect')!r}, helper_path={str(Path(td) / 'helper')!r}, lock_path={str(Path(td) / 'lock')!r}, status_path={str(Path(td) / 'status.json')!r}, preference_path=pref, control_socket_path={str(Path(td) / 'control.sock')!r}, conflict_poll_interval=120), conflict_detector=detector).run())"
             )
             proc = subprocess.Popen([sys.executable, "-c", script])
             try:

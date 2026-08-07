@@ -55,42 +55,6 @@ class BuildPreflightTests(unittest.TestCase):
             }
         return metadata
 
-    def openconnect_process_snapshot(self):
-        result = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,comm=,args="],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        processes = []
-        for line in result.stdout.splitlines():
-            parts = line.strip().split(None, 2)
-            if len(parts) < 2:
-                continue
-            pid, comm = parts[0], parts[1]
-            args = parts[2] if len(parts) == 3 else ""
-            if Path(comm).name == "openconnect" or "bin/openconnect" in args:
-                processes.append((pid, comm, args))
-        return tuple(sorted(processes))
-
-    def protected_route_tuple(self):
-        result = subprocess.run(
-            ["/sbin/route", "-n", "get", "166.104.100.100"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if result.returncode != 0:
-            return ("absent",)
-        interesting = []
-        for line in result.stdout.splitlines():
-            stripped = line.strip()
-            if stripped.startswith(("route to:", "destination:", "gateway:", "interface:")):
-                interesting.append(stripped)
-        return tuple(interesting)
-
     def run_preflight(self):
         result = subprocess.run(
             [str(PREFLIGHT)],
@@ -155,8 +119,6 @@ class BuildPreflightTests(unittest.TestCase):
             ]
             before = {
                 "sandbox": self.snapshot_sandbox_tree(sandbox),
-                "openconnect": self.openconnect_process_snapshot(),
-                "protected_route": self.protected_route_tuple(),
                 "paths": self.snapshot_path_metadata(relevant_paths),
             }
 
@@ -184,8 +146,6 @@ class BuildPreflightTests(unittest.TestCase):
 
             after = {
                 "sandbox": self.snapshot_sandbox_tree(sandbox),
-                "openconnect": self.openconnect_process_snapshot(),
-                "protected_route": self.protected_route_tuple(),
                 "paths": self.snapshot_path_metadata(relevant_paths),
             }
             self.assertEqual(before, after)

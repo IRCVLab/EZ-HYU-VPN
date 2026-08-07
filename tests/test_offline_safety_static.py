@@ -57,6 +57,16 @@ class OfflineSafetyStaticTests(unittest.TestCase):
         self.assertNotIn("launchctl", readme)
         self.assertNotIn("cp launchd/local.hyu-openconnect.plist", readme)
 
+    def test_offline_tests_do_not_execute_live_posture_or_network_observers(self):
+        hip_cli_tests = (ROOT / "tests" / "test_hip_cli.py").read_text(encoding="utf-8")
+        offline_integration = (ROOT / "tests" / "test_offline_integration.py").read_text(encoding="utf-8")
+        build_preflight = (ROOT / "tests" / "test_build_preflight.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("subprocess.run", hip_cli_tests)
+        self.assertNotIn("GP_HIP_REPORT", offline_integration)
+        self.assertNotIn('["/bin/ps", "-axo"', build_preflight)
+        self.assertNotIn('["/sbin/route", "-n", "get"', build_preflight)
+
 
 if __name__ == "__main__":
     unittest.main()
