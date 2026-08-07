@@ -87,7 +87,7 @@ esac
         (self.payload / "installer" / "manifest.py").chmod(0o755)
         shutil.copytree(REPO / "src" / "hyu_vpn", self.payload / "src" / "hyu_vpn", dirs_exist_ok=True)
         (self.payload / "launchd").mkdir()
-        for template in ["com.hyu.vpn.service.plist.in", "com.hyu.vpn.menubar.plist.in"]:
+        for template in ["com.hyu.vpn.service.plist.in"]:
             shutil.copy2(REPO / "launchd" / template, self.payload / "launchd" / template)
         app_exec = self.payload / "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
         app_exec.parent.mkdir(parents=True)
@@ -155,6 +155,7 @@ class StageAndCliTests(InstallerTestCase):
         env = self.env()
         recorder = CommandRecorder(self.root / "commands.jsonl")
         stage = stage_user_payload(env, recorder=recorder)
+        self.assertFalse((stage / "config/launchd/com.hyu.vpn.menubar.plist.in").exists())
         self.assertTrue((env.root / ".hyu-vpn-dry-run-root").exists())
         for rel in [
             "runtime/bin/openconnect",
@@ -274,11 +275,10 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertTrue((root / "etc/sudoers.d/hyu-vpn").exists())
         self.assertFalse((root / "etc/sudoers.d/com.hyu.vpn").exists())
         service = plistlib.loads((root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist").read_bytes())
-        menubar = plistlib.loads((root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.menubar.plist").read_bytes())
+        self.assertFalse((root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.menubar.plist").exists())
         self.assertEqual(service["ProgramArguments"], ["/usr/bin/python3", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service"])
         self.assertTrue(service["RunAtLoad"])
         self.assertFalse(service["KeepAlive"])
-        self.assertTrue(menubar["RunAtLoad"])
         commands = (root / "private/var/db/hyu-vpn/command-log.jsonl").read_text()
         self.assertIn("launchctl disable gui/501/local.hyu-openconnect", commands)
         self.assertNotIn("launchctl bootstrap", commands)
@@ -323,6 +323,31 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         installed_paths = (env.root / "private/var/db/hyu-vpn/installed-paths.tsv").read_text(encoding="utf-8")
         self.assertIn("etc/sudoers.d/hyu-vpn", installed_paths)
         self.assertNotIn("etc/sudoers.d/com.hyu.vpn", installed_paths)
+
+
+    def test_root_admin_migrates_only_exact_legacy_menu_launchagent_and_keeps_service_owner(self):
+        env = DryRunEnvironment(root=self.root / "dry menu migration", payload=self.payload, home=self.root / "home menu migration", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        legacy = env.root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.menubar.plist"
+        service = env.root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("legacy-menu", encoding="utf-8")
+        service.write_text("keep-service", encoding="utf-8")
+
+        proc = self.run_root_admin(env, stage)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertFalse(legacy.exists())
+        self.assertTrue(service.exists())
+        service_plist = plistlib.loads(service.read_bytes())
+        self.assertEqual(service_plist["Label"], "com.hyu.vpn.service")
+        self.assertEqual(service_plist["ProgramArguments"], ["/usr/bin/python3", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service"])
+        commands = (env.root / "private/var/db/hyu-vpn/command-log.jsonl").read_text(encoding="utf-8")
+        self.assertIn("launchctl bootout gui/501/com.hyu.vpn.menubar", commands)
+        self.assertNotIn("gui/501/com.hyu.vpn.service.plist", commands)
+        installed_paths = (env.root / "private/var/db/hyu-vpn/installed-paths.tsv").read_text(encoding="utf-8")
+        self.assertNotIn("com.hyu.vpn.menubar.plist", installed_paths)
+        self.assertIn("Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist", installed_paths)
 
     def test_upgrade_preserves_existing_native_suppression_snapshot(self):
         env = DryRunEnvironment(root=self.root / "dry native upgrade", payload=self.payload, home=self.root / "home native upgrade", manifest=self.manifest_path)
@@ -783,6 +808,34 @@ class LauncherAndTemplateTests(InstallerTestCase):
         date = tools / "date"
         date.write_text('#!/bin/sh\nlog="$FAKE_INSTALL_LOG"\nprintf \'date\' >> "$log"\nfor arg in "$@"; do printf \' [%s]\' "$arg" >> "$log"; done\nprintf \'\n\' >> "$log"\nprintf \'%s\\n\' "${FAKE_DATE_EPOCH:-1785881401}"\n', encoding="utf-8")
         date.chmod(0o755)
+        pgrep = tools / "pgrep"
+        pgrep.write_text("""#!/bin/sh
+log="$FAKE_INSTALL_LOG"
+printf 'pgrep' >> "$log"
+for arg in "$@"; do printf ' [%s]' "$arg" >> "$log"; done
+printf '\n' >> "$log"
+exit 1
+""", encoding="utf-8")
+        pgrep.chmod(0o755)
+        pkill = tools / "pkill"
+        pkill.write_text("""#!/bin/sh
+log="$FAKE_INSTALL_LOG"
+printf 'pkill' >> "$log"
+for arg in "$@"; do printf ' [%s]' "$arg" >> "$log"; done
+printf '\n' >> "$log"
+exit 0
+""", encoding="utf-8")
+        pkill.chmod(0o755)
+        id_tool = tools / "id"
+        id_tool.write_text("""#!/bin/sh
+printf '501\n'
+""", encoding="utf-8")
+        id_tool.chmod(0o755)
+        sleep = tools / "sleep"
+        sleep.write_text("""#!/bin/sh
+exit 0
+""", encoding="utf-8")
+        sleep.chmod(0o755)
         return tools
 
     def _patched_install_script_for_fake_tools(self, tools: Path) -> Path:
@@ -791,21 +844,39 @@ class LauncherAndTemplateTests(InstallerTestCase):
         text = text.replace("/usr/bin/security", str(tools / "security"))
         text = text.replace("/usr/bin/sudo", str(tools / "sudo"))
         text = text.replace("/bin/date", str(tools / "date"))
+        text = text.replace("/usr/bin/pgrep", str(tools / "pgrep"))
+        text = text.replace("/usr/bin/pkill", str(tools / "pkill"))
+        text = text.replace("/usr/bin/id", str(tools / "id"))
+        text = text.replace("/bin/sleep", str(tools / "sleep"))
         script.write_text(text, encoding="utf-8")
         script.chmod(0o755)
         self.manifest_path = PayloadManifest.write_for_tree(self.payload, self.payload / "manifest.json")
         return script
 
-    def _patched_uninstall_script_for_fake_tools(self, tools: Path) -> Path:
+    def _fake_uninstall_app_exec(self, status: int = 0, output: str = "LOGIN_ITEM_UNREGISTERED") -> Path:
+        app_exec = self.root / "fixture Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
+        app_exec.parent.mkdir(parents=True, exist_ok=True)
+        app_exec.write_text(f"#!/bin/sh\nlog=\"$FAKE_INSTALL_LOG\"\nprintf 'app-exec [%s]' \"$0\" >> \"$log\"\nfor arg in \"$@\"; do printf ' [%s]' \"$arg\" >> \"$log\"; done\nprintf '\\n' >> \"$log\"\nprintf '%s\\n' {output!r}\nexit {status}\n", encoding="utf-8")
+        app_exec.chmod(0o755)
+        self.assertTrue(app_exec.resolve().is_relative_to(self.root.resolve()))
+        self.assertNotEqual(app_exec, Path("/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"))
+        return app_exec
+
+    def _patched_uninstall_script_for_fake_tools(self, tools: Path) -> tuple[Path, Path]:
         script = self.payload / "installer/uninstall.fake-tools.sh"
         text = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
         text = text.replace("/usr/bin/security", str(tools / "security"))
         text = text.replace("/usr/bin/sudo", str(tools / "sudo"))
         text = text.replace("/bin/date", str(tools / "date"))
+        text = text.replace("/usr/bin/pgrep", str(tools / "pgrep"))
+        text = text.replace("/usr/bin/pkill", str(tools / "pkill"))
+        text = text.replace("/usr/bin/id", str(tools / "id"))
+        text = text.replace("/bin/sleep", str(tools / "sleep"))
         script.write_text(text, encoding="utf-8")
         script.chmod(0o755)
+        app_exec = self._fake_uninstall_app_exec()
         self.manifest_path = PayloadManifest.write_for_tree(self.payload, self.payload / "manifest.json")
-        return script
+        return script, app_exec
 
     def test_install_promotion_failure_executes_root_cleanup_and_reports_successful_cleanup(self):
         tools = self._write_fake_install_tools(self.root)
@@ -836,6 +907,8 @@ class LauncherAndTemplateTests(InstallerTestCase):
         proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="tester\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
         self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
         logged = log.read_text(encoding="utf-8")
+        self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
+        self.assertNotIn("app-exec [/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp]", logged)
         auth = logged.index("sudo [-v]")
         nonce = logged.index("date [+%s]", auth)
         root_admin = logged.index("sudo [-n] [/bin/zsh]", nonce)
@@ -845,11 +918,13 @@ class LauncherAndTemplateTests(InstallerTestCase):
 
     def test_uninstall_live_nonce_is_generated_after_admin_auth_and_used_noninteractively(self):
         tools = self._write_fake_install_tools(self.root)
-        script = self._patched_uninstall_script_for_fake_tools(tools)
+        script, app_exec = self._patched_uninstall_script_for_fake_tools(tools)
         log = self.root / "fake-uninstall-nonce.log"
-        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
+        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home"), "HYU_VPN_TEST_APP_EXEC": str(app_exec)})
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         logged = log.read_text(encoding="utf-8")
+        self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
+        self.assertNotIn("app-exec [/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp]", logged)
         auth = logged.index("sudo [-v]")
         nonce = logged.index("date [+%s]", auth)
         root_admin = logged.index("sudo [-n] [/bin/zsh]", nonce)
@@ -879,23 +954,17 @@ class LauncherAndTemplateTests(InstallerTestCase):
         self.assertIn("launchctl bootstrap", install)
         self.assertIn("launchctl kickstart", install)
         self.assertIn('launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.service"', install)
-        self.assertIn('launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.menubar"', install)
+        self.assertNotIn('launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.menubar"', install)
         self.assertIn("launchctl print", install)
         self.assertIn("missing installed service LaunchAgent", install)
+        self.assertNotIn("missing installed menu LaunchAgent", install)
+        self.assertIn('/usr/bin/open -gj -a \"/Applications/HYU VPN.app\"', install)
         self.assertNotIn("/usr/bin/open -a", install)
-        self.assertIn('/usr/bin/pkill -TERM -u "$USER_UID" -x HYUVPNMenuApp', install)
         self.assertIn('/usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp', install)
-        self.assertIn('/usr/bin/pkill -KILL -u "$USER_UID" -x HYUVPNMenuApp', install)
-        self.assertEqual(install.count("wait_for_menubar_exit"), 3)
-        self.assertLess(
-            install.index('/usr/bin/pkill -KILL -u "$USER_UID" -x HYUVPNMenuApp'),
-            install.rindex("wait_for_menubar_exit"),
-        )
-        self.assertLess(
-            install.index('/usr/bin/pkill -TERM -u "$USER_UID" -x HYUVPNMenuApp'),
-            install.index("launchctl bootstrap"),
-        )
+        self.assertIn("wait_for_single_menubar", install)
+        self.assertLess(install.index("stop_existing_menubar"), install.index('/usr/bin/open -gj -a "/Applications/HYU VPN.app"'))
         self.assertLess(install.index("AutoReconnectPreference"), install.index("launchctl bootstrap"))
+        self.assertLess(install.index("launchctl bootstrap"), install.index('/usr/bin/open -gj -a \"/Applications/HYU VPN.app\"'))
         activation = install[install.index("AutoReconnectPreference"):]
         self.assertNotIn("/opt/homebrew/bin/openconnect", activation)
         self.assertNotIn("com.hyu.vpn.helper start", activation)
@@ -912,9 +981,13 @@ class LauncherAndTemplateTests(InstallerTestCase):
         self.assertIn("--package-audit", uninstall)
         self.assertEqual(uninstall.count("/usr/bin/sudo -v"), 1)
         self.assertEqual(uninstall.count("/usr/bin/sudo -n /bin/zsh"), 1)
+        self.assertIn("--unregister-login-item", uninstall)
+        self.assertIn('/usr/bin/pkill -TERM -u "$USER_UID" -x HYUVPNMenuApp', uninstall)
+        self.assertIn("LOGIN_ITEM_NOT_REGISTERED", uninstall)
+        self.assertIn("LOGIN_ITEM_NOT_FOUND", uninstall)
 
     def test_launchd_templates_are_valid_safe_defaults(self):
-        for rel in ["launchd/com.hyu.vpn.service.plist.in", "launchd/com.hyu.vpn.menubar.plist.in"]:
+        for rel in ["launchd/com.hyu.vpn.service.plist.in"]:
             text = (REPO / rel).read_text(encoding="utf-8")
             rendered = text.replace("@USER_HOME@", "/Users/tester").replace("@APP_PATH@", "/Applications/HYU VPN.app").replace("@SERVICE_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service").replace("@CONTROL_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-control")
             plist = plistlib.loads(rendered.encode("utf-8"))

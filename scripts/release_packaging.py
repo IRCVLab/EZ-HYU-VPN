@@ -63,7 +63,6 @@ REQUIRED_PAYLOAD_FILES = {
     "installer/uninstall.sh",
     "installer/root-admin.sh",
     "installer/manifest.py",
-    "launchd/com.hyu.vpn.menubar.plist.in",
     "launchd/com.hyu.vpn.service.plist.in",
     "runtime/openconnect/bin/openconnect",
     "runtime/oathtool",
@@ -673,7 +672,7 @@ def assemble_payload_from_repo(
         copy_file_rel(repo_root / "installer" / rel, f"installer/{rel}", 0o755 if rel.endswith(".sh") else 0o644)
     for rel in ["Install HYU VPN.command", "Uninstall HYU VPN.command"]:
         copy_file_rel(repo_root / "installer" / rel, rel, 0o755)
-    for rel in ["com.hyu.vpn.service.plist.in", "com.hyu.vpn.menubar.plist.in"]:
+    for rel in ["com.hyu.vpn.service.plist.in"]:
         copy_file_rel(repo_root / "launchd" / rel, f"launchd/{rel}", 0o644)
     for rel in ["hyu-vpn-control", "hyu-vpn-service", "hyu-vpn-connect", "hyu-vpn-native-client"]:
         copy_file_rel(repo_root / "bin" / rel, rel, 0o755)

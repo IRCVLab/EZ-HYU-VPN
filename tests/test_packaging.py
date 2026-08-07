@@ -154,7 +154,7 @@ class PackagingTestCase(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(rel, encoding="utf-8")
             path.chmod(0o755)
-        for rel in ["launchd/com.hyu.vpn.menubar.plist.in", "launchd/com.hyu.vpn.service.plist.in"]:
+        for rel in ["launchd/com.hyu.vpn.service.plist.in"]:
             path = src / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(rel, encoding="utf-8")
@@ -466,7 +466,6 @@ class ReleaseBuilderTests(PackagingTestCase):
             "src/hyu_vpn/status.py",
             "src/hyu_vpn/supervisor.py",
             "com.hyu.vpn.helper",
-            "launchd/com.hyu.vpn.menubar.plist.in",
             "launchd/com.hyu.vpn.service.plist.in",
             "THIRD_PARTY_NOTICES.txt",
             "SOURCE-OFFER.txt",

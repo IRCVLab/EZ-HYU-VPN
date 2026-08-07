@@ -1,43 +1,82 @@
 import AppKit
 import Darwin
 import Foundation
+import HYUVPNMenuCore
+import HYUVPNMenuAppSupport
 
-enum AppInvocation {
-    case launch
+enum BootstrapMode: Equatable {
+    case app
     case registerLoginItem
     case unregisterLoginItem
-}
 
-private func parseInvocation(arguments: [String]) -> AppInvocation? {
-    switch Array(arguments.dropFirst()) {
-    case []:
-        return .launch
-    case ["--register-login-item"]:
-        return .registerLoginItem
-    case ["--unregister-login-item"]:
-        return .unregisterLoginItem
-    default:
-        return nil
+    static func parse(_ arguments: [String]) -> BootstrapMode? {
+        switch Array(arguments.dropFirst()) {
+        case []:
+            return .app
+        case ["--register-login-item"]:
+            return .registerLoginItem
+        case ["--unregister-login-item"]:
+            return .unregisterLoginItem
+        default:
+            return nil
+        }
     }
 }
 
-private func exitUsage() -> Never {
-    Foundation.exit(Int32(EX_USAGE))
+private func printOutcome(_ code: String) {
+    FileHandle.standardOutput.write(Data((code + "\n").utf8))
 }
 
-private func exitLoginItemUnavailable() -> Never {
-    FileHandle.standardError.write(Data("LOGIN_ITEM_UNAVAILABLE\n".utf8))
-    Foundation.exit(Int32(EX_UNAVAILABLE))
+private func runLoginItemMode(_ mode: BootstrapMode) -> Never {
+    var controller = SystemLoginItemController()
+    switch mode {
+    case .registerLoginItem:
+        do {
+            try controller.setEnabled(true)
+            printOutcome("LOGIN_ITEM_REGISTERED")
+            exit(EX_OK)
+        } catch LoginItemControllerError.unavailable(let code) {
+            printOutcome(code)
+            exit(1)
+        } catch {
+            printOutcome("LOGIN_ITEM_REGISTER_FAILED")
+            exit(1)
+        }
+    case .unregisterLoginItem:
+        switch controller.state() {
+        case .disabled:
+            printOutcome("LOGIN_ITEM_NOT_REGISTERED")
+            exit(EX_OK)
+        case .unavailable(let code) where code == "LOGIN_ITEM_NOT_FOUND":
+            printOutcome("LOGIN_ITEM_NOT_FOUND")
+            exit(EX_OK)
+        case .unavailable(let code):
+            printOutcome(code)
+            exit(1)
+        case .enabled, .approvalRequired:
+            do {
+                try controller.setEnabled(false)
+                printOutcome("LOGIN_ITEM_UNREGISTERED")
+                exit(EX_OK)
+            } catch LoginItemControllerError.unavailable(let code) {
+                printOutcome(code)
+                exit(1)
+            } catch {
+                printOutcome("LOGIN_ITEM_UNREGISTER_FAILED")
+                exit(1)
+            }
+        }
+    case .app:
+        fatalError("app mode is not a login item CLI mode")
+    }
 }
 
-let arguments = ProcessInfo.processInfo.arguments
-
-guard let invocation = parseInvocation(arguments: arguments) else {
-    exitUsage()
+guard let mode = BootstrapMode.parse(ProcessInfo.processInfo.arguments) else {
+    exit(EX_USAGE)
 }
 
-switch invocation {
-case .launch:
+switch mode {
+case .app:
     let application = NSApplication.shared
     let delegate = AppDelegate()
     application.delegate = delegate
@@ -46,5 +85,5 @@ case .launch:
         application.run()
     }
 case .registerLoginItem, .unregisterLoginItem:
-    exitLoginItemUnavailable()
+    runLoginItemMode(mode)
 }

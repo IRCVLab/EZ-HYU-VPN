@@ -36,13 +36,27 @@ rollback_keychain() {
     [[ -n "$item" ]] && /usr/bin/security delete-generic-password -s "$item" -a hyu-vpn >/dev/null 2>&1 || true
   done < "$KEYCHAIN_CREATED_FILE"
 }
+menubar_process_count() { /usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' '; }
 wait_for_menubar_exit() {
   local attempt=0
-  while /usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp >/dev/null 2>&1 && [[ $attempt -lt 50 ]]; do
+  while [[ "$(menubar_process_count)" != "0" && $attempt -lt 50 ]]; do
     /bin/sleep 0.1
     attempt=$((attempt + 1))
   done
-  ! /usr/bin/pgrep -u "$USER_UID" -x HYUVPNMenuApp >/dev/null 2>&1
+  [[ "$(menubar_process_count)" == "0" ]]
+}
+wait_for_single_menubar() {
+  local attempt=0 count
+  while [[ $attempt -lt 50 ]]; do
+    count="$(menubar_process_count)"
+    [[ "$count" == "1" ]] && return 0
+    [[ "$count" != "0" ]] && break
+    /bin/sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  count="$(menubar_process_count)"
+  print -u2 "expected exactly one HYUVPNMenuApp process, found $count"
+  return 1
 }
 stop_existing_menubar() {
   /usr/bin/pkill -TERM -u "$USER_UID" -x HYUVPNMenuApp >/dev/null 2>&1 || true
@@ -116,19 +130,15 @@ if [[ $promote_failed -ne 0 ]]; then
 fi
 USER_UID="$(/usr/bin/id -u)"
 SERVICE_PLIST="$HOME/Library/LaunchAgents/com.hyu.vpn.service.plist"
-MENUBAR_PLIST="$HOME/Library/LaunchAgents/com.hyu.vpn.menubar.plist"
-# Safe post-install activation: forces automatic reconnect false before loading service/menu, so login/activation does not start OpenConnect until the user chooses Connect.
+# Safe post-install activation: default automatic reconnect on for the installed native menu owner.
 PREF_PATH="$HOME/Library/Application Support/hyu-openconnect/auto-reconnect.json"
-/usr/bin/python3 -I -c 'import sys; sys.path.insert(0,"/Library/Application Support/HYU VPN/src"); from hyu_vpn.control import AutoReconnectPreference; AutoReconnectPreference(sys.argv[1], owner_uid=int(sys.argv[2])).write(False)' "$PREF_PATH" "$USER_UID"
+/usr/bin/python3 -I -c 'import sys; sys.path.insert(0,"/Library/Application Support/HYU VPN/src"); from hyu_vpn.control import AutoReconnectPreference; AutoReconnectPreference(sys.argv[1], owner_uid=int(sys.argv[2])).write(True)' "$PREF_PATH" "$USER_UID"
 [[ -f "$SERVICE_PLIST" ]] || { print -u2 "missing installed service LaunchAgent"; exit 1; }
-[[ -f "$MENUBAR_PLIST" ]] || { print -u2 "missing installed menu LaunchAgent"; exit 1; }
-# Upgrades may inherit a LaunchServices-owned menu process from older installers.
-# Stop every same-user exact-name instance before launchd becomes the sole owner.
-stop_existing_menubar
 /bin/launchctl bootstrap "gui/$USER_UID" "$SERVICE_PLIST" >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
-/bin/launchctl bootstrap "gui/$USER_UID" "$MENUBAR_PLIST" >/dev/null 2>&1 || /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
 /bin/launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
-/bin/launchctl kickstart -k "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
 /bin/launchctl print "gui/$USER_UID/com.hyu.vpn.service" >/dev/null
-/bin/launchctl print "gui/$USER_UID/com.hyu.vpn.menubar" >/dev/null
+# Upgrades may inherit an exact-name menu process from older LaunchAgent ownership; stop it before LaunchServices opens the native app owner.
+stop_existing_menubar
+/usr/bin/open -gj -a "/Applications/HYU VPN.app"
+wait_for_single_menubar
 exit 0

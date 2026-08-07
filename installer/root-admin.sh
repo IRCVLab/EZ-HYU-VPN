@@ -90,7 +90,7 @@ STATE_DIR="$(map_path /private/var/db/hyu-vpn)"; TX_STATE="$STATE_DIR/transactio
 SUDOERS_TMP="$STATE_DIR/sudoers-candidate.$$"
 APP_SUPPORT="$(map_path '/Library/Application Support/HYU VPN')"; HELPER_DST="$(map_path /Library/PrivilegedHelperTools/com.hyu.vpn.helper)"; VPNC_WRAPPER_DST="$(map_path /Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper)"; SUDOERS_DST="$(map_path /etc/sudoers.d/hyu-vpn)"; APP_DST="$(map_path '/Applications/HYU VPN.app')"
 LEGACY_SUDOERS_DST="$(map_path /etc/sudoers.d/com.hyu.vpn)"
-USER_HOME="$(map_path "$ADMIN_HOME")"; SERVICE_PLIST="$USER_HOME/Library/LaunchAgents/com.hyu.vpn.service.plist"; MENUBAR_PLIST="$USER_HOME/Library/LaunchAgents/com.hyu.vpn.menubar.plist"
+USER_HOME="$(map_path "$ADMIN_HOME")"; SERVICE_PLIST="$USER_HOME/Library/LaunchAgents/com.hyu.vpn.service.plist"; LEGACY_MENUBAR_PLIST="$USER_HOME/Library/LaunchAgents/com.hyu.vpn.menubar.plist"; MENU_LABEL="com.hyu.vpn.menubar"
 PACKAGE_SNAPSHOT="$STATE_DIR/package-snapshot"; TXN_SNAPSHOT="$STATE_DIR/root-snapshot"; LEGACY_LABEL="local.hyu-openconnect"
 
 durable_flush(){
@@ -365,12 +365,14 @@ copy_file(){ local src="$1" dst="$2" mode="$3"; log "before-mutate $(rel_path "$
 copy_dir(){ local src="$1" dst="$2" mode="$3"; log "before-mutate-dir $(rel_path "$dst")"; backup_target "$dst"; /bin/mkdir -p "$(/usr/bin/dirname "$dst")"; /bin/mkdir -p "$dst"; /bin/chmod 700 "$dst"; /usr/bin/tar -C "$src" -cf - . | /usr/bin/tar -C "$dst" -xpf -; run_cmd /usr/sbin/chown -R root:wheel "$dst"; /bin/chmod -R u+rwX,go-w "$dst"; /bin/chmod "$mode" "$dst"; record_path "$dst"; durable_flush "$dst"; durable_flush "$TXN_PATHS"; log "complete $(rel_path "$dst")"; }
 write_file(){ local dst="$1" mode="$2" content="$3"; log "before-mutate-write $(rel_path "$dst")"; backup_target "$dst"; /bin/mkdir -p "$(/usr/bin/dirname "$dst")"; print -- "$content" > "$dst"; /bin/chmod "$mode" "$dst"; record_path "$dst"; durable_flush "$dst"; durable_flush "$TXN_PATHS"; log "complete $(rel_path "$dst")"; }
 render_from_template(){ local template="$1" dst="$2"; /usr/bin/sed -e "s#@USER_HOME@#/Users/$ADMIN_USER#g" -e "s#@APP_PATH@#/Applications/HYU VPN.app#g" -e "s#@SERVICE_PATH@#/Library/Application Support/HYU VPN/bin/hyu-vpn-service#g" -e "s#@CONTROL_PATH@#/Library/Application Support/HYU VPN/bin/hyu-vpn-control#g" "$template" > "$dst"; }
-render_plists(){ /bin/mkdir -p "$(/usr/bin/dirname "$SERVICE_PLIST")"; backup_target "$SERVICE_PLIST"; render_from_template "$TXN_SNAPSHOT/config/launchd/com.hyu.vpn.service.plist.in" "$SERVICE_PLIST"; /bin/chmod 644 "$SERVICE_PLIST"; record_path "$SERVICE_PLIST"; backup_target "$MENUBAR_PLIST"; render_from_template "$TXN_SNAPSHOT/config/launchd/com.hyu.vpn.menubar.plist.in" "$MENUBAR_PLIST"; /bin/chmod 644 "$MENUBAR_PLIST"; record_path "$MENUBAR_PLIST"; }
+render_plists(){ /bin/mkdir -p "$(/usr/bin/dirname "$SERVICE_PLIST")"; backup_target "$SERVICE_PLIST"; render_from_template "$TXN_SNAPSHOT/config/launchd/com.hyu.vpn.service.plist.in" "$SERVICE_PLIST"; /bin/chmod 644 "$SERVICE_PLIST"; record_path "$SERVICE_PLIST"; }
+migrate_legacy_menu_launchagent(){ log "legacy-menu-launchagent-migration-start"; run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID/$MENU_LABEL"; if [[ -f "$LEGACY_MENUBAR_PLIST" || -L "$LEGACY_MENUBAR_PLIST" ]]; then backup_target "$LEGACY_MENUBAR_PLIST"; /bin/rm -f "$LEGACY_MENUBAR_PLIST"; log "legacy-menu-launchagent-removed com.hyu.vpn.menubar"; else log "legacy-menu-launchagent-absent com.hyu.vpn.menubar"; fi; }
 write_installed_manifest(){ local tmp="$INSTALLED_MANIFEST.tmp" paths_tmp="$INSTALLED_PATHS.tmp" first=1; print '{"schema":1,"paths":[' > "$tmp"; : > "$paths_tmp"; while IFS= read -r rel; do [[ -z "$rel" ]] && continue; [[ "$rel" == private/var/db/hyu-vpn/installed-manifest.json || "$rel" == private/var/db/hyu-vpn/installed-paths.tsv ]] && continue; print -- "$rel" >> "$paths_tmp"; [[ $first -eq 0 ]] && print ',' >> "$tmp"; first=0; printf '"%s"' "$rel" >> "$tmp"; done < "$TXN_PATHS"; print ']}' >> "$tmp"; /bin/mv "$tmp" "$INSTALLED_MANIFEST"; /bin/mv "$paths_tmp" "$INSTALLED_PATHS"; /bin/chmod 600 "$INSTALLED_MANIFEST" "$INSTALLED_PATHS"; durable_flush "$INSTALLED_MANIFEST"; durable_flush "$INSTALLED_PATHS"; }
 
 install_phase(){
   print in_progress >| "$TX_STATE"; durable_flush "$TX_STATE"; log "before-snapshot"; copy_snapshot; fail_after snapshot
   quarantine_legacy
+  migrate_legacy_menu_launchagent
   drain_existing_helper
   copy_file "$TXN_SNAPSHOT/com.hyu.vpn.helper" "$HELPER_DST" 755; fail_after helper
   /bin/mkdir -p "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime/openconnect" "$APP_SUPPORT/runtime/vpnc" "$STATE_DIR/ledger"
@@ -395,13 +397,13 @@ install_phase(){
     validate_native_snapshot; print native_suppressed >| "$STATE_DIR/native-suppression-transaction"; durable_flush "$STATE_DIR/native-suppression-transaction"
   fi
   fail_after native-suppression
-  render_plists; run_cmd /usr/sbin/chown "${ADMIN_USER}:staff" "$SERVICE_PLIST" "$MENUBAR_PLIST"; fail_after launchagent
+  render_plists; run_cmd /usr/sbin/chown "${ADMIN_USER}:staff" "$SERVICE_PLIST"; fail_after launchagent
   write_file "$STATE_DIR/migration.json" 600 '{"liveHelper":"drained-before-replace-and-verified-stopped"}'; write_installed_manifest; /bin/rm -rf "$PACKAGE_SNAPSHOT" "$TXN_SNAPSHOT"; /bin/rm -f "$STATE_DIR/native-suppression-transaction"; print complete >| "$TX_STATE"; durable_flush "$TX_STATE"; log "install-complete"
 }
 uninstall_phase(){
   [[ -x "$HELPER_DST" ]] && { run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper status; run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper stop; run_optional_cmd /Library/PrivilegedHelperTools/com.hyu.vpn.helper repair; }
   [[ -f "$SERVICE_PLIST" ]] && run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID" "$SERVICE_PLIST"
-  [[ -f "$MENUBAR_PLIST" ]] && run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID" "$MENUBAR_PLIST"
+  [[ -f "$LEGACY_MENUBAR_PLIST" ]] && run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID/$MENU_LABEL"
   [[ -x "$APP_SUPPORT/bin/hyu-vpn-native-client" && -f "$STATE_DIR/native-suppression.json" ]] && run_optional_cmd /usr/bin/env -i PATH=/usr/bin:/bin SUDO_UID="$ADMIN_UID" /usr/bin/python3 "$APP_SUPPORT/bin/hyu-vpn-native-client" restore-auto-launch
   if [[ -f "$INSTALLED_PATHS" ]]; then /usr/bin/tail -r "$INSTALLED_PATHS" 2>/dev/null | while IFS= read -r rel; do [[ -n "$rel" ]] && remove_rel "$rel"; done; fi
   /usr/bin/find "$APP_SUPPORT" -depth -type d -empty -delete 2>/dev/null || true

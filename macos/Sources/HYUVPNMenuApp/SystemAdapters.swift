@@ -1,4 +1,5 @@
 import Foundation
+import ServiceManagement
 import Security
 import Darwin
 import HYUVPNMenuCore
@@ -143,5 +144,163 @@ package final class FileTOTPStateResetter: TOTPStateResetting {
 package enum SystemCredentialTransactionFactory {
     package static func make() -> CredentialTransaction {
         CredentialTransaction(store: KeychainCredentialStore(), totpResetter: FileTOTPStateResetter())
+    }
+}
+
+
+package enum LoginItemControllerError: Error, Equatable {
+    case unavailable(code: String)
+}
+
+package enum LoginItemPlatformStatus: Equatable, Sendable {
+    case enabled
+    case notRegistered
+    case requiresApproval
+    case notFound
+    case unknown(code: String)
+}
+
+package protocol LoginItemPlatforming {
+    mutating func status() -> LoginItemPlatformStatus
+    mutating func register() throws
+    mutating func unregister() throws
+    mutating func openSystemSettingsLoginItems()
+}
+
+package protocol LoginItemControlling {
+    mutating func state() -> LoginItemState
+    mutating func setEnabled(_ enabled: Bool) throws
+    mutating func openSystemSettingsLoginItems()
+}
+
+package extension LoginItemControlling {
+    mutating func handleMenuSelection() throws {
+        switch state() {
+        case .enabled:
+            try setEnabled(false)
+        case .disabled:
+            try setEnabled(true)
+        case .approvalRequired:
+            openSystemSettingsLoginItems()
+        case .unavailable(let code):
+            throw LoginItemControllerError.unavailable(code: code)
+        }
+    }
+}
+
+package struct LoginItemController<Platform: LoginItemPlatforming>: LoginItemControlling {
+    private var platform: Platform
+    private var lastFailureCode: String?
+
+    package init(platform: Platform) {
+        self.platform = platform
+        self.lastFailureCode = nil
+    }
+
+    package mutating func state() -> LoginItemState {
+        if let lastFailureCode { return .unavailable(code: lastFailureCode) }
+        return Self.project(status: platform.status())
+    }
+
+    package mutating func setEnabled(_ enabled: Bool) throws {
+        do {
+            if enabled {
+                try platform.register()
+            } else {
+                try platform.unregister()
+            }
+            lastFailureCode = nil
+        } catch LoginItemControllerError.unavailable(let code) {
+            if enabled && code == "LOGIN_ITEM_ALREADY_REGISTERED" { lastFailureCode = nil; return }
+            if !enabled && code == "LOGIN_ITEM_NOT_REGISTERED" { lastFailureCode = nil; return }
+            lastFailureCode = code
+            throw LoginItemControllerError.unavailable(code: code)
+        } catch {
+            let code = enabled ? "LOGIN_ITEM_REGISTER_FAILED" : "LOGIN_ITEM_UNREGISTER_FAILED"
+            lastFailureCode = code
+            throw LoginItemControllerError.unavailable(code: code)
+        }
+    }
+
+    package mutating func openSystemSettingsLoginItems() {
+        platform.openSystemSettingsLoginItems()
+    }
+
+    package static func project(status: LoginItemPlatformStatus) -> LoginItemState {
+        switch status {
+        case .enabled:
+            return .enabled
+        case .notRegistered:
+            return .disabled
+        case .requiresApproval:
+            return .approvalRequired
+        case .notFound:
+            return .unavailable(code: "LOGIN_ITEM_NOT_FOUND")
+        case .unknown(let code):
+            return .unavailable(code: code)
+        }
+    }
+}
+
+package enum LoginItemStartupPolicy {
+    package static func shouldRegisterOnLaunch(userChoice: Bool?, state: LoginItemState) -> Bool {
+        if userChoice == false { return false }
+        return state == .disabled
+    }
+}
+
+package struct SMAppServiceLoginItemPlatform: LoginItemPlatforming {
+    package init() {}
+
+    package mutating func status() -> LoginItemPlatformStatus {
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            return .enabled
+        case .notRegistered:
+            return .notRegistered
+        case .requiresApproval:
+            return .requiresApproval
+        case .notFound:
+            return .notFound
+        @unknown default:
+            return .unknown(code: "LOGIN_ITEM_STATUS_UNKNOWN")
+        }
+    }
+
+    package mutating func register() throws {
+        do {
+            try SMAppService.mainApp.register()
+        } catch {
+            throw Self.normalize(error: error, registering: true)
+        }
+    }
+
+    package mutating func unregister() throws {
+        do {
+            try SMAppService.mainApp.unregister()
+        } catch {
+            throw Self.normalize(error: error, registering: false)
+        }
+    }
+
+    package mutating func openSystemSettingsLoginItems() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    private static func normalize(error: Error, registering: Bool) -> LoginItemControllerError {
+        let nsError = error as NSError
+        if registering && nsError.code == 12 { return .unavailable(code: "LOGIN_ITEM_ALREADY_REGISTERED") }
+        if !registering && nsError.code == 6 { return .unavailable(code: "LOGIN_ITEM_NOT_REGISTERED") }
+        if nsError.code == 4 { return .unavailable(code: "LOGIN_ITEM_AUTHORIZATION_FAILED") }
+        if nsError.code == 5 { return .unavailable(code: "LOGIN_ITEM_TOOL_NOT_VALID") }
+        return .unavailable(code: registering ? "LOGIN_ITEM_REGISTER_FAILED" : "LOGIN_ITEM_UNREGISTER_FAILED")
+    }
+}
+
+package typealias SystemLoginItemController = LoginItemController<SMAppServiceLoginItemPlatform>
+
+package extension SystemLoginItemController {
+    init() {
+        self.init(platform: SMAppServiceLoginItemPlatform())
     }
 }

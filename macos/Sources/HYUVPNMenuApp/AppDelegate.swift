@@ -20,9 +20,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private var startupRetryWorkItem: DispatchWorkItem?
     private var resetController: CredentialResetController?
     private var pendingResetPayload: ValidatedCredentials?
+    private var loginItemController = SystemLoginItemController()
+    private var loginItemState: LoginItemState = .disabled
+    private var lastLoginItemResult = "LOGIN_ITEM_UNAVAILABLE"
+    private let launchAtLoginUserChoiceKey = "hyu.vpn.launchAtLogin.userChoice"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
+        refreshLoginItemState()
+        applyFirstLaunchLoginItemDefault()
         rebuildMenu()
         startWatcher()
         apply(lifecycle.handle(.appLaunched))
@@ -96,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         addPrimaryAction(to: menu)
         addDisconnectAction(to: menu)
         addResetAction(to: menu)
+        addLaunchAtLoginAction(to: menu)
         menu.addItem(NSMenuItem.separator())
         addDiagnosticsAction(to: menu)
         menu.addItem(NSMenuItem.separator())
@@ -123,6 +130,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         let item = NSMenuItem(title: "Reset Login Information…", action: #selector(resetLoginInformation), keyEquivalent: "")
         item.target = self
         item.isEnabled = !lifecycle.controlsDisabled
+        menu.addItem(item)
+    }
+
+    private func addLaunchAtLoginAction(to menu: NSMenu) {
+        let model = loginItemMenuItemModel()
+        let item = NSMenuItem(title: model.title, action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        item.target = self
+        item.isEnabled = model.isEnabled
+        item.state = model.isChecked ? .on : .off
         menu.addItem(item)
     }
 
@@ -211,6 +227,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         resetController = controller
         NSApp.activate(ignoringOtherApps: true)
         controller.present()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        do {
+            switch loginItemState {
+            case .enabled:
+                try loginItemController.setEnabled(false)
+                UserDefaults.standard.set(false, forKey: launchAtLoginUserChoiceKey)
+            case .disabled:
+                try loginItemController.setEnabled(true)
+                UserDefaults.standard.set(true, forKey: launchAtLoginUserChoiceKey)
+            case .approvalRequired:
+                loginItemController.openSystemSettingsLoginItems()
+            case .unavailable:
+                return
+            }
+            lastLoginItemResult = "LOGIN_ITEM_OK"
+            refreshLoginItemState()
+        } catch LoginItemControllerError.unavailable(let code) {
+            lastLoginItemResult = code
+            loginItemState = .unavailable(code: code)
+        } catch {
+            lastLoginItemResult = "LOGIN_ITEM_TOGGLE_FAILED"
+            loginItemState = .unavailable(code: "LOGIN_ITEM_TOGGLE_FAILED")
+        }
+        rebuildMenu()
     }
 
     @objc private func showDiagnostics() {
@@ -326,6 +368,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         alert.runModal()
     }
 
+    private func applyFirstLaunchLoginItemDefault() {
+        let choice = UserDefaults.standard.object(forKey: launchAtLoginUserChoiceKey) as? Bool
+        guard LoginItemStartupPolicy.shouldRegisterOnLaunch(userChoice: choice, state: loginItemState) else { return }
+        do {
+            try loginItemController.setEnabled(true)
+            UserDefaults.standard.set(true, forKey: launchAtLoginUserChoiceKey)
+            lastLoginItemResult = "LOGIN_ITEM_OK"
+            refreshLoginItemState()
+        } catch LoginItemControllerError.unavailable(let code) {
+            lastLoginItemResult = code
+            loginItemState = .unavailable(code: code)
+        } catch {
+            lastLoginItemResult = "LOGIN_ITEM_REGISTER_FAILED"
+            loginItemState = .unavailable(code: "LOGIN_ITEM_REGISTER_FAILED")
+        }
+    }
+
+    private func refreshLoginItemState() {
+        loginItemState = loginItemController.state()
+        if case .unavailable(let code) = loginItemState {
+            lastLoginItemResult = code
+        }
+    }
+
+    private func loginItemMenuItemModel() -> MenuItemModel {
+        if let status = currentStatus {
+            return MenuModel.make(status: status, diagnostics: "", launchAtLogin: loginItemState)[.launchAtLogin] ?? MenuItemModel(title: "Launch at Login Unavailable", isEnabled: false, isChecked: false, command: nil)
+        }
+        switch loginItemState {
+        case .enabled:
+            return MenuItemModel(title: "Launch at Login", isEnabled: true, isChecked: true, command: nil)
+        case .disabled:
+            return MenuItemModel(title: "Launch at Login", isEnabled: true, isChecked: false, command: nil)
+        case .approvalRequired:
+            return MenuItemModel(title: "Launch at Login (Open System Settings…)", isEnabled: true, isChecked: false, command: nil)
+        case .unavailable:
+            return MenuItemModel(title: "Launch at Login Unavailable", isEnabled: false, isChecked: false, command: nil)
+        }
+    }
+
     private func diagnosticsText() -> String {
         var lines = ["State: \(statusLineText())"]
         if let tunnelInterface = currentStatus?.tunnelInterface {
@@ -335,6 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
             lines.append("Backend Error: \(backendError)")
         }
         lines.append("Last Control Result: \(normalizedControlResult(lastControlResult))")
+        lines.append("Login Item Result: \(lastLoginItemResult)")
         if let buildVersion = currentStatus?.backendBuildVersion {
             lines.append("Build Version: \(buildVersion)")
         }

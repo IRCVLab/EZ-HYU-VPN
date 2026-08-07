@@ -23,7 +23,9 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("presentation-symbols-and-title-rule", presentationSymbolsAndTitleRule),
                 ("dynamic-menu-actions-and-checks", dynamicMenuActionsAndChecks),
                 ("primary-action-disabled-transient-states", primaryActionDisabledTransientStates),
-                ("live-menu-omits-unimplemented-actions", liveMenuOmitsUnimplementedActions),
+                ("login-item-state-projections-and-actions", loginItemStateProjectionsAndActions),
+                ("login-item-first-launch-policy", loginItemFirstLaunchPolicy),
+                ("live-menu-includes-native-login-item-control", liveMenuIncludesNativeLoginItemControl),
                 ("control-security-timeout-and-normalized-errors", controlSecurityTimeoutAndErrors),
                 ("bootstrap-splits-appkit-and-argument-gate", bootstrapSplitsAppKitAndArgumentGate),
                 ("control-tower-menu-copy-and-icon-contract", controlTowerMenuCopyAndIconContract),
@@ -63,6 +65,38 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
             for (name, test) in tests { print("RUN \(name)"); try test(); print("PASS \(name)") }
             print("HARNESS PASS \(tests.count) tests")
         } catch { FileHandle.standardError.write(Data("HARNESS FAIL: \(error)\n".utf8)); exit(1) }
+    }
+
+
+    typealias FakeLoginItemStatus = LoginItemPlatformStatus
+
+    enum FakeLoginItemEvent: Equatable { case register, unregister, openSettings }
+
+    final class FakeLoginItemProbe {
+        var events: [FakeLoginItemEvent] = []
+    }
+
+    struct FakeLoginItemPlatform: LoginItemPlatforming {
+        var currentStatus: LoginItemPlatformStatus
+        var registerError: String? = nil
+        var unregisterError: String? = nil
+        var probe = FakeLoginItemProbe()
+
+        mutating func status() -> LoginItemPlatformStatus { currentStatus }
+
+        mutating func register() throws {
+            probe.events.append(.register)
+            if let registerError { throw LoginItemControllerError.unavailable(code: registerError) }
+            currentStatus = .enabled
+        }
+
+        mutating func unregister() throws {
+            probe.events.append(.unregister)
+            if let unregisterError { throw LoginItemControllerError.unavailable(code: unregisterError) }
+            currentStatus = .notRegistered
+        }
+
+        mutating func openSystemSettingsLoginItems() { probe.events.append(.openSettings) }
     }
 
     static func packageRoot() -> URL {
@@ -173,13 +207,67 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         }
     }
 
-    static func liveMenuOmitsUnimplementedActions() throws {
+    static func loginItemStateProjectionsAndActions() throws {
+        let cases: [(FakeLoginItemStatus, LoginItemState, Bool, String)] = [
+            (.enabled, .enabled, true, "Launch at Login"),
+            (.notRegistered, .disabled, false, "Launch at Login"),
+            (.requiresApproval, .approvalRequired, false, "Launch at Login (Open System Settings…)") ,
+            (.notFound, .unavailable(code: "LOGIN_ITEM_NOT_FOUND"), false, "Launch at Login Unavailable"),
+            (.unknown(code: "LOGIN_ITEM_STATUS_UNKNOWN"), .unavailable(code: "LOGIN_ITEM_STATUS_UNKNOWN"), false, "Launch at Login Unavailable"),
+        ]
+        for (status, state, checked, title) in cases {
+            var controller = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: status))
+            try expect(controller.state() == state, "state projection for \(status)")
+            let menu = MenuModel.make(status: try VPNStatusDecoder.decode(statusData()), diagnostics: "", launchAtLogin: state)
+            try expect(menu[.launchAtLogin]?.isChecked == checked, "menu check for \(status)")
+            try expect(menu[.launchAtLogin]?.title == title, "menu title for \(status)")
+        }
+
+        let registerProbe = FakeLoginItemProbe()
+        var register = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .notRegistered, probe: registerProbe))
+        try register.setEnabled(true)
+        try expect(register.state() == .enabled, "register changes runtime status")
+        try expect(registerProbe.events == [.register], "register platform called once")
+
+        let unregisterProbe = FakeLoginItemProbe()
+        var unregister = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .enabled, probe: unregisterProbe))
+        try unregister.setEnabled(false)
+        try expect(unregister.state() == .disabled, "unregister changes runtime status")
+        try expect(unregisterProbe.events == [.unregister], "unregister platform called once")
+
+        let approvalProbe = FakeLoginItemProbe()
+        var approval = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .requiresApproval, probe: approvalProbe))
+        try approval.handleMenuSelection()
+        try expect(approvalProbe.events == [.openSettings], "approval opens settings instead of register loop")
+
+        var registerFailure = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .notRegistered, registerError: "LOGIN_ITEM_REGISTER_FAILED"))
+        try expectThrows("register failure is unavailable") { try registerFailure.setEnabled(true) }
+        try expect(registerFailure.state() == .unavailable(code: "LOGIN_ITEM_REGISTER_FAILED"), "register failure code projected")
+
+        var unregisterFailure = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .enabled, unregisterError: "LOGIN_ITEM_UNREGISTER_FAILED"))
+        try expectThrows("unregister failure is unavailable") { try unregisterFailure.setEnabled(false) }
+        try expect(unregisterFailure.state() == .unavailable(code: "LOGIN_ITEM_UNREGISTER_FAILED"), "unregister failure code projected")
+    }
+
+
+    static func loginItemFirstLaunchPolicy() throws {
+        try expect(LoginItemStartupPolicy.shouldRegisterOnLaunch(userChoice: nil, state: .disabled), "first launch disabled registers")
+        try expect(LoginItemStartupPolicy.shouldRegisterOnLaunch(userChoice: true, state: .disabled), "explicit on registers if runtime disabled")
+        try expect(!LoginItemStartupPolicy.shouldRegisterOnLaunch(userChoice: false, state: .disabled), "explicit off suppresses registration")
+        try expect(!LoginItemStartupPolicy.shouldRegisterOnLaunch(userChoice: nil, state: .enabled), "enabled runtime does not register again")
+        try expect(!LoginItemStartupPolicy.shouldRegisterOnLaunch(userChoice: nil, state: .approvalRequired), "approval-required opens only by menu selection")
+        try expect(!LoginItemStartupPolicy.shouldRegisterOnLaunch(userChoice: nil, state: .unavailable(code: "LOGIN_ITEM_STATUS_UNKNOWN")), "unknown runtime is not treated as not found or disabled")
+    }
+
+    static func liveMenuIncludesNativeLoginItemControl() throws {
         let root = packageRoot().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/main.swift"))
-        try expect(!source.contains("add(.resetCredentials"), "live menu omits reset credentials until implemented")
-        try expect(!source.contains("add(.launchAtLogin"), "live menu omits launch at login until implemented")
-        try expect(!source.contains("resetCredentials()"), "live menu has no reset no-op handler")
-        try expect(!source.contains("toggleLaunchAtLogin()"), "live menu has no in-memory launch toggle")
+        let appDelegateSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        let mainSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/main.swift"))
+        let adaptersSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/SystemAdapters.swift"))
+        try expect(appDelegateSource.contains("addLaunchAtLoginAction"), "live menu includes launch-at-login row")
+        try expect(appDelegateSource.contains("hyu.vpn.launchAtLogin.userChoice"), "first-launch explicit-off preference is app-owned")
+        try expect(mainSource.contains("--unregister-login-item"), "unregister CLI mode exists before AppKit startup")
+        try expect(adaptersSource.contains("SMAppService.mainApp"), "runtime adapter uses SMAppService main app")
     }
 
     static func bootstrapSplitsAppKitAndArgumentGate() throws {
@@ -191,7 +279,8 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expect(mainSource.contains("--register-login-item"), "register-login-item mode recognized")
         try expect(mainSource.contains("--unregister-login-item"), "unregister-login-item mode recognized")
         try expect(mainSource.contains("EX_USAGE"), "invalid argv exits EX_USAGE")
-        try expect(mainSource.contains("LOGIN_ITEM_UNAVAILABLE"), "login item mode returns stable unavailable code")
+        try expect(mainSource.contains("LOGIN_ITEM_NOT_REGISTERED"), "unregister mode returns stable already-absent code")
+        try expect(mainSource.contains("LOGIN_ITEM_REGISTER_FAILED"), "register mode returns stable failure code")
         let argsIndex = try requireIndex(of: "ProcessInfo.processInfo.arguments", in: mainSource, message: "argv parse source index")
         let appKitIndex = try requireIndex(of: "NSApplication.shared", in: mainSource, message: "AppKit source index")
         try expect(argsIndex < appKitIndex, "argv gate precedes AppKit startup")

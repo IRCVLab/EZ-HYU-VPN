@@ -283,7 +283,6 @@ def _stage_into(payload: Path, manifest: Path, stage: Path) -> Path:
         "hyu-vpn-connect": ("backend/hyu-vpn-connect", 0o755),
         "hyu-vpn-native-client": ("bin/hyu-vpn-native-client", 0o755),
         "launchd/com.hyu.vpn.service.plist.in": ("config/launchd/com.hyu.vpn.service.plist.in", 0o644),
-        "launchd/com.hyu.vpn.menubar.plist.in": ("config/launchd/com.hyu.vpn.menubar.plist.in", 0o644),
     }
     for rel, (dst_rel, mode) in required.items():
         _copy_file(payload / rel, stage / dst_rel, mode)

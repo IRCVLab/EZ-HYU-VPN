@@ -486,21 +486,32 @@ public enum MenuAction: CaseIterable, Hashable, Sendable {
     case currentState, primaryConnection, disconnect
     case resetCredentials, launchAtLogin, diagnostics, quit
 }
-public struct MenuItemModel: Equatable, Sendable { public let title: String; public let isEnabled: Bool; public let isChecked: Bool; public let command: VPNControlCommand? }
-public enum LaunchAtLoginState: Equatable, Sendable { case enabled, disabled }
-
+public struct MenuItemModel: Equatable, Sendable { public let title: String; public let isEnabled: Bool; public let isChecked: Bool; public let command: VPNControlCommand?; public init(title: String, isEnabled: Bool, isChecked: Bool, command: VPNControlCommand?) { self.title = title; self.isEnabled = isEnabled; self.isChecked = isChecked; self.command = command } }
 public enum MenuModel {
-    public static func make(status: VPNStatus, diagnostics: String, launchAtLogin: LaunchAtLoginState) -> [MenuAction: MenuItemModel] {
+    public static func make(status: VPNStatus, diagnostics: String, launchAtLogin: LoginItemState) -> [MenuAction: MenuItemModel] {
         let view = MenuPresenter.present(status)
         var model: [MenuAction: MenuItemModel] = [:]
         model[.currentState] = MenuItemModel(title: "State: \(view.primaryText)", isEnabled: false, isChecked: false, command: nil)
         model[.primaryConnection] = primaryConnection(for: status.state)
         model[.disconnect] = MenuItemModel(title: "Disconnect", isEnabled: [.connected, .connecting, .backoff, .error].contains(status.state), isChecked: false, command: .disconnect)
         model[.resetCredentials] = MenuItemModel(title: "Reset Credentials…", isEnabled: true, isChecked: false, command: nil)
-        model[.launchAtLogin] = MenuItemModel(title: "Launch at Login", isEnabled: true, isChecked: launchAtLogin == .enabled, command: nil)
+        model[.launchAtLogin] = launchAtLoginItem(for: launchAtLogin)
         model[.diagnostics] = MenuItemModel(title: "Diagnostics: \(sanitize(diagnostics))", isEnabled: true, isChecked: false, command: nil)
         model[.quit] = MenuItemModel(title: "Quit Menu App", isEnabled: true, isChecked: false, command: nil)
         return model
+    }
+
+    private static func launchAtLoginItem(for state: LoginItemState) -> MenuItemModel {
+        switch state {
+        case .enabled:
+            return MenuItemModel(title: "Launch at Login", isEnabled: true, isChecked: true, command: nil)
+        case .disabled:
+            return MenuItemModel(title: "Launch at Login", isEnabled: true, isChecked: false, command: nil)
+        case .approvalRequired:
+            return MenuItemModel(title: "Launch at Login (Open System Settings…)", isEnabled: true, isChecked: false, command: nil)
+        case .unavailable:
+            return MenuItemModel(title: "Launch at Login Unavailable", isEnabled: false, isChecked: false, command: nil)
+        }
     }
 
     private static func primaryConnection(for state: VPNConnectionState) -> MenuItemModel {
