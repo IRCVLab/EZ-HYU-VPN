@@ -348,12 +348,9 @@ struct InstallerController {
         ConsoleIdentity(user: NSUserName(), uid: String(getuid()))
     }
 
-    private func shellQuoted(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-
     private func runWithAdministratorPrivileges(_ argv: [String]) throws {
-        let shell = argv.map(shellQuoted).joined(separator: " ")
         do {
-            try run(["/usr/bin/osascript", "-e", "do shell script \(String(reflecting: shell)) with administrator privileges"], code: "INSTALL_FAILED_ROOT_AUTHORIZATION_OR_TRANSACTION")
+            try run(RootAdminAuthorizationScript.makeOSAScriptArgv(argv), code: "INSTALL_FAILED_ROOT_AUTHORIZATION_OR_TRANSACTION")
         } catch {
             throw InstallerCoreError.rootAuthorizationOrTransactionFailed
         }

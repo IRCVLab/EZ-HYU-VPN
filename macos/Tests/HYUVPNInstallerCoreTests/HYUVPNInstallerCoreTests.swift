@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import HYUVPNInstallerCore
 import HYUVPNMenuCore
@@ -122,6 +123,46 @@ private class MemoryCredentialStore: InstallerCredentialStoring {
         #expect(throws: InstallerCoreError.self) {
             _ = try RootAdminInvocation.makeInstallArgv(identity: ConsoleIdentity(user: "bad user", uid: "501"), installerDir: "/i", payload: "/p", manifest: "/m", stage: "/s", stageManifestSHA256: String(repeating: "a", count: 64), packageManifestSHA256: String(repeating: "b", count: 64), epoch: 1)
         }
+    }
+
+
+    @Test func rootAdminAppleScriptUsesFixedSourceAndPassesQuotedCommandAsArgv() throws {
+        let rootArgv = try RootAdminInvocation.makeInstallArgv(
+            identity: ConsoleIdentity(user: "alice", uid: "501"),
+            installerDir: "/Volumes/HYU VPN/O'Brien \"Installer\"/back\\slash/installer",
+            payload: "/Volumes/HYU VPN/O'Brien \"Payload\"/back\\slash",
+            manifest: "/Volumes/HYU VPN/O'Brien \"Payload\"/back\\slash/manifest.json",
+            stage: "/tmp/HYU stage/O'Brien \"Stage\"/back\\slash",
+            stageManifestSHA256: String(repeating: "a", count: 64),
+            packageManifestSHA256: String(repeating: "b", count: 64),
+            epoch: 1790000000
+        )
+        let argv = RootAdminAuthorizationScript.makeOSAScriptArgv(rootArgv)
+        #expect(argv.prefix(2) == ["/usr/bin/osascript", "-e"])
+        #expect(argv.contains("on run argv"))
+        #expect(argv.contains("do shell script (item 1 of argv) with administrator privileges"))
+        #expect(argv.contains("end run"))
+        #expect(argv.contains("--"))
+        #expect(argv.last?.contains("O'\"'\"'Brien") == true)
+        #expect(argv.last?.contains("\"Installer\"") == true)
+        #expect(argv.last?.contains("back\\slash") == true)
+        #expect(argv.dropLast().allSatisfy { !$0.contains("O'Brien") && !$0.contains("1790000000") })
+        #expect(!argv.joined(separator: " ").contains("String(reflecting:"))
+    }
+
+    @Test func rootAdminHarmlessAppleScriptParserVariantExecutesQuotedCommandViaArgv() throws {
+        let rootArgv = ["/bin/echo", "space value", "apostrophe'", "quote\"", "back\\slash"]
+        let argv = RootAdminAuthorizationScript.makeParserTestOSAScriptArgv(rootArgv)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: argv[0])
+        process.arguments = Array(argv.dropFirst())
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        process.waitUntilExit()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(process.terminationStatus == 0)
+        #expect(output == "space value apostrophe' quote\" back\\slash\n")
     }
 
     @Test func rootAuthorizationRunsOnceAndRollsBackOnlyNewKeysOnFailure() throws {

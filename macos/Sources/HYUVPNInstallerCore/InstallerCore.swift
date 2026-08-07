@@ -127,6 +127,43 @@ package enum RootAdminInvocation {
     }
 }
 
+package enum RootAdminAuthorizationScript {
+    private static let osascriptExecutable = "/usr/bin/osascript"
+    private static let privilegedSource = [
+        "on run argv",
+        "do shell script (item 1 of argv) with administrator privileges",
+        "end run",
+    ]
+    private static let parserTestSource = [
+        "on run argv",
+        "do shell script (item 1 of argv)",
+        "end run",
+    ]
+
+    package static func makeOSAScriptArgv(_ commandArgv: [String]) -> [String] {
+        makeOSAScriptArgv(source: privilegedSource, commandArgv: commandArgv)
+    }
+
+    package static func makeParserTestOSAScriptArgv(_ commandArgv: [String]) -> [String] {
+        makeOSAScriptArgv(source: parserTestSource, commandArgv: commandArgv)
+    }
+
+    private static func makeOSAScriptArgv(source: [String], commandArgv: [String]) -> [String] {
+        var argv = [osascriptExecutable]
+        for line in source {
+            argv.append("-e")
+            argv.append(line)
+        }
+        argv.append("--")
+        argv.append(commandArgv.map(posixShellQuoted).joined(separator: " "))
+        return argv
+    }
+
+    private static func posixShellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+}
+
 package enum RootAdminAuthorizer {
     package static func authorizeOnce(argv: [String], newlyCreatedKeys: [CredentialKey], store: InstallerCredentialStoring, authorize: ([String]) throws -> Void) throws {
         do {
