@@ -14,7 +14,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private var watcher: StatusWatcher?
     private var currentStatus: VPNStatus?
     private var currentPresentation = MenuPresentation(statusItemTitle: "", primaryText: "Status Unavailable", detailText: "", symbolName: "exclamationmark.shield.fill")
-    private var lastControlResult: ControlResult?
     private let control = SecureVPNControlClient()
     private var lifecycle = AppLifecycleCoordinator()
     private var startupRetryWorkItem: DispatchWorkItem?
@@ -109,7 +108,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         menu.addItem(NSMenuItem.separator())
         addResetAction(to: menu)
         addLaunchAtLoginAction(to: menu)
-        addDiagnosticsAction(to: menu)
         menu.addItem(NSMenuItem.separator())
         addQuitAction(to: menu)
         statusItem?.menu = menu
@@ -144,13 +142,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         item.target = self
         item.isEnabled = model.isEnabled
         item.state = model.isChecked ? .on : .off
-        menu.addItem(item)
-    }
-
-    private func addDiagnosticsAction(to menu: NSMenu) {
-        let item = NSMenuItem(title: "Diagnostics…", action: #selector(showDiagnostics), keyEquivalent: "")
-        item.target = self
-        item.isEnabled = !lifecycle.controlsDisabled
         menu.addItem(item)
     }
 
@@ -260,15 +251,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         rebuildMenu()
     }
 
-    @objc private func showDiagnostics() {
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "HYU VPN Diagnostics"
-        alert.informativeText = diagnosticsText()
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-
     @objc private func quit() {
         NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: nil, from: self)
     }
@@ -312,7 +294,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.lastControlResult = result
                 self.apply(self.lifecycle.handle(.controlCompleted(operation: operation, result: result)))
             }
         }
@@ -399,7 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
 
     private func loginItemMenuItemModel() -> MenuItemModel {
         if let status = currentStatus {
-            return MenuModel.make(status: status, diagnostics: "", launchAtLogin: loginItemState)[.launchAtLogin] ?? MenuItemModel(title: "Launch at Login Unavailable", isEnabled: false, isChecked: false, command: nil)
+            return MenuModel.make(status: status, launchAtLogin: loginItemState)[.launchAtLogin] ?? MenuItemModel(title: "Launch at Login Unavailable", isEnabled: false, isChecked: false, command: nil)
         }
         switch loginItemState {
         case .enabled:
@@ -413,31 +394,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         }
     }
 
-    private func diagnosticsText() -> String {
-        var lines = ["State: \(statusLineText())"]
-        if let tunnelInterface = currentStatus?.tunnelInterface {
-            lines.append("Tunnel Interface: \(tunnelInterface)")
-        }
-        if let backendError = currentStatus?.errorCode {
-            lines.append("Backend Error: \(backendError)")
-        }
-        lines.append("Last Control Result: \(normalizedControlResult(lastControlResult))")
-        lines.append("Login Item Result: \(lastLoginItemResult)")
-        if let buildVersion = currentStatus?.backendBuildVersion {
-            lines.append("Build Version: \(buildVersion)")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    private func normalizedControlResult(_ result: ControlResult?) -> String {
-        guard let result else { return "UNAVAILABLE" }
-        switch result.status {
-        case .ok:
-            return "CONTROL_OK"
-        case .timeout:
-            return result.errorCode ?? "CONTROL_TIMEOUT"
-        case .failed:
-            return result.errorCode ?? "CONTROL_FAILED"
-        }
-    }
 }

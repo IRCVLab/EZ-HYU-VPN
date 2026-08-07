@@ -100,21 +100,21 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
     }
 
     @Test func dynamicMenuModelUsesOnePrimaryActionAndNoExpiryActions() throws {
-        let connected = MenuModel.make(status: try status(state: .connected), diagnostics: "", launchAtLogin: .enabled)
+        let connected = MenuModel.make(status: try status(state: .connected), launchAtLogin: .enabled)
         #expect(connected[.primaryConnection]?.title == "Reconnect")
         #expect(connected[.primaryConnection]?.command == .reconnect)
         #expect(connected[.disconnect]?.isEnabled == true)
         #expect(connected[.launchAtLogin]?.isChecked == true)
-        #expect(MenuAction.allCases == [.currentState, .primaryConnection, .disconnect, .resetCredentials, .launchAtLogin, .diagnostics, .quit])
+        #expect(MenuAction.allCases == [.currentState, .primaryConnection, .disconnect, .resetCredentials, .launchAtLogin, .quit])
     }
 
     @Test func primaryActionConnectsOnlyFromDisabledAndReconnectsFromError() throws {
-        let disabled = MenuModel.make(status: try status(state: .disabled), diagnostics: "", launchAtLogin: .disabled)
+        let disabled = MenuModel.make(status: try status(state: .disabled), launchAtLogin: .disabled)
         #expect(disabled[.primaryConnection]?.title == "Connect")
         #expect(disabled[.primaryConnection]?.isEnabled == true)
         #expect(disabled[.primaryConnection]?.command == .connect)
 
-        let error = MenuModel.make(status: try status(state: .error), diagnostics: "", launchAtLogin: .disabled)
+        let error = MenuModel.make(status: try status(state: .error), launchAtLogin: .disabled)
         #expect(error[.primaryConnection]?.title == "Reconnect")
         #expect(error[.primaryConnection]?.isEnabled == true)
         #expect(error[.primaryConnection]?.command == .reconnect)
@@ -127,7 +127,7 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
             (.waitingForNetwork, "Waiting for Network"),
         ]
         for (state, title) in expected {
-            let menu = MenuModel.make(status: try status(state: state), diagnostics: "", launchAtLogin: .disabled)
+            let menu = MenuModel.make(status: try status(state: state), launchAtLogin: .disabled)
             #expect(menu[.primaryConnection]?.title == title)
             #expect(menu[.primaryConnection]?.isEnabled == false)
             #expect(menu[.primaryConnection]?.command == nil)

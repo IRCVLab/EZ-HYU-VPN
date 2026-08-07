@@ -365,7 +365,7 @@ package struct LoginItemController<Platform: LoginItemPlatforming>: LoginItemCon
         case .requiresApproval:
             return .approvalRequired
         case .notFound:
-            return .unavailable(code: "LOGIN_ITEM_NOT_FOUND")
+            return .disabled
         case .unknown(let code):
             return .unavailable(code: code)
         }

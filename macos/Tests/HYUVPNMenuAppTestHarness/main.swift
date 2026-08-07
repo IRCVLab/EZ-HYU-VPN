@@ -32,7 +32,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("bootstrap-splits-appkit-and-argument-gate", bootstrapSplitsAppKitAndArgumentGate),
                 ("control-tower-menu-copy-and-icon-contract", controlTowerMenuCopyAndIconContract),
                 ("lifecycle-coordinator-runtime", lifecycleCoordinatorRuntime),
-                ("safe-quit-and-diagnostics-contract", safeQuitAndDiagnosticsContract),
+                ("safe-quit-without-diagnostics-contract", safeQuitWithoutDiagnosticsContract),
                 ("watcher-initial-event-and-tick", watcherInitialEventAndTick),
                 ("bundle-assembler-produces-lsuielement-app", bundleAssembler),
                 ("canonical-production-status-path", canonicalProductionStatusPath),
@@ -180,23 +180,22 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
 
     static func dynamicMenuActionsAndChecks() throws {
         let connected = try VPNStatusDecoder.decode(statusData(automatic: true))
-        let menu = MenuModel.make(status: connected, diagnostics: "state=connected interface=utun7", launchAtLogin: .enabled)
+        let menu = MenuModel.make(status: connected, launchAtLogin: .enabled)
         try expect(menu[.currentState]?.title.contains("Connected") == true, "current state")
         try expect(menu[.primaryConnection]?.title == "Reconnect", "connected primary title")
         try expect(menu[.primaryConnection]?.command == .reconnect, "connected primary command")
         try expect(menu[.disconnect]?.isEnabled == true, "connected disconnect enabled")
         try expect(menu[.launchAtLogin]?.isChecked == true, "launch checked")
-        try expect(menu[.diagnostics]?.title.contains("password") == false, "diagnostics sanitized")
-        try expect(MenuAction.allCases == [.currentState, .primaryConnection, .disconnect, .resetCredentials, .launchAtLogin, .diagnostics, .quit], "menu actions")
-        let disabled = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .disabled, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
+        try expect(MenuAction.allCases == [.currentState, .primaryConnection, .disconnect, .resetCredentials, .launchAtLogin, .quit], "menu excludes diagnostics")
+        let disabled = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .disabled, expiry: nil, connectedAt: nil)), launchAtLogin: .disabled)
         try expect(disabled[.primaryConnection]?.title == "Connect", "disabled primary title")
         try expect(disabled[.primaryConnection]?.command == .connect, "disabled primary command")
         try expect(disabled[.disconnect]?.isEnabled == false, "disabled disconnect disabled")
-        let error = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .error, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
+        let error = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .error, expiry: nil, connectedAt: nil)), launchAtLogin: .disabled)
         try expect(error[.primaryConnection]?.title == "Reconnect", "error primary title")
         try expect(error[.primaryConnection]?.isEnabled == true, "error primary enabled")
         try expect(error[.primaryConnection]?.command == .reconnect, "error primary command")
-        let backoff = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .backoff, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
+        let backoff = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .backoff, expiry: nil, connectedAt: nil)), launchAtLogin: .disabled)
         try expect(backoff[.primaryConnection]?.title == "Reconnect Now", "backoff primary title")
         try expect(backoff[.primaryConnection]?.command == .reconnect, "backoff primary command")
     }
@@ -208,7 +207,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
             (.waitingForNetwork, "Waiting for Network"),
         ]
         for (state, title) in expected {
-            let menu = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: state, expiry: nil, connectedAt: nil)), diagnostics: "", launchAtLogin: .disabled)
+            let menu = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: state, expiry: nil, connectedAt: nil)), launchAtLogin: .disabled)
             try expect(menu[.primaryConnection]?.title == title, "transient title \(state.rawValue)")
             try expect(menu[.primaryConnection]?.isEnabled == false, "transient disabled \(state.rawValue)")
             try expect(menu[.primaryConnection]?.command == nil, "transient command nil \(state.rawValue)")
@@ -216,18 +215,19 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
     }
 
     static func loginItemStateProjectionsAndActions() throws {
-        let cases: [(FakeLoginItemStatus, LoginItemState, Bool, String)] = [
-            (.enabled, .enabled, true, "Launch at Login"),
-            (.notRegistered, .disabled, false, "Launch at Login"),
-            (.requiresApproval, .approvalRequired, false, "Launch at Login (Open System Settings…)") ,
-            (.notFound, .unavailable(code: "LOGIN_ITEM_NOT_FOUND"), false, "Launch at Login Unavailable"),
-            (.unknown(code: "LOGIN_ITEM_STATUS_UNKNOWN"), .unavailable(code: "LOGIN_ITEM_STATUS_UNKNOWN"), false, "Launch at Login Unavailable"),
+        let cases: [(FakeLoginItemStatus, LoginItemState, Bool, Bool, String)] = [
+            (.enabled, .enabled, true, true, "Launch at Login"),
+            (.notRegistered, .disabled, false, true, "Launch at Login"),
+            (.requiresApproval, .approvalRequired, false, true, "Launch at Login (Open System Settings…)") ,
+            (.notFound, .disabled, false, true, "Launch at Login"),
+            (.unknown(code: "LOGIN_ITEM_STATUS_UNKNOWN"), .unavailable(code: "LOGIN_ITEM_STATUS_UNKNOWN"), false, false, "Launch at Login Unavailable"),
         ]
-        for (status, state, checked, title) in cases {
+        for (status, state, checked, enabled, title) in cases {
             var controller = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: status))
             try expect(controller.state() == state, "state projection for \(status)")
-            let menu = MenuModel.make(status: try VPNStatusDecoder.decode(statusData()), diagnostics: "", launchAtLogin: state)
+            let menu = MenuModel.make(status: try VPNStatusDecoder.decode(statusData()), launchAtLogin: state)
             try expect(menu[.launchAtLogin]?.isChecked == checked, "menu check for \(status)")
+            try expect(menu[.launchAtLogin]?.isEnabled == enabled, "menu enabled state for \(status)")
             try expect(menu[.launchAtLogin]?.title == title, "menu title for \(status)")
         }
 
@@ -347,7 +347,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         for forbidden in ["countdown", "duration", "expiresAt", "sessionExpiresAt"] {
             try expect(!source.contains(forbidden), "no legacy expiry UI token \(forbidden)")
         }
-        for required in ["HYU VPN: Status Unavailable", "Diagnostics…", "Quit HYU VPN", "button.title = \"\"", "button.toolTip = textualState", "accessibilityDescription: textualState", "button.setAccessibilityLabel(textualState)", "button.setAccessibilityHelp(textualState)", "\"Connecting…\"", "\"Disconnecting…\"", "\"Waiting for Network\""] {
+        for required in ["HYU VPN: Status Unavailable", "Quit HYU VPN", "button.title = \"\"", "button.toolTip = textualState", "accessibilityDescription: textualState", "button.setAccessibilityLabel(textualState)", "button.setAccessibilityHelp(textualState)", "\"Connecting…\"", "\"Disconnecting…\"", "\"Waiting for Network\""] {
             try expect(source.contains(required), "menu/icon contract contains \(required)")
         }
         let rebuildStart = try requireIndex(of: "private func rebuildMenu()", in: source, message: "rebuildMenu exists")
@@ -361,7 +361,6 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
             "menu.addItem(NSMenuItem.separator())",
             "addResetAction(to: menu)",
             "addLaunchAtLoginAction(to: menu)",
-            "addDiagnosticsAction(to: menu)",
             "menu.addItem(NSMenuItem.separator())",
             "addQuitAction(to: menu)",
         ]
@@ -413,17 +412,17 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expect(terminateDisconnect.handle(.controlCompleted(operation: .disconnect, result: ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT"))).effects == [.replyToTermination(false), .showTerminationFailureAlert("CONTROL_TIMEOUT")], "failure replies false before alert")
     }
 
-    static func safeQuitAndDiagnosticsContract() throws {
+    static func safeQuitWithoutDiagnosticsContract() throws {
         let root = packageRoot().deletingLastPathComponent()
         let appSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
         let coreSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuCore/ControlTowerCore.swift"))
-        for required in ["applicationShouldTerminate", ".terminateLater", ".terminateNow", ".replyToTermination(let allow)", "NSApp.reply(toApplicationShouldTerminate: allow)", "NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: nil, from: self)", "State:", "Tunnel Interface:", "Backend Error:", "Last Control Result:", "Build Version:"] {
-            try expect(appSource.contains(required), "safe quit/diagnostics contract contains \(required)")
+        for required in ["applicationShouldTerminate", ".terminateLater", ".terminateNow", ".replyToTermination(let allow)", "NSApp.reply(toApplicationShouldTerminate: allow)", "NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: nil, from: self)"] {
+            try expect(appSource.contains(required), "safe quit contract contains \(required)")
         }
         try expect(coreSource.contains("timeout: 15"), "quit disconnect timeout remains 15 seconds in core coordinator")
         try expect(coreSource.contains(".replyToTermination(false), .showTerminationFailureAlert"), "reply(false) is ordered before alert effect")
-        for forbidden in ["NSApp.terminate(nil)", "password", "otp", "cookie", "authcookie", "seed", "username", "gateway", "MAC"] {
-            try expect(!appSource.contains(forbidden), "safe quit/diagnostics omits forbidden token \(forbidden)")
+        for forbidden in ["NSApp.terminate(nil)", "addDiagnosticsAction", "showDiagnostics", "Diagnostics…"] {
+            try expect(!appSource.contains(forbidden), "safe quit menu omits forbidden token \(forbidden)")
         }
     }
 
@@ -796,7 +795,7 @@ time.sleep(20)
         let controllerSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/CredentialResetController.swift"))
         try expect(appSource.contains("Reset Login Information…"), "exact reset menu copy present")
         try expect(appSource.range(of: "Disconnect")!.lowerBound < appSource.range(of: "Reset Login Information…")!.lowerBound, "reset follows disconnect")
-        try expect(appSource.range(of: "Reset Login Information…")!.lowerBound < appSource.range(of: "Diagnostics…")!.lowerBound, "reset precedes diagnostics")
+        try expect(appSource.range(of: "Reset Login Information…")!.lowerBound < appSource.range(of: "Launch at Login")!.lowerBound, "reset precedes launch at login")
         for label in ["HYU ID", "Password", "Confirm Password", "TOTP Setup Secret", "Confirm TOTP Secret"] {
             try expect(controllerSource.contains(label), "native sheet contains label \(label)")
         }
