@@ -6,7 +6,6 @@ import HYUVPNInstallerCore
 import HYUVPNMenuAppSupport
 import HYUVPNMenuCore
 
-@main
 @MainActor
 final class HYUVPNInstallerApp: NSObject, NSApplicationDelegate {
     private let app = NSApplication.shared
@@ -102,6 +101,13 @@ final class HYUVPNInstallerApp: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
+}
+
+let application = NSApplication.shared
+let delegate = HYUVPNInstallerApp()
+application.delegate = delegate
+withExtendedLifetime(delegate) {
+    application.run()
 }
 
 enum InstallerAppError: Error, CustomStringConvertible {

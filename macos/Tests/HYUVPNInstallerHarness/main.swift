@@ -93,6 +93,17 @@ private func activationPolicyClassifiesMenuStartAsWarning() throws {
     try expect(InstallerActivationPolicy.classify(serviceStarted: false, failedCode: "SERVICE_KICKSTART_FAILED") == .fatalCleanupCredentials(code: "SERVICE_KICKSTART_FAILED"), "pre-service failure remains fatal")
 }
 
+
+private func installerAppUsesExplicitAppKitDelegateBootstrap() throws {
+    let source = try String(contentsOfFile: "macos/Sources/HYUVPNInstallerApp/main.swift", encoding: .utf8)
+    try expect(!source.contains("@main"), "installer app must not rely on @main AppKit delegate discovery")
+    try expect(source.contains("let application = NSApplication.shared"), "installer app creates NSApplication.shared explicitly")
+    try expect(source.contains("let delegate = HYUVPNInstallerApp()"), "installer app creates a strong delegate explicitly")
+    try expect(source.contains("application.delegate = delegate"), "installer app assigns NSApplication delegate explicitly")
+    try expect(source.contains("withExtendedLifetime(delegate)"), "installer app keeps delegate alive while running")
+    try expect(source.contains("application.run()"), "installer app starts AppKit run loop explicitly")
+}
+
 private func privilegedArgvAndSingleAuthorization() throws {
     let argv = try RootAdminInvocation.makeInstallArgv(
         identity: ConsoleIdentity(user: "alice", uid: "501"), installerDir: "/installer", payload: "/payload", manifest: "/payload/manifest.json", stage: "/stage",
@@ -116,6 +127,7 @@ do {
     try activationFailureCleanupOnlyWrittenKeys()
     try cleanupIncompleteStillAttemptsLaterKeys()
     try activationPolicyClassifiesMenuStartAsWarning()
+    try installerAppUsesExplicitAppKitDelegateBootstrap()
     try privilegedArgvAndSingleAuthorization()
     print("HARNESS PASS hyu-vpn-installer-harness")
 } catch {
