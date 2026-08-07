@@ -37,7 +37,9 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws { do { tr
                 ("term-ignoring-descendant-closes-fds-still-killed", termIgnoringDescendantClosesFDsStillKilled),
                 ("cleanup-reap-is-bounded", cleanupReapIsBounded),
                 ("menu-core-has-no-direct-foundation-process-run-surface", menuCoreHasNoDirectFoundationProcessRunSurface),
-                ("spawn-setup-seam-is-not-public-production-api", spawnSetupSeamIsNotPublicProductionAPI)
+                ("spawn-setup-seam-is-not-public-production-api", spawnSetupSeamIsNotPublicProductionAPI),
+                ("control-tower-credential-validation", controlTowerCredentialValidation),
+                ("control-tower-transaction-policy-gate", controlTowerTransactionPolicyGate)
             ]
             for (name, test) in tests { print("RUN \(name)"); try test(); print("PASS \(name)") }
             print("HARNESS PASS \(tests.count) tests")
@@ -445,7 +447,55 @@ time.sleep(20)
         try expect(source.contains("defer { if attrsInitialized { posix_spawnattr_destroy(&attrs) } }"), "attrs cleanup registered independently")
     }
 
+    static func controlTowerCredentialValidation() throws {
+        let valid = CredentialResetInput(username: "shchoi00", password: "correct horse", passwordConfirmation: "correct horse", totpSeed: "jbsw y3dp-ehpk3pxp", totpSeedConfirmation: "JBSWY3DPEHPK3PXP")
+        let normalized = try CredentialValidator.validate(valid)
+        try expect(normalized.normalizedTOTPSeed == "JBSWY3DPEHPK3PXP", "normalized seed")
+        let retained = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: "", totpSeedConfirmation: ""))
+        try expect(retained.normalizedTOTPSeed == nil, "blank seed retention")
+        try expectThrows("password mismatch") { _ = try CredentialValidator.validate(CredentialResetInput(username: "canary-user", password: "canary-pass", passwordConfirmation: "different", totpSeed: "", totpSeedConfirmation: "")) }
+        let errors: [CredentialValidationError] = [.passwordMismatch, .totpSeedMismatch, .totpSeedInvalidAlphabetOrPadding]
+        try expect(errors.allSatisfy { !$0.description.contains("canary") && !$0.code.contains("canary") }, "stable redacted validation errors")
+    }
+
+    static func controlTowerTransactionPolicyGate() throws {
+        let store = HarnessCredentialStore(initial: [.username: "old-user", .password: "old-pass", .totpSeed: "OLDTOTPSEEDVALUE1"], failOnWriteCall: 3)
+        let resetter = HarnessTOTPResetter()
+        var reconnects = 0
+        let failed = CredentialTransaction(store: store, totpResetter: resetter) { reconnects += 1 }.apply(ValidatedCredentials(username: "canary-user", password: "canary-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
+        try expect(failed == .failure(code: .writeFailed), "third write failure")
+        try expect(store.values[.username] == "old-user" && store.values[.password] == "old-pass" && store.values[.totpSeed] == "OLDTOTPSEEDVALUE1", "rollback restored originals")
+        try expect(reconnects == 0 && resetter.resetCount == 0, "no reconnect or reset after failed transaction")
+        let successResetter = HarnessTOTPResetter()
+        let success = CredentialTransaction(store: HarnessCredentialStore(initial: [:]), totpResetter: successResetter) { reconnects += 1 }.apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
+        try expect(success == .success && successResetter.resetCount == 1 && reconnects == 1, "success resets after commit and reconnects once")
+        var policy = StartupConnectPolicy()
+        for _ in 0..<30 { try expect(policy.next(after: .controlUnavailable) == .retry(after: 1), "transient retry before bound") }
+        try expect(policy.next(after: .controlUnavailable) == .stop, "thirty attempt bound")
+        var failurePolicy = StartupConnectPolicy()
+        try expect(failurePolicy.next(after: .failure(code: "AUTH_FAILED")) == .stop, "non-transient stop")
+        var gate = OperationGate()
+        try expect(gate.begin(.connect), "first operation begins")
+        try expect(!gate.begin(.credentialSave) && !gate.begin(.quit), "overlap rejected")
+        gate.finish(.connect)
+        try expect(gate.begin(.quit), "finish permits new operation")
+        try expect(LoginItemState.approvalRequired == .approvalRequired, "login item model available")
+    }
+
 }
+
+
+final class HarnessCredentialStore: CredentialStore {
+    enum StoreFailure: Error { case injected }
+    var values: [CredentialKey: String?]
+    private let failOnWriteCall: Int?
+    private var writeCalls = 0
+    init(initial: [CredentialKey: String], failOnWriteCall: Int? = nil) { self.values = initial.mapValues { Optional($0) }; self.failOnWriteCall = failOnWriteCall }
+    func read(_ key: CredentialKey) throws -> String? { values[key] ?? nil }
+    func write(_ value: String, for key: CredentialKey) throws { writeCalls += 1; if writeCalls == failOnWriteCall { throw StoreFailure.injected }; values[key] = value }
+    func remove(_ key: CredentialKey) throws { values.removeValue(forKey: key) }
+}
+final class HarnessTOTPResetter: TOTPStateResetting { private(set) var resetCount = 0; func resetTOTPState() throws { resetCount += 1 } }
 
 struct FakeMetadata: FileMetadataProviding {
     var ownerUID: uid_t; var fileMode: mode_t; var parentMode: mode_t; var isSymlink: Bool; var isRegular: Bool

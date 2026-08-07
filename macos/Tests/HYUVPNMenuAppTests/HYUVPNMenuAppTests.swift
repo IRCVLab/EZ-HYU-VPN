@@ -198,3 +198,171 @@ final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
     func makePipe(_ fds: inout [Int32]) -> Int32 { calls += 1; if calls == failOnCall { errno = EMFILE; return -1 }; let result = pipe(&fds); if result == 0 { openDescriptors.insert(fds[0]); openDescriptors.insert(fds[1]) }; return result }
     func close(_ fd: Int32) { openDescriptors.remove(fd); Darwin.close(fd) }
 }
+
+@Suite struct ControlTowerCoreTests {
+    private func input(
+        username: String = "shchoi00",
+        password: String = "correct horse",
+        passwordConfirmation: String = "correct horse",
+        totpSeed: String = "",
+        totpSeedConfirmation: String = ""
+    ) -> CredentialResetInput {
+        CredentialResetInput(username: username, password: password, passwordConfirmation: passwordConfirmation, totpSeed: totpSeed, totpSeedConfirmation: totpSeedConfirmation)
+    }
+
+    @Test func credentialValidationNormalizesValidSeedAndRetainsBlankSeed() throws {
+        let good = input(totpSeed: "jbsw y3dp-ehpk3pxp", totpSeedConfirmation: "JBSWY3DPEHPK3PXP")
+        let validated = try CredentialValidator.validate(good)
+        #expect(validated.username == "shchoi00")
+        #expect(validated.password == "correct horse")
+        #expect(validated.normalizedTOTPSeed == "JBSWY3DPEHPK3PXP")
+        #expect(try CredentialValidator.validate(input(totpSeed: "", totpSeedConfirmation: "")).normalizedTOTPSeed == nil)
+    }
+
+    @Test func credentialValidationRejectsPasswordAndUsernameBoundsWithoutSecrets() {
+        let canaryUser = "canaryUser42"
+        let canaryPassword = "canaryPassword42"
+        let cases: [(CredentialValidationError, CredentialResetInput)] = [
+            (.usernameRequired, input(username: "")),
+            (.usernameTooLong, input(username: String(repeating: "u", count: 129))),
+            (.usernameContainsControlCharacter, input(username: "bad\u{7f}")),
+            (.passwordRequired, input(password: "", passwordConfirmation: "")),
+            (.passwordTooLong, input(password: String(repeating: "é", count: 513), passwordConfirmation: String(repeating: "é", count: 513))),
+            (.passwordContainsDisallowedCharacter, input(password: "one\n", passwordConfirmation: "one\n")),
+            (.passwordContainsDisallowedCharacter, input(password: "one\r", passwordConfirmation: "one\r")),
+            (.passwordContainsDisallowedCharacter, input(password: "one\u{0}", passwordConfirmation: "one\u{0}")),
+            (.passwordMismatch, input(username: canaryUser, password: canaryPassword, passwordConfirmation: "different")),
+        ]
+        for (expected, value) in cases {
+            #expect(throws: expected) { try CredentialValidator.validate(value) }
+            let description = expected.description
+            #expect(!description.contains(canaryUser))
+            #expect(!description.contains(canaryPassword))
+        }
+    }
+
+    @Test func credentialValidationRejectsTotpErrorsAndRedactsSubmittedValues() {
+        let canarySeed = "JBSWY3DPEHPK3PXP"
+        let cases: [(CredentialValidationError, CredentialResetInput)] = [
+            (.totpSeedRequired, input(totpSeed: canarySeed, totpSeedConfirmation: "")),
+            (.totpSeedRequired, input(totpSeed: "", totpSeedConfirmation: canarySeed)),
+            (.totpSeedMismatch, input(totpSeed: canarySeed, totpSeedConfirmation: "JBSWY3DPEHPK3PXQ")),
+            (.totpSeedInvalidAlphabetOrPadding, input(totpSeed: "JBSWY3DPEHPK3PX!", totpSeedConfirmation: "JBSWY3DPEHPK3PX!")),
+            (.totpSeedInvalidAlphabetOrPadding, input(totpSeed: "JBSWY3DP=EHPK3PXP", totpSeedConfirmation: "JBSWY3DP=EHPK3PXP")),
+            (.totpSeedTooShort, input(totpSeed: "JBSWY3DPEHPK3PX", totpSeedConfirmation: "JBSWY3DPEHPK3PX")),
+            (.totpSeedTooLong, input(totpSeed: String(repeating: "A", count: 257), totpSeedConfirmation: String(repeating: "A", count: 257))),
+            (.totpSeedLooksLikeOneTimeCode, input(totpSeed: "123456", totpSeedConfirmation: "123456")),
+        ]
+        for (expected, value) in cases {
+            #expect(throws: expected) { try CredentialValidator.validate(value) }
+            #expect(!expected.description.contains(canarySeed))
+            #expect(!expected.code.contains(canarySeed))
+        }
+    }
+
+    @Test func credentialTransactionRollsBackWritesRedactsErrorsAndDoesNotReconnectOnFailure() throws {
+        let store = RecordingCredentialStore(initial: [.username: "old-user", .password: "old-pass", .totpSeed: "OLDTOTPSEEDVALUE1"], failOnWriteCall: 3)
+        let resetter = RecordingTOTPResetter()
+        var reconnects = 0
+        let transaction = CredentialTransaction(store: store, totpResetter: resetter) { reconnects += 1 }
+        let result = transaction.apply(ValidatedCredentials(username: "canary-user", password: "canary-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
+        #expect(result == .failure(code: .writeFailed))
+        #expect(store.values[.username] == "old-user")
+        #expect(store.values[.password] == "old-pass")
+        #expect(store.values[.totpSeed] == "OLDTOTPSEEDVALUE1")
+        #expect(store.events.suffix(2) == ["write:password:old-pass", "write:username:old-user"])
+        #expect(resetter.resetCount == 0)
+        #expect(reconnects == 0)
+        #expect(!result.description.contains("canary-user"))
+        #expect(!result.description.contains("canary-pass"))
+        #expect(!result.description.contains("JBSWY3DPEHPK3PXP"))
+    }
+
+    @Test func credentialTransactionRemovesOriginallyAbsentKeysDuringRollback() {
+        let store = RecordingCredentialStore(initial: [:], failOnWriteCall: 2)
+        let result = CredentialTransaction(store: store, totpResetter: RecordingTOTPResetter()).apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: nil))
+        #expect(result == .failure(code: .writeFailed))
+        #expect(store.values[.username] == nil)
+        #expect(store.events.contains("remove:username"))
+    }
+
+    @Test func credentialTransactionResetsTotpOnlyAfterNewSeedCommitAndReconnectsAfterFullSuccess() {
+        let resetter = RecordingTOTPResetter()
+        var reconnects = 0
+        let transaction = CredentialTransaction(store: RecordingCredentialStore(initial: [.username: "old", .password: "old"]), totpResetter: resetter) { reconnects += 1 }
+        let result = transaction.apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
+        #expect(result == .success)
+        #expect(resetter.resetCount == 1)
+        #expect(reconnects == 1)
+
+        let retainResetter = RecordingTOTPResetter()
+        let retainResult = CredentialTransaction(store: RecordingCredentialStore(initial: [:]), totpResetter: retainResetter).apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: nil))
+        #expect(retainResult == .success)
+        #expect(retainResetter.resetCount == 0)
+    }
+
+    @Test func startupPolicyRetriesOnlyTransientOutcomesAndStopsAtThirtyAttempts() {
+        var policy = StartupConnectPolicy()
+        #expect(policy.next(after: .controlUnavailable) == .retry(after: 1))
+        #expect(policy.next(after: .launchFailure) == .retry(after: 1))
+        for _ in 2..<30 { _ = policy.next(after: .controlUnavailable) }
+        #expect(policy.next(after: .controlUnavailable) == .stop)
+        var successPolicy = StartupConnectPolicy()
+        #expect(successPolicy.next(after: .success) == .stop)
+        var failurePolicy = StartupConnectPolicy()
+        #expect(failurePolicy.next(after: .failure(code: "AUTH_FAILED")) == .stop)
+    }
+
+    @Test func operationGateRejectsOverlappingOperationsUntilFinish() {
+        var gate = OperationGate()
+        let first = gate.begin(.disconnect)
+        let overlappingQuit = gate.begin(.quit)
+        let duplicateDisconnect = gate.begin(.disconnect)
+        gate.finish(.quit)
+        let stillBlocked = gate.begin(.connect)
+        gate.finish(.disconnect)
+        let afterFinish = gate.begin(.quit)
+        #expect(first)
+        #expect(!overlappingQuit)
+        #expect(!duplicateDisconnect)
+        #expect(!stillBlocked)
+        #expect(afterFinish)
+    }
+
+    @Test func loginItemStateIsFrameworkFreeEquatableModel() {
+        #expect(LoginItemState.enabled != .disabled)
+        #expect(LoginItemState.approvalRequired == .approvalRequired)
+        #expect(LoginItemState.unavailable(code: "SM_UNAVAILABLE") == .unavailable(code: "SM_UNAVAILABLE"))
+    }
+}
+
+final class RecordingCredentialStore: CredentialStore {
+    enum StoreFailure: Error { case injected }
+    var values: [CredentialKey: String?]
+    var events: [String] = []
+    private let failOnWriteCall: Int?
+    private var writeCalls = 0
+    init(initial: [CredentialKey: String], failOnWriteCall: Int? = nil) {
+        self.values = initial.mapValues { Optional($0) }
+        self.failOnWriteCall = failOnWriteCall
+    }
+    func read(_ key: CredentialKey) throws -> String? {
+        events.append("read:\(key.rawValue)")
+        return values[key] ?? nil
+    }
+    func write(_ value: String, for key: CredentialKey) throws {
+        writeCalls += 1
+        events.append("write:\(key.rawValue):\(value)")
+        if writeCalls == failOnWriteCall { throw StoreFailure.injected }
+        values[key] = value
+    }
+    func remove(_ key: CredentialKey) throws {
+        events.append("remove:\(key.rawValue)")
+        values.removeValue(forKey: key)
+    }
+}
+
+final class RecordingTOTPResetter: TOTPStateResetting {
+    private(set) var resetCount = 0
+    func resetTOTPState() throws { resetCount += 1 }
+}
