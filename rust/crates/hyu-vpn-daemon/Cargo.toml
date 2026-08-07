@@ -1,0 +1,18 @@
+[package]
+name = "hyu-vpn-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+hyu-vpn-core = { path = "../hyu-vpn-core" }
+hyu-vpn-protocol = { path = "../hyu-vpn-protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

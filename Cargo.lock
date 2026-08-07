@@ -228,6 +228,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyu-vpn-daemon"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "hyu-vpn-core",
+ "hyu-vpn-protocol",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "hyu-vpn-protocol"
 version = "0.2.0"
 dependencies = [

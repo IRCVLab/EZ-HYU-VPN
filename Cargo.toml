@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "rust/crates/hyu-vpn-core",
+    "rust/crates/hyu-vpn-daemon",
     "rust/crates/hyu-vpn-protocol",
 ]
 
