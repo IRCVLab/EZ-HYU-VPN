@@ -1,14 +1,21 @@
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use hyu_vpn_core::openconnect::{ConnectorConfig, ConnectorConfigError, build_openconnect_args};
 use hyu_vpn_protocol::Credentials;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, watch};
 use zeroize::Zeroizing;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchError {
     #[error("invalid OpenConnect launch configuration")]
     InvalidConfiguration,
+    #[error("OpenConnect process failed")]
+    ProcessFailed,
 }
 
 impl From<ConnectorConfigError> for LaunchError {
@@ -17,6 +24,7 @@ impl From<ConnectorConfigError> for LaunchError {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct OpenConnectLaunch {
     pub executable: PathBuf,
     pub argv: Vec<String>,
@@ -63,9 +71,237 @@ impl OpenConnectLaunch {
         })
     }
 
+    pub fn production() -> Result<Self, LaunchError> {
+        let config = ConnectorConfig {
+            executable: "/usr/sbin/openconnect".into(),
+            portal: "secure.hanyang.ac.kr".to_owned(),
+            authgroup: "HYU-ExternalGW-General".to_owned(),
+            vpnc_script: "/usr/share/vpnc-scripts/vpnc-script".into(),
+            hip_wrapper: "/usr/lib/hyu-vpn/hyu-vpn-hip".into(),
+        };
+        Ok(Self {
+            executable: config.executable.clone(),
+            argv: build_openconnect_args(&config)?,
+            environment: Vec::new(),
+            stdin: Zeroizing::new(Vec::new()),
+        })
+    }
+
+    pub fn from_parts(executable: &str, argv: Vec<String>) -> Result<Self, LaunchError> {
+        if !valid_executable(executable)
+            || argv.iter().any(|value| value.chars().any(char::is_control))
+        {
+            return Err(LaunchError::InvalidConfiguration);
+        }
+        Ok(Self {
+            executable: executable.into(),
+            argv,
+            environment: Vec::new(),
+            stdin: Zeroizing::new(Vec::new()),
+        })
+    }
+
     pub fn stdin_payload(&self) -> &[u8] {
         self.stdin.as_slice()
     }
+}
+
+#[async_trait]
+pub trait ChallengeCodeProvider: Send + Sync {
+    async fn next_code(&self) -> Result<Zeroizing<String>, LaunchError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractiveOutcome {
+    pub return_code: i32,
+    pub runtime_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptKind {
+    Username,
+    Password,
+    Challenge,
+}
+
+#[derive(Default)]
+struct PromptDetector {
+    tail: Vec<u8>,
+}
+
+impl PromptDetector {
+    fn feed(&mut self, chunk: &[u8]) -> Option<PromptKind> {
+        self.tail.extend_from_slice(chunk);
+        if self.tail.len() > 512 {
+            self.tail.drain(..self.tail.len() - 512);
+        }
+        let segment = self
+            .tail
+            .rsplit(|byte| matches!(byte, b'\n' | b'\r'))
+            .next()
+            .unwrap_or_default();
+        let compact = String::from_utf8_lossy(segment)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        let prompt = if compact.ends_with("username:") {
+            Some(PromptKind::Username)
+        } else if compact.ends_with("password:") {
+            Some(PromptKind::Password)
+        } else if compact.ends_with("challenge:") {
+            Some(PromptKind::Challenge)
+        } else {
+            None
+        };
+        if prompt.is_some() {
+            self.tail.clear();
+        }
+        prompt
+    }
+}
+
+pub async fn run_interactive_openconnect<P>(
+    launch: OpenConnectLaunch,
+    credentials: &Credentials,
+    codes: &P,
+    mut stop: watch::Receiver<bool>,
+) -> Result<InteractiveOutcome, LaunchError>
+where
+    P: ChallengeCodeProvider,
+{
+    if !valid_executable(launch.executable.to_string_lossy().as_ref()) {
+        return Err(LaunchError::InvalidConfiguration);
+    }
+    let mut command = tokio::process::Command::new(&launch.executable);
+    command
+        .args(&launch.argv)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for (key, value) in &launch.environment {
+        command.env(key, value);
+    }
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|_| LaunchError::ProcessFailed)?;
+    let pid = child.id().ok_or(LaunchError::ProcessFailed)?;
+    let mut stdin = child.stdin.take().ok_or(LaunchError::ProcessFailed)?;
+    write_line(&mut stdin, credentials.password().as_bytes()).await?;
+
+    let stdout = child.stdout.take().ok_or(LaunchError::ProcessFailed)?;
+    let stderr = child.stderr.take().ok_or(LaunchError::ProcessFailed)?;
+    let (output_tx, mut output_rx) = mpsc::channel::<(usize, Vec<u8>)>(16);
+    tokio::spawn(pump_output(0, stdout, output_tx.clone()));
+    tokio::spawn(pump_output(1, stderr, output_tx));
+    let mut detectors = [PromptDetector::default(), PromptDetector::default()];
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|_| LaunchError::ProcessFailed)? {
+            break status;
+        }
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    terminate_group(pid, libc::SIGTERM);
+                    let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                        Ok(Ok(status)) => status,
+                        _ => {
+                            terminate_group(pid, libc::SIGKILL);
+                            child.wait().await.map_err(|_| LaunchError::ProcessFailed)?
+                        }
+                    };
+                    break status;
+                }
+            }
+            output = output_rx.recv() => {
+                if let Some((source, chunk)) = output {
+                    if let Some(prompt) = detectors[source].feed(&chunk) {
+                        match prompt {
+                            PromptKind::Username => write_line(&mut stdin, credentials.username().as_bytes()).await?,
+                            PromptKind::Password => write_line(&mut stdin, credentials.password().as_bytes()).await?,
+                            PromptKind::Challenge => {
+                                let code = codes.next_code().await?;
+                                write_line(&mut stdin, code.as_bytes()).await?;
+                            }
+                        }
+                    }
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    };
+    let return_code = status.code().unwrap_or_else(|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal().map_or(1, |signal| 128 + signal)
+        }
+        #[cfg(not(unix))]
+        {
+            1
+        }
+    });
+    Ok(InteractiveOutcome {
+        return_code,
+        runtime_seconds: started.elapsed().as_secs(),
+    })
+}
+
+async fn pump_output<R>(source: usize, mut reader: R, output: mpsc::Sender<(usize, Vec<u8>)>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        if output
+            .send((source, buffer[..read].to_vec()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+async fn write_line(
+    stdin: &mut tokio::process::ChildStdin,
+    value: &[u8],
+) -> Result<(), LaunchError> {
+    if value.is_empty() || value.len() > 4096 || value.contains(&b'\n') || value.contains(&b'\r') {
+        return Err(LaunchError::InvalidConfiguration);
+    }
+    stdin
+        .write_all(value)
+        .await
+        .map_err(|_| LaunchError::ProcessFailed)?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|_| LaunchError::ProcessFailed)?;
+    stdin.flush().await.map_err(|_| LaunchError::ProcessFailed)
+}
+
+fn terminate_group(pid: u32, signal: i32) {
+    unsafe {
+        libc::kill(-(pid as i32), signal);
+    }
+}
+
+fn valid_executable(executable: &str) -> bool {
+    executable.starts_with('/') && !executable.chars().any(char::is_control)
 }
 
 pub struct ManagedChild {
@@ -79,10 +315,7 @@ impl ManagedChild {
         argv: &[&str],
         stdin_payload: &[u8],
     ) -> Result<Self, LaunchError> {
-        use std::process::Stdio;
-        use tokio::io::AsyncWriteExt;
-
-        if !executable.starts_with('/') || executable.chars().any(char::is_control) {
+        if !valid_executable(executable) {
             return Err(LaunchError::InvalidConfiguration);
         }
         let mut command = tokio::process::Command::new(executable);
@@ -101,19 +334,17 @@ impl ManagedChild {
                 Ok(())
             });
         }
-        let mut child = command
-            .spawn()
-            .map_err(|_| LaunchError::InvalidConfiguration)?;
-        let pid = child.id().ok_or(LaunchError::InvalidConfiguration)?;
+        let mut child = command.spawn().map_err(|_| LaunchError::ProcessFailed)?;
+        let pid = child.id().ok_or(LaunchError::ProcessFailed)?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(stdin_payload)
                 .await
-                .map_err(|_| LaunchError::InvalidConfiguration)?;
+                .map_err(|_| LaunchError::ProcessFailed)?;
             stdin
                 .shutdown()
                 .await
-                .map_err(|_| LaunchError::InvalidConfiguration)?;
+                .map_err(|_| LaunchError::ProcessFailed)?;
         }
         Ok(Self { child, pid })
     }
@@ -122,22 +353,17 @@ impl ManagedChild {
         self.pid
     }
 
-    pub async fn terminate(mut self, timeout: std::time::Duration) -> Result<(), LaunchError> {
-        let process_group = -(self.pid as i32);
-        unsafe {
-            libc::kill(process_group, libc::SIGTERM);
-        }
+    pub async fn terminate(mut self, timeout: Duration) -> Result<(), LaunchError> {
+        terminate_group(self.pid, libc::SIGTERM);
         if tokio::time::timeout(timeout, self.child.wait())
             .await
             .is_err()
         {
-            unsafe {
-                libc::kill(process_group, libc::SIGKILL);
-            }
+            terminate_group(self.pid, libc::SIGKILL);
             self.child
                 .wait()
                 .await
-                .map_err(|_| LaunchError::InvalidConfiguration)?;
+                .map_err(|_| LaunchError::ProcessFailed)?;
         }
         Ok(())
     }

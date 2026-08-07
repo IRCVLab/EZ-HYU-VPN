@@ -1,0 +1,11 @@
+[package]
+name = "hyu-vpn-hip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hyu-vpn-platform-linux = { path = "../../crates/hyu-vpn-platform-linux" }
+thiserror.workspace = true
+time.workspace = true

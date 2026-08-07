@@ -121,3 +121,61 @@ impl NetworkMonitor for LinuxRouteMonitor {
         }
     }
 }
+
+pub struct LinuxPortalProbe {
+    host: String,
+    port: u16,
+    timeout: Duration,
+}
+
+impl LinuxPortalProbe {
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<Self, NetworkProbeError> {
+        let host = host.into();
+        if host.is_empty()
+            || host.len() > 253
+            || host.chars().any(char::is_control)
+            || port == 0
+            || timeout.is_zero()
+        {
+            return Err(NetworkProbeError::ProbeFailed);
+        }
+        Ok(Self {
+            host,
+            port,
+            timeout: timeout.min(Duration::from_secs(10)),
+        })
+    }
+
+    pub fn production() -> Self {
+        Self::new("secure.hanyang.ac.kr", 443, Duration::from_secs(3))
+            .expect("fixed portal probe configuration must be valid")
+    }
+}
+
+#[async_trait]
+impl hyu_vpn_core::ports::PortalProbe for LinuxPortalProbe {
+    async fn reachable(&self, _identity: &NetworkIdentity) -> Result<bool, NetworkProbeError> {
+        let addresses = match tokio::time::timeout(
+            self.timeout,
+            tokio::net::lookup_host((self.host.as_str(), self.port)),
+        )
+        .await
+        {
+            Ok(Ok(addresses)) => addresses.collect::<Vec<_>>(),
+            _ => return Ok(false),
+        };
+        for address in addresses.into_iter().take(8) {
+            if matches!(
+                tokio::time::timeout(self.timeout, tokio::net::TcpStream::connect(address)).await,
+                Ok(Ok(_))
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}

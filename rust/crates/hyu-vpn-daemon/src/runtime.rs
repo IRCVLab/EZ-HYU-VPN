@@ -29,6 +29,23 @@ pub trait CredentialRepository: Send + Sync {
     fn replace(&self, credentials: Credentials) -> Result<(), RepositoryError>;
 }
 
+impl<T> CredentialRepository for std::sync::Arc<T>
+where
+    T: CredentialRepository + ?Sized,
+{
+    fn present(&self) -> Result<bool, RepositoryError> {
+        (**self).present()
+    }
+
+    fn load(&self) -> Result<Credentials, RepositoryError> {
+        (**self).load()
+    }
+
+    fn replace(&self, credentials: Credentials) -> Result<(), RepositoryError> {
+        (**self).replace(credentials)
+    }
+}
+
 pub trait SystemClock: Send + Sync {
     fn now(&self) -> SystemTime;
 }
@@ -42,6 +59,7 @@ pub struct DaemonRuntime<R, C, E> {
     control_plane: std::sync::Arc<ControlPlane<R, C>>,
     actions: mpsc::UnboundedReceiver<EngineAction>,
     executor: std::sync::Arc<E>,
+    external_events: Option<mpsc::UnboundedReceiver<EngineEvent>>,
 }
 
 impl<R, C, E> DaemonRuntime<R, C, E>
@@ -59,6 +77,21 @@ where
             control_plane,
             actions,
             executor,
+            external_events: None,
+        }
+    }
+
+    pub fn new_with_events(
+        control_plane: std::sync::Arc<ControlPlane<R, C>>,
+        actions: mpsc::UnboundedReceiver<EngineAction>,
+        external_events: mpsc::UnboundedReceiver<EngineEvent>,
+        executor: std::sync::Arc<E>,
+    ) -> Self {
+        Self {
+            control_plane,
+            actions,
+            executor,
+            external_events: Some(external_events),
         }
     }
 
@@ -77,6 +110,17 @@ where
                     let Some(action) = action else { break; };
                     if let Some(event) = self.executor.execute(action).await {
                         self.control_plane.apply_event(event);
+                    }
+                }
+                event = async {
+                    match self.external_events.as_mut() {
+                        Some(events) => events.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match event {
+                        Some(event) => self.control_plane.apply_event(event),
+                        None => self.external_events = None,
                     }
                 }
             }

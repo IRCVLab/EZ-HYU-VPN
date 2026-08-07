@@ -738,6 +738,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyu-vpn-hip"
+version = "0.2.0"
+dependencies = [
+ "hyu-vpn-platform-linux",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "hyu-vpn-linux-service"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "hyu-vpn-core",
+ "hyu-vpn-daemon",
+ "hyu-vpn-platform-linux",
+ "hyu-vpn-protocol",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "hyu-vpn-platform-linux"
 version = "0.2.0"
 dependencies = [

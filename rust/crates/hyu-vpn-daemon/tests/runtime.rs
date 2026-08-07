@@ -172,3 +172,40 @@ async fn daemon_runtime_executes_actions_and_feeds_connector_events_back() {
             .any(|action| matches!(action, EngineAction::StartConnection { .. }))
     );
 }
+
+#[tokio::test]
+async fn daemon_runtime_applies_asynchronous_connector_events() {
+    let (plane, actions) = ControlPlane::new(false, MemoryCredentials::default(), FixedClock);
+    let plane = Arc::new(plane);
+    let executor = Arc::new(FakeExecutor::default());
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let runtime = DaemonRuntime::new_with_events(
+        Arc::clone(&plane),
+        actions,
+        event_rx,
+        Arc::clone(&executor),
+    );
+    let task = tokio::spawn(runtime.run(shutdown_rx));
+
+    plane.handle(request("async", Request::Connect));
+    plane.apply_event(EngineEvent::NetworkReady(NetworkIdentity::new(
+        "wlan0",
+        "192.0.2.1",
+    )));
+    event_tx
+        .send(EngineEvent::ConnectorConnected {
+            generation: hyu_vpn_core::state::ConnectionGeneration(1),
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while plane.status().state != VpnState::Connected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    shutdown_tx.send(true).unwrap();
+    task.await.unwrap();
+}

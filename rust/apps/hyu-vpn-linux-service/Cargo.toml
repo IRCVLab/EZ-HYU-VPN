@@ -1,0 +1,21 @@
+[package]
+name = "hyu-vpn-linux-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+hyu-vpn-core = { path = "../../crates/hyu-vpn-core" }
+hyu-vpn-daemon = { path = "../../crates/hyu-vpn-daemon" }
+hyu-vpn-platform-linux = { path = "../../crates/hyu-vpn-platform-linux" }
+hyu-vpn-protocol = { path = "../../crates/hyu-vpn-protocol" }
+libc.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

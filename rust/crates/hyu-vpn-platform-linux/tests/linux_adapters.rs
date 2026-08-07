@@ -141,3 +141,101 @@ async fn managed_child_terminates_its_process_group() {
     let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
     assert!(!alive, "managed process remained alive");
 }
+
+struct SequenceCodes {
+    values: std::sync::Mutex<std::collections::VecDeque<String>>,
+}
+
+#[async_trait::async_trait]
+impl hyu_vpn_platform_linux::ChallengeCodeProvider for SequenceCodes {
+    async fn next_code(
+        &self,
+    ) -> Result<zeroize::Zeroizing<String>, hyu_vpn_platform_linux::LaunchError> {
+        self.values
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(zeroize::Zeroizing::new)
+            .ok_or(hyu_vpn_platform_linux::LaunchError::InvalidConfiguration)
+    }
+}
+
+#[tokio::test]
+async fn interactive_openconnect_answers_fragmented_hyu_prompts_without_logging_secrets() {
+    use std::collections::VecDeque;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::sync::watch;
+
+    let dir = tempdir().unwrap();
+    let script = dir.path().join("fake-openconnect.py");
+    let marker = dir.path().join("responses.txt");
+    fs::write(
+        &script,
+        r#"#!/usr/bin/python3
+import sys
+out=[]
+def read():
+    value=sys.stdin.readline().rstrip("\n"); out.append(value)
+def prompt(a,b):
+    sys.stderr.write(a); sys.stderr.flush(); sys.stderr.write(b); sys.stderr.flush(); read()
+read()
+prompt("User", "name: ")
+prompt("Pass", "word: ")
+prompt("Chal", "lenge: ")
+prompt("Pass", "word: ")
+prompt("Chal", "lenge: ")
+open(sys.argv[1], "w").write("\n".join(out))
+sys.exit(7)
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let launch = OpenConnectLaunch::from_parts(
+        script.to_str().unwrap(),
+        vec![marker.to_string_lossy().into_owned()],
+    )
+    .unwrap();
+    let credentials =
+        Credentials::new("USER-CANARY", "PASSWORD-CANARY", "JBSWY3DPEHPK3PXP").unwrap();
+    let provider = SequenceCodes {
+        values: std::sync::Mutex::new(VecDeque::from(["111111".to_owned(), "222222".to_owned()])),
+    };
+    let (_stop_tx, stop_rx) = watch::channel(false);
+    let outcome = hyu_vpn_platform_linux::run_interactive_openconnect(
+        launch,
+        &credentials,
+        &provider,
+        stop_rx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.return_code, 7);
+    assert_eq!(
+        fs::read_to_string(marker).unwrap(),
+        "PASSWORD-CANARY\nUSER-CANARY\nPASSWORD-CANARY\n111111\nPASSWORD-CANARY\n222222"
+    );
+}
+
+#[tokio::test]
+async fn portal_probe_is_bounded_and_reports_tcp_reachability() {
+    use hyu_vpn_core::ports::PortalProbe;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let probe = hyu_vpn_platform_linux::LinuxPortalProbe::new(
+        "127.0.0.1",
+        port,
+        Duration::from_millis(500),
+    )
+    .unwrap();
+    let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+    assert!(
+        probe
+            .reachable(&hyu_vpn_core::state::NetworkIdentity::new(
+                "eth0",
+                "127.0.0.1",
+            ))
+            .await
+            .unwrap()
+    );
+    accept.await.unwrap();
+}
