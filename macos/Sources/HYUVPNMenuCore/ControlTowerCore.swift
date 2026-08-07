@@ -29,8 +29,8 @@ public struct StartupConnectPolicy: Equatable, Sendable {
 
     public mutating func next(after outcome: StartupConnectOutcome) -> StartupConnectDecision {
         guard outcome.isTransient else { return .stop }
-        guard transientAttempts < Self.maximumAttempts else { return .stop }
         transientAttempts += 1
+        guard transientAttempts < Self.maximumAttempts else { return .stop }
         return .retry(after: 1)
     }
 }
@@ -159,10 +159,30 @@ public enum CredentialValidator {
         }
         guard normalizedSeed.count >= 16 else { throw CredentialValidationError.totpSeedTooShort }
         guard normalizedSeed.count <= 256 else { throw CredentialValidationError.totpSeedTooLong }
-        guard normalizedSeed.range(of: #"^[A-Z2-7]+={0,}$"#, options: .regularExpression) != nil else {
+        guard isStrictRFC4648Base32Shape(normalizedSeed) else {
             throw CredentialValidationError.totpSeedInvalidAlphabetOrPadding
         }
         return normalizedSeed
+    }
+
+    private static func isStrictRFC4648Base32Shape(_ value: String) -> Bool {
+        guard value.allSatisfy({ ($0 >= "A" && $0 <= "Z") || ($0 >= "2" && $0 <= "7") || $0 == "=" }) else {
+            return false
+        }
+        guard let firstPadding = value.firstIndex(of: "=") else {
+            return [0, 2, 4, 5, 7].contains(value.count % 8)
+        }
+        guard value[firstPadding...].allSatisfy({ $0 == "=" }) else { return false }
+        guard value.count % 8 == 0 else { return false }
+        let dataCount = value[..<firstPadding].count
+        let paddingCount = value[firstPadding...].count
+        switch paddingCount {
+        case 6: return dataCount % 8 == 2
+        case 4: return dataCount % 8 == 4
+        case 3: return dataCount % 8 == 5
+        case 1: return dataCount % 8 == 7
+        default: return false
+        }
     }
 
     private static func normalizeTOTP(_ value: String) -> String {
@@ -263,17 +283,18 @@ public final class CredentialTransaction {
     }
 
     private func rollback(changed: [CredentialKey], originals: [CredentialKey: String?], fallback: CredentialTransactionErrorCode) -> CredentialTransactionResult {
-        do {
-            for key in changed.reversed() {
+        var rollbackFailed = false
+        for key in changed.reversed() {
+            do {
                 if let original = originals[key] ?? nil {
                     try store.write(original, for: key)
                 } else {
                     try store.remove(key)
                 }
+            } catch {
+                rollbackFailed = true
             }
-            return .failure(code: fallback)
-        } catch {
-            return .failure(code: .rollbackFailed)
         }
+        return .failure(code: rollbackFailed ? .rollbackFailed : fallback)
     }
 }

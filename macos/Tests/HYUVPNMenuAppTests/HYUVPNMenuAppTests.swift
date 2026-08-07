@@ -260,6 +260,37 @@ final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
         }
     }
 
+    @Test func credentialValidationAcceptsOnlyStrictRFC4648Base32PaddingShapes() throws {
+        let validSeeds = [
+            String(repeating: "A", count: 16),
+            String(repeating: "A", count: 18),
+            String(repeating: "A", count: 20),
+            String(repeating: "A", count: 21),
+            String(repeating: "A", count: 23),
+            String(repeating: "A", count: 10) + "======",
+            String(repeating: "A", count: 12) + "====",
+            String(repeating: "A", count: 13) + "===",
+            String(repeating: "A", count: 15) + "=",
+        ]
+        for seed in validSeeds {
+            #expect(try CredentialValidator.validate(input(totpSeed: seed, totpSeedConfirmation: seed)).normalizedTOTPSeed == seed)
+        }
+
+        let invalidSeeds = [
+            String(repeating: "A", count: 17),
+            String(repeating: "A", count: 19),
+            String(repeating: "A", count: 22),
+            String(repeating: "A", count: 14) + "==",
+            String(repeating: "A", count: 11) + "=====",
+            String(repeating: "A", count: 16) + "===",
+        ]
+        for seed in invalidSeeds {
+            #expect(throws: CredentialValidationError.totpSeedInvalidAlphabetOrPadding) {
+                try CredentialValidator.validate(input(totpSeed: seed, totpSeedConfirmation: seed))
+            }
+        }
+    }
+
     @Test func credentialTransactionRollsBackWritesRedactsErrorsAndDoesNotReconnectOnFailure() throws {
         let store = RecordingCredentialStore(initial: [.username: "old-user", .password: "old-pass", .totpSeed: "OLDTOTPSEEDVALUE1"], failOnWriteCall: 3)
         let resetter = RecordingTOTPResetter()
@@ -301,12 +332,51 @@ final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
         #expect(retainResetter.resetCount == 0)
     }
 
-    @Test func startupPolicyRetriesOnlyTransientOutcomesAndStopsAtThirtyAttempts() {
+    @Test func credentialTransactionReportsReadAndTOTPResetFailuresWithStableCodesAndNoReconnect() {
+        let readStore = RecordingCredentialStore(initial: [:], failReadKey: .password)
+        var readReconnects = 0
+        let readResult = CredentialTransaction(store: readStore, totpResetter: RecordingTOTPResetter()) { readReconnects += 1 }.apply(ValidatedCredentials(username: "canary-user", password: "canary-pass", normalizedTOTPSeed: nil))
+        #expect(readResult == .failure(code: .readFailed))
+        #expect(readResult.description == "READ_FAILED")
+        #expect(readReconnects == 0)
+        #expect(!readResult.description.contains("canary"))
+
+        let resetter = RecordingTOTPResetter(fail: true)
+        let resetStore = RecordingCredentialStore(initial: [.username: "old-user", .password: "old-pass", .totpSeed: "OLDTOTPSEEDVALUE1"])
+        var resetReconnects = 0
+        let resetResult = CredentialTransaction(store: resetStore, totpResetter: resetter) { resetReconnects += 1 }.apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
+        #expect(resetResult == .failure(code: .totpResetFailed))
+        #expect(resetResult.description == "TOTP_RESET_FAILED")
+        #expect(resetStore.values[.username] == "old-user")
+        #expect(resetStore.values[.password] == "old-pass")
+        #expect(resetStore.values[.totpSeed] == "OLDTOTPSEEDVALUE1")
+        #expect(resetReconnects == 0)
+    }
+
+    @Test func credentialTransactionContinuesBestEffortRollbackAfterRemoveFailure() {
+        let store = RecordingCredentialStore(initial: [:], failRemoveKeys: [.totpSeed])
+        let resetter = RecordingTOTPResetter(fail: true)
+        var reconnects = 0
+        let result = CredentialTransaction(store: store, totpResetter: resetter) { reconnects += 1 }.apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
+        #expect(result == .failure(code: .rollbackFailed))
+        #expect(result.description == "ROLLBACK_FAILED")
+        #expect(store.events.contains("remove:totpSeed"))
+        #expect(store.events.contains("remove:password"))
+        #expect(store.events.contains("remove:username"))
+        #expect(store.values[.username] == nil)
+        #expect(store.values[.password] == nil)
+        #expect(store.values[.totpSeed] == "JBSWY3DPEHPK3PXP")
+        #expect(reconnects == 0)
+    }
+
+    @Test func startupPolicyRetriesOnlyFirstTwentyNineTransientOutcomesAndStopsAtThirtyAttempts() {
         var policy = StartupConnectPolicy()
-        #expect(policy.next(after: .controlUnavailable) == .retry(after: 1))
-        #expect(policy.next(after: .launchFailure) == .retry(after: 1))
-        for _ in 2..<30 { _ = policy.next(after: .controlUnavailable) }
+        for _ in 0..<29 { #expect(policy.next(after: .controlUnavailable) == .retry(after: 1)) }
         #expect(policy.next(after: .controlUnavailable) == .stop)
+        var launchPolicy = StartupConnectPolicy()
+        #expect(launchPolicy.next(after: .launchFailure) == .retry(after: 1))
+        var codePolicy = StartupConnectPolicy()
+        #expect(codePolicy.next(after: .failure(code: "CONTROL_UNAVAILABLE")) == .retry(after: 1))
         var successPolicy = StartupConnectPolicy()
         #expect(successPolicy.next(after: .success) == .stop)
         var failurePolicy = StartupConnectPolicy()
@@ -341,13 +411,18 @@ final class RecordingCredentialStore: CredentialStore {
     var values: [CredentialKey: String?]
     var events: [String] = []
     private let failOnWriteCall: Int?
+    private let failReadKey: CredentialKey?
+    private let failRemoveKeys: Set<CredentialKey>
     private var writeCalls = 0
-    init(initial: [CredentialKey: String], failOnWriteCall: Int? = nil) {
+    init(initial: [CredentialKey: String], failOnWriteCall: Int? = nil, failReadKey: CredentialKey? = nil, failRemoveKeys: Set<CredentialKey> = []) {
         self.values = initial.mapValues { Optional($0) }
         self.failOnWriteCall = failOnWriteCall
+        self.failReadKey = failReadKey
+        self.failRemoveKeys = failRemoveKeys
     }
     func read(_ key: CredentialKey) throws -> String? {
         events.append("read:\(key.rawValue)")
+        if key == failReadKey { throw StoreFailure.injected }
         return values[key] ?? nil
     }
     func write(_ value: String, for key: CredentialKey) throws {
@@ -358,11 +433,18 @@ final class RecordingCredentialStore: CredentialStore {
     }
     func remove(_ key: CredentialKey) throws {
         events.append("remove:\(key.rawValue)")
+        if failRemoveKeys.contains(key) { throw StoreFailure.injected }
         values.removeValue(forKey: key)
     }
 }
 
 final class RecordingTOTPResetter: TOTPStateResetting {
+    enum ResetFailure: Error { case injected }
+    private let fail: Bool
     private(set) var resetCount = 0
-    func resetTOTPState() throws { resetCount += 1 }
+    init(fail: Bool = false) { self.fail = fail }
+    func resetTOTPState() throws {
+        resetCount += 1
+        if fail { throw ResetFailure.injected }
+    }
 }

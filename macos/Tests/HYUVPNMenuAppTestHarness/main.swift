@@ -454,6 +454,11 @@ time.sleep(20)
         let retained = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: "", totpSeedConfirmation: ""))
         try expect(retained.normalizedTOTPSeed == nil, "blank seed retention")
         try expectThrows("password mismatch") { _ = try CredentialValidator.validate(CredentialResetInput(username: "canary-user", password: "canary-pass", passwordConfirmation: "different", totpSeed: "", totpSeedConfirmation: "")) }
+        let padded = String(repeating: "A", count: 10) + "======"
+        let validatedPadded = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: padded, totpSeedConfirmation: padded))
+        try expect(validatedPadded.normalizedTOTPSeed == padded, "valid strict padded seed")
+        try expectThrows("invalid base32 residue") { _ = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: String(repeating: "A", count: 17), totpSeedConfirmation: String(repeating: "A", count: 17))) }
+        try expectThrows("invalid base32 padding") { _ = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: String(repeating: "A", count: 14) + "==", totpSeedConfirmation: String(repeating: "A", count: 14) + "==")) }
         let errors: [CredentialValidationError] = [.passwordMismatch, .totpSeedMismatch, .totpSeedInvalidAlphabetOrPadding]
         try expect(errors.allSatisfy { !$0.description.contains("canary") && !$0.code.contains("canary") }, "stable redacted validation errors")
     }
@@ -469,9 +474,17 @@ time.sleep(20)
         let successResetter = HarnessTOTPResetter()
         let success = CredentialTransaction(store: HarnessCredentialStore(initial: [:]), totpResetter: successResetter) { reconnects += 1 }.apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
         try expect(success == .success && successResetter.resetCount == 1 && reconnects == 1, "success resets after commit and reconnects once")
+        let readFailure = CredentialTransaction(store: HarnessCredentialStore(initial: [:], failReadKey: .password), totpResetter: HarnessTOTPResetter()).apply(ValidatedCredentials(username: "canary-user", password: "canary-pass", normalizedTOTPSeed: nil))
+        try expect(readFailure == .failure(code: .readFailed) && readFailure.description == "READ_FAILED", "read failure stable code")
+        let rollbackStore = HarnessCredentialStore(initial: [:], failRemoveKeys: [.totpSeed])
+        let rollbackFailure = CredentialTransaction(store: rollbackStore, totpResetter: HarnessTOTPResetter(fail: true)) { reconnects += 1 }.apply(ValidatedCredentials(username: "new-user", password: "new-pass", normalizedTOTPSeed: "JBSWY3DPEHPK3PXP"))
+        try expect(rollbackFailure == .failure(code: .rollbackFailed), "best-effort rollback failure code")
+        try expect(rollbackStore.events.contains("remove:totpSeed") && rollbackStore.events.contains("remove:password") && rollbackStore.events.contains("remove:username"), "rollback continued after remove failure")
         var policy = StartupConnectPolicy()
-        for _ in 0..<30 { try expect(policy.next(after: .controlUnavailable) == .retry(after: 1), "transient retry before bound") }
-        try expect(policy.next(after: .controlUnavailable) == .stop, "thirty attempt bound")
+        for _ in 0..<29 { try expect(policy.next(after: .controlUnavailable) == .retry(after: 1), "transient retry before bound") }
+        try expect(policy.next(after: .controlUnavailable) == .stop, "thirtieth attempt stops")
+        var codePolicy = StartupConnectPolicy()
+        try expect(codePolicy.next(after: .failure(code: "CONTROL_UNAVAILABLE")) == .retry(after: 1), "normalized control unavailable transient")
         var failurePolicy = StartupConnectPolicy()
         try expect(failurePolicy.next(after: .failure(code: "AUTH_FAILED")) == .stop, "non-transient stop")
         var gate = OperationGate()
@@ -488,14 +501,17 @@ time.sleep(20)
 final class HarnessCredentialStore: CredentialStore {
     enum StoreFailure: Error { case injected }
     var values: [CredentialKey: String?]
+    var events: [String] = []
     private let failOnWriteCall: Int?
+    private let failReadKey: CredentialKey?
+    private let failRemoveKeys: Set<CredentialKey>
     private var writeCalls = 0
-    init(initial: [CredentialKey: String], failOnWriteCall: Int? = nil) { self.values = initial.mapValues { Optional($0) }; self.failOnWriteCall = failOnWriteCall }
-    func read(_ key: CredentialKey) throws -> String? { values[key] ?? nil }
-    func write(_ value: String, for key: CredentialKey) throws { writeCalls += 1; if writeCalls == failOnWriteCall { throw StoreFailure.injected }; values[key] = value }
-    func remove(_ key: CredentialKey) throws { values.removeValue(forKey: key) }
+    init(initial: [CredentialKey: String], failOnWriteCall: Int? = nil, failReadKey: CredentialKey? = nil, failRemoveKeys: Set<CredentialKey> = []) { self.values = initial.mapValues { Optional($0) }; self.failOnWriteCall = failOnWriteCall; self.failReadKey = failReadKey; self.failRemoveKeys = failRemoveKeys }
+    func read(_ key: CredentialKey) throws -> String? { events.append("read:\(key.rawValue)"); if key == failReadKey { throw StoreFailure.injected }; return values[key] ?? nil }
+    func write(_ value: String, for key: CredentialKey) throws { writeCalls += 1; events.append("write:\(key.rawValue):\(value)"); if writeCalls == failOnWriteCall { throw StoreFailure.injected }; values[key] = value }
+    func remove(_ key: CredentialKey) throws { events.append("remove:\(key.rawValue)"); if failRemoveKeys.contains(key) { throw StoreFailure.injected }; values.removeValue(forKey: key) }
 }
-final class HarnessTOTPResetter: TOTPStateResetting { private(set) var resetCount = 0; func resetTOTPState() throws { resetCount += 1 } }
+final class HarnessTOTPResetter: TOTPStateResetting { enum ResetFailure: Error { case injected }; private let fail: Bool; private(set) var resetCount = 0; init(fail: Bool = false) { self.fail = fail }; func resetTOTPState() throws { resetCount += 1; if fail { throw ResetFailure.injected } } }
 
 struct FakeMetadata: FileMetadataProviding {
     var ownerUID: uid_t; var fileMode: mode_t; var parentMode: mode_t; var isSymlink: Bool; var isRegular: Bool
