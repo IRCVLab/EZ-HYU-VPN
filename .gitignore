@@ -3,6 +3,7 @@
 .superpowers/reviews/
 .pytest_cache/
 /macos/.build/
+/target/
 __pycache__/
 *.py[cod]
 .DS_Store
