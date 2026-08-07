@@ -806,8 +806,33 @@ public struct NetworkWrapperRunner {
               current.resolver.serversPresent == before.serversPresent,
               current.resolver.searchDomains == before.searchDomains,
               current.resolver.searchDomainsPresent == before.searchDomainsPresent,
-              setupResolverSurfaceMatchesBaseline(ledger: ledger, before: before, current: current.resolver)
+              setupResolverSurfaceMatchesBaseline(ledger: ledger, before: before, current: current.resolver),
+              ledger.defaultRouteBefore != current.defaultRoute || sameRouteAppliedDNSArtifactsAbsent(ledger: ledger, current: current.resolver)
         else { return false }
+        return true
+    }
+
+    private func sameRouteAppliedDNSArtifactsAbsent(ledger: NetworkLedger, current: ResolverSnapshot) -> Bool {
+        guard let before = ledger.dnsBefore, let applied = ledger.dnsApplied else { return true }
+        for key in Set(before.surfaces.keys).union(applied.surfaces.keys) {
+            let baseline = before.surfaces[key]
+            let installed = applied.surfaces[key]
+            let live = current.surfaces[key]
+            if installed == baseline || live == baseline { continue }
+            if live == installed { return false }
+            guard let installed, let live else { continue }
+            if let baseline {
+                if baseline.keyPresent != installed.keyPresent, live.keyPresent == installed.keyPresent { return false }
+                if baseline.serversPresent != installed.serversPresent, live.serversPresent == installed.serversPresent { return false }
+                if baseline.searchDomainsPresent != installed.searchDomainsPresent, live.searchDomainsPresent == installed.searchDomainsPresent { return false }
+                let installedOnlyServers = Set(installed.servers).subtracting(baseline.servers)
+                if !installedOnlyServers.isDisjoint(with: live.servers) { return false }
+                let installedOnlySearchDomains = Set(installed.searchDomains).subtracting(baseline.searchDomains)
+                if !installedOnlySearchDomains.isDisjoint(with: live.searchDomains) { return false }
+            } else if live.keyPresent {
+                return false
+            }
+        }
         return true
     }
 

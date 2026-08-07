@@ -60,6 +60,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-restores-missing-foreign-baseline-host-route", testRepairRestoresMissingForeignBaselineHostRoute),
                 ("network-repair-retires-clean-ledger-after-default-network-change", testRepairRetiresCleanLedgerAfterDefaultNetworkChange),
                 ("network-repair-retires-artifact-free-ledger-after-default-route-return", testRepairRetiresArtifactFreeLedgerAfterDefaultRouteReturn),
+                ("network-repair-keeps-same-route-ledger-when-applied-dynamic-dns-remains", testRepairKeepsSameRouteLedgerWhenAppliedDynamicDNSRemains),
                 ("network-repair-restores-exact-retained-setup-dns-after-default-network-change", testRepairRestoresExactRetainedSetupDNSAfterDefaultNetworkChange),
                 ("network-repair-keeps-stale-ledger-when-applied-route-remains", testRepairKeepsStaleLedgerWhenAppliedRouteRemains),
                 ("network-repair-keeps-stale-ledger-on-mixed-setup-dns", testRepairKeepsStaleLedgerOnMixedSetupDNS),
@@ -753,6 +754,8 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
     static func testRepairRetiresArtifactFreeLedgerAfterDefaultRouteReturn() throws {
         let (fixture, _, _) = try staleNetworkLedgerFixture()
         fixture.tools.defaultGateway = "192.0.2.1"
+        let stateKey = "State:/Network/Service/service-wifi/DNS"
+        fixture.tools.resolverSurfaces?[stateKey] = ResolverFieldSnapshot(servers: ["1.1.1.1", "8.8.8.8"], searchDomains: [])
 
         try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
 
@@ -760,6 +763,22 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(fixture.tools.restoredRoutes.isEmpty, "deletion-only retirement never mutates routes")
         try expect(fixture.tools.restoredDNSServers.isEmpty, "deletion-only retirement never mutates DNS servers")
         try expect(fixture.tools.restoredSearchDomains.isEmpty, "deletion-only retirement never mutates search domains")
+    }
+
+    static func testRepairKeepsSameRouteLedgerWhenAppliedDynamicDNSRemains() throws {
+        let (fixture, _, appliedDNS) = try staleNetworkLedgerFixture()
+        fixture.tools.defaultGateway = "192.0.2.1"
+        let stateKey = "State:/Network/Service/service-wifi/DNS"
+        fixture.tools.resolverSurfaces?[stateKey] = appliedDNS.surfaces[stateKey]
+
+        try expectThrows("same-route retirement keeps evidence while an applied dynamic DNS surface remains") {
+            try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "applied dynamic DNS residue keeps repair evidence")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "ambiguous same-route retirement never mutates routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "ambiguous same-route retirement never mutates DNS servers")
+        try expect(fixture.tools.restoredSearchDomains.isEmpty, "ambiguous same-route retirement never mutates search domains")
     }
 
     static func testRepairKeepsStaleLedgerWhenAppliedRouteRemains() throws {
