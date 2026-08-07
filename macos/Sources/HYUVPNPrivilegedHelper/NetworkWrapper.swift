@@ -594,8 +594,20 @@ public struct NetworkWrapperRunner {
         if snapshotEnvironment["TUNDEV"] == nil, let tunnelInterface = ledger.tunnelInterface {
             snapshotEnvironment["TUNDEV"] = tunnelInterface
         }
-        let preflight = try snapshot(destinations: destinations, environment: snapshotEnvironment)
+        var preflight = try snapshot(destinations: destinations, environment: snapshotEnvironment)
         if reason == "repair" {
+            if let staleRoutes = staleNetworkOwnedRouteCleanupPlan(ledger: ledger, current: preflight), !staleRoutes.isEmpty {
+                do {
+                    for route in staleRoutes { try tools.deleteRoute(route) }
+                    preflight = try snapshot(destinations: destinations, environment: snapshotEnvironment)
+                    guard staleNetworkLedgerRetirementSafe(ledger: ledger, current: preflight) else { throw HelperError.processMismatch }
+                    try removeLedgerAndSyncDirectory(ledgerPath)
+                    return
+                } catch {
+                    try store.save(ledger.withStatus("repair-required"))
+                    throw error
+                }
+            }
             if staleNetworkLedgerRetirementSafe(ledger: ledger, current: preflight) {
                 try removeLedgerAndSyncDirectory(ledgerPath)
                 return
@@ -785,6 +797,45 @@ public struct NetworkWrapperRunner {
     }
 
     private struct StaleNetworkDNSRepairPlan { let restoreServers: Bool; let restoreSearchDomains: Bool }
+
+    private func staleNetworkOwnedRouteCleanupPlan(ledger: NetworkLedger, current: NetworkSnapshotData) -> [RouteDelta]? {
+        guard stableBootIdentityMatches(ledger.rebootIdentity, current: current), !current.routes.isEmpty else { return nil }
+        let projectedCleanState = NetworkSnapshotData(
+            rebootIdentity: current.rebootIdentity,
+            serviceID: current.serviceID,
+            defaultInterface: current.defaultInterface,
+            defaultRoute: current.defaultRoute,
+            tunnelInterface: current.tunnelInterface,
+            routes: [],
+            resolver: current.resolver
+        )
+        guard staleNetworkLedgerRetirementSafe(ledger: ledger, current: projectedCleanState),
+              let recordedTunnel = ledger.tunnelInterface,
+              recordedTunnel.hasPrefix("utun")
+        else { return nil }
+
+        let records = Dictionary(uniqueKeysWithValues: ledger.routeRecords.map { (routeKey($0.applied), $0) })
+        var removals: [RouteDelta] = []
+        for route in current.routes {
+            guard let record = records[routeKey(route)],
+                  record.before == nil,
+                  record.after == record.applied.routeSnapshot,
+                  record.applied.interface == recordedTunnel,
+                  route.interface == current.defaultInterface,
+                  route.gateway == record.applied.gateway,
+                  route.protocol == "ipv4"
+            else { return nil }
+            removals.append(RouteDelta(
+                operation: "add",
+                destination: route.destination,
+                gateway: route.gateway,
+                interface: route.interface,
+                netmask: route.netmask,
+                protocol: route.protocol
+            ))
+        }
+        return removals
+    }
 
     private func staleNetworkLedgerDNSRepairPlan(ledger: NetworkLedger, current: NetworkSnapshotData) -> StaleNetworkDNSRepairPlan? {
         guard stableBootIdentityMatches(ledger.rebootIdentity, current: current),

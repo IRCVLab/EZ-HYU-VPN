@@ -59,6 +59,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-restores-removed-gateway-baseline-route", testRepairRestoresRemovedGatewayBaselineRoute),
                 ("network-repair-restores-missing-foreign-baseline-host-route", testRepairRestoresMissingForeignBaselineHostRoute),
                 ("network-repair-retires-clean-ledger-after-default-network-change", testRepairRetiresCleanLedgerAfterDefaultNetworkChange),
+                ("network-repair-removes-owned-tunnel-route-rehomed-to-physical-interface", testRepairRemovesOwnedTunnelRouteRehomedToPhysicalInterface),
                 ("network-repair-retires-artifact-free-ledger-after-default-route-return", testRepairRetiresArtifactFreeLedgerAfterDefaultRouteReturn),
                 ("network-repair-keeps-same-route-ledger-when-applied-dynamic-dns-remains", testRepairKeepsSameRouteLedgerWhenAppliedDynamicDNSRemains),
                 ("network-repair-restores-exact-retained-setup-dns-after-default-network-change", testRepairRestoresExactRetainedSetupDNSAfterDefaultNetworkChange),
@@ -749,6 +750,27 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "clean stale ledger is retired after the physical network changes")
         try expect(fixture.tools.restoredRoutes.isEmpty, "repair never restores a route through the obsolete gateway")
         try expect(fixture.tools.restoredResolvers.isEmpty, "repair never overwrites resolver state from the new network")
+    }
+
+    static func testRepairRemovesOwnedTunnelRouteRehomedToPhysicalInterface() throws {
+        let (fixture, tunnelRoute, _) = try staleNetworkLedgerFixture()
+        fixture.tools.routes = [
+            RouteSnapshot(
+                destination: tunnelRoute.destination,
+                gateway: tunnelRoute.gateway,
+                interface: "en0",
+                netmask: tunnelRoute.netmask,
+                protocol: tunnelRoute.protocol
+            )
+        ]
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "exact owned tunnel residue is repaired after Darwin rehomes it to the physical interface")
+        try expect(fixture.tools.routes.isEmpty, "repair deletes only the exact owned route residue")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "stale route cleanup never restores obsolete routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "stale route cleanup leaves baseline DNS untouched")
+        try expect(fixture.tools.restoredSearchDomains.isEmpty, "stale route cleanup leaves baseline search domains untouched")
     }
 
     static func testRepairRetiresArtifactFreeLedgerAfterDefaultRouteReturn() throws {
