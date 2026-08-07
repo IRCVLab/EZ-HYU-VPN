@@ -300,6 +300,40 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertFalse((env2.root / "etc/sudoers.d/hyu-vpn").exists())
         self.assertIn("rollback-complete", (env2.root / "private/var/db/hyu-vpn/install-transaction.log").read_text())
 
+    def test_successful_upgrade_rollback_is_idempotent_under_explicit_recovery(self):
+        env = DryRunEnvironment(root=self.root / "dry idempotent rollback", payload=self.payload, home=self.root / "home idempotent rollback", manifest=self.manifest_path)
+        old_app = env.root / "Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
+        old_helper = env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper"
+        old_service = env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-service"
+        old_state = env.root / "private/var/db/hyu-vpn/installed-paths.tsv"
+        old_app.parent.mkdir(parents=True, exist_ok=True)
+        old_helper.parent.mkdir(parents=True, exist_ok=True)
+        old_service.parent.mkdir(parents=True, exist_ok=True)
+        old_state.parent.mkdir(parents=True, exist_ok=True)
+        old_app.write_text("old app", encoding="utf-8")
+        old_helper.write_text("old helper", encoding="utf-8")
+        old_service.write_text("old service", encoding="utf-8")
+        old_state.write_text("old installed metadata", encoding="utf-8")
+
+        stage = stage_user_payload(env)
+        proc = self.run_root_admin(env, stage, extra_env={"HYU_VPN_FAIL_AFTER": "app"})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(old_app.read_text(encoding="utf-8"), "old app")
+        self.assertEqual(old_helper.read_text(encoding="utf-8"), "old helper")
+        self.assertEqual(old_service.read_text(encoding="utf-8"), "old service")
+
+        recovered = self.run_root_admin(env, stage, recover=True)
+
+        self.assertEqual(recovered.returncode, 0, recovered.stderr + recovered.stdout)
+        self.assertEqual(old_app.read_text(encoding="utf-8"), "old app")
+        self.assertEqual(old_helper.read_text(encoding="utf-8"), "old helper")
+        self.assertEqual(old_service.read_text(encoding="utf-8"), "old service")
+        state = env.root / "private/var/db/hyu-vpn"
+        self.assertTrue((state / "transaction-state").exists())
+        self.assertEqual((state / "transaction-state").read_text(encoding="utf-8").strip(), "complete")
+        self.assertFalse((state / "backups.tsv").exists())
+        self.assertFalse((state / "backups").exists())
+
     def test_root_admin_migrates_legacy_dotted_sudoers_fragment(self):
         env = DryRunEnvironment(root=self.root / "dry sudoers migration", payload=self.payload, home=self.root / "home sudoers migration", manifest=self.manifest_path)
         stage = stage_user_payload(env)

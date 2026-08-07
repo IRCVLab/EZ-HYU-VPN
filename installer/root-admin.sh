@@ -311,7 +311,45 @@ copy_package_snapshot(){
 fail_after(){ [[ "${HYU_VPN_FAIL_AFTER:-}" == "$1" ]] && { print -u2 "injected failure after $1"; return 1; } || return 0; }
 remove_rel(){ local rel="$1" target; case "$rel" in /*|*..*|Library/Preferences/SystemConfiguration*) print -u2 "unsafe installed path: $rel"; return 1;; esac; case "$rel" in Library/Application\ Support/HYU\ VPN/*|Library/PrivilegedHelperTools/com.hyu.vpn.helper|Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper|Applications/HYU\ VPN.app|etc/sudoers.d/hyu-vpn|etc/sudoers.d/com.hyu.vpn|Users/*/Library/LaunchAgents/com.hyu.vpn.*.plist|private/var/db/hyu-vpn/*) ;; *) print -u2 "unsafe installed path: $rel"; return 1;; esac; [[ "$rel" == /* ]] && target="$(map_path "$rel")" || target="$ROOT_PREFIX/$rel"; [[ -e "$target" || -L "$target" ]] || return 0; [[ -d "$target" && ! -L "$target" ]] && /bin/rm -rf "$target" || /bin/rm -f "$target"; }
 backup_target(){ local target="$1"; local rel hash backup; rel="$(rel_path "$target")"; hash="$(print -r -- "$rel" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"; backup="$STATE_DIR/backups/$hash"; log "before-backup $rel $backup"; if [[ -e "$target" || -L "$target" ]]; then /bin/mkdir -p "$(/usr/bin/dirname "$backup")"; /bin/mv "$target" "$backup"; print -- "$rel|$backup" >> "$STATE_DIR/backups.tsv"; durable_flush "$STATE_DIR/backups.tsv"; fi; }
-rollback(){ log "rollback-start"; /bin/rm -f "$SUDOERS_TMP"; /bin/rm -rf "$PACKAGE_SNAPSHOT" "$TXN_SNAPSHOT"; if [[ -f "$STATE_DIR/native-suppression-transaction" ]]; then if [[ -x "$APP_SUPPORT/bin/hyu-vpn-native-client" && -f "$STATE_DIR/native-suppression.json" ]]; then run_cmd /usr/bin/env -i PATH=/usr/bin:/bin SUDO_UID="$ADMIN_UID" /usr/bin/python3 "$APP_SUPPORT/bin/hyu-vpn-native-client" restore-auto-launch || { print -u2 "native restore failed during rollback"; log "rollback-preserved-native-assets"; return 1; }; /bin/rm -f "$STATE_DIR/native-suppression-transaction"; log "rollback-native-restored"; else /bin/rm -f "$STATE_DIR/native-suppression-transaction"; log "rollback-stale-native-marker-cleared"; fi; fi; if [[ -f "$TXN_PATHS" ]]; then /usr/bin/tail -r "$TXN_PATHS" 2>/dev/null | while IFS= read -r rel; do [[ -n "$rel" ]] && remove_rel "$rel"; done; fi; if [[ -f "$STATE_DIR/backups.tsv" ]]; then /usr/bin/tail -r "$STATE_DIR/backups.tsv" 2>/dev/null | while IFS='|' read -r rel backup; do [[ -n "$rel" && -e "$backup" ]] && { /bin/mkdir -p "$(/usr/bin/dirname "$ROOT_PREFIX/$rel")"; /bin/mv "$backup" "$ROOT_PREFIX/$rel"; }; done; fi; log "rollback-complete"; }
+rollback(){
+  local rel backup rollback_status=0
+  log "rollback-start"
+  /bin/rm -f "$SUDOERS_TMP"
+  /bin/rm -rf "$PACKAGE_SNAPSHOT" "$TXN_SNAPSHOT"
+  if [[ -f "$STATE_DIR/native-suppression-transaction" ]]; then
+    if [[ -x "$APP_SUPPORT/bin/hyu-vpn-native-client" && -f "$STATE_DIR/native-suppression.json" ]]; then
+      run_cmd /usr/bin/env -i PATH=/usr/bin:/bin SUDO_UID="$ADMIN_UID" /usr/bin/python3 "$APP_SUPPORT/bin/hyu-vpn-native-client" restore-auto-launch || { print -u2 "native restore failed during rollback"; log "rollback-preserved-native-assets"; return 1; }
+      /bin/rm -f "$STATE_DIR/native-suppression-transaction"
+      log "rollback-native-restored"
+    else
+      /bin/rm -f "$STATE_DIR/native-suppression-transaction"
+      log "rollback-stale-native-marker-cleared"
+    fi
+  fi
+  if [[ -f "$TXN_PATHS" ]]; then
+    while IFS= read -r rel; do
+      [[ -z "$rel" ]] && continue
+      remove_rel "$rel" || rollback_status=1
+    done < <(/usr/bin/tail -r "$TXN_PATHS" 2>/dev/null)
+  fi
+  [[ "$rollback_status" -eq 0 ]] || return 1
+  if [[ -f "$STATE_DIR/backups.tsv" ]]; then
+    while IFS='|' read -r rel backup; do
+      [[ -z "$rel" ]] && continue
+      if [[ -e "$backup" ]]; then
+        /bin/mkdir -p "$(/usr/bin/dirname "$ROOT_PREFIX/$rel")" || rollback_status=1
+        [[ "$rollback_status" -eq 0 ]] && /bin/mv "$backup" "$ROOT_PREFIX/$rel" || rollback_status=1
+      fi
+    done < <(/usr/bin/tail -r "$STATE_DIR/backups.tsv" 2>/dev/null)
+  fi
+  [[ "$rollback_status" -eq 0 ]] || return 1
+  /bin/rm -rf "$STATE_DIR/backups" "$STATE_DIR/backups.tsv"
+  : >| "$TXN_PATHS"
+  print complete >| "$TX_STATE"
+  durable_flush "$TX_STATE"
+  durable_flush "$TXN_PATHS"
+  log "rollback-complete"
+}
 trap 'rollback' ERR INT TERM
 [[ "$NEED_PREINSTALL_RECOVERY" -eq 1 ]] && { log "preinstall-recovery-start"; rollback; : >| "$JOURNAL"; : >| "$TXN_PATHS"; log "preinstall-recovery-complete"; }
 
