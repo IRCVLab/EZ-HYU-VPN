@@ -911,11 +911,24 @@ time.sleep(20)
         let root = packageRoot().deletingLastPathComponent()
         let shimSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNKeychainAccessShim/HYUVPNKeychainAccessShim.c"))
         let adapterSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/SystemAdapters.swift"))
-        for required in ["SecTrustedApplicationCreateFromPath(NULL", #"SecTrustedApplicationCreateFromPath("/usr/bin/security""#, "SecAccessCreate", "trustedApplications[2]"] {
+        for required in [
+            "HYUVPNCreateCredentialAccessWithPath(NULL, accessOut)",
+            "SecTrustedApplicationCreateFromPath(NULL",
+            #"SecTrustedApplicationCreateFromPath("/usr/bin/security""#,
+            "trustedApplications[3]",
+            "CFIndex trustedCount = 2",
+            "extraTrustedPath",
+            "SecTrustedApplicationCreateFromPath(extraTrustedPath",
+            "trustedApplications[trustedCount++] = extraApplication",
+            "CFArrayCreate(kCFAllocatorDefault, trustedApplications, trustedCount",
+            "SecAccessCreate",
+        ] {
             try expect(shimSource.contains(required), "keychain ACL shim contains \(required)")
         }
+        try expect(adapterSource.contains("additionalTrustedApplicationPath"), "keychain adapter accepts optional trusted app path")
+        try expect(adapterSource.contains("HYUVPNCreateCredentialAccessWithPath"), "keychain adapter forwards optional trusted app path")
         try expect(shimSource.contains("-Wdeprecated-declarations") || shimSource.contains("deprecated-declarations"), "deprecation warning is scoped to shim")
-        let accessFactoryIndex = try requireIndex(of: "let access = try KeychainCredentialAccessFactory.make()", in: adapterSource, message: "access factory before attrs")
+        let accessFactoryIndex = try requireIndex(of: "let access = try KeychainCredentialAccessFactory.make(additionalTrustedApplicationPath: additionalTrustedApplicationPath)", in: adapterSource, message: "access factory before attrs")
         let attributesIndex = try requireIndex(of: "let attributes: [String: Any]", in: adapterSource, message: "attributes dictionary")
         let firstUpdateIndex = try requireIndex(of: "let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)", in: adapterSource, message: "initial update uses shared attributes")
         let addIndex = try requireIndex(of: "SecItemAdd", in: adapterSource, message: "add index")
