@@ -397,6 +397,26 @@ esac
         #expect(fixture.tools.restoredSearchDomains.isEmpty)
     }
 
+    @Test func repairRemovesInheritedHYUTunnelRouteAfterItsInterfaceFallsBackToPhysicalNetwork() throws {
+        let fixture = try staleNetworkEpochFixture(tunnelRouteWasAlreadyPresent: true)
+        let decayedOwnedRoute = RouteSnapshot(
+            destination: fixture.tunnelRoute.destination,
+            gateway: fixture.tunnelRoute.gateway,
+            interface: "en0",
+            netmask: fixture.tunnelRoute.netmask,
+            protocol: fixture.tunnelRoute.protocol
+        )
+        fixture.tools.routes = [decayedOwnedRoute]
+
+        try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.ledger.path))
+        #expect(fixture.tools.routes.isEmpty)
+        #expect(fixture.tools.restoredRoutes.isEmpty)
+        #expect(fixture.tools.restoredDNSServers.isEmpty)
+        #expect(fixture.tools.restoredSearchDomains.isEmpty)
+    }
+
     @Test func repairRetiresArtifactFreeLedgerWhenDefaultRouteReturnedToRecordedValue() throws {
         let fixture = try staleNetworkEpochFixture()
         fixture.tools.defaultGateway = "192.0.2.1"
@@ -802,7 +822,7 @@ private struct StaleNetworkEpochFixture {
     let appliedDNS: ResolverSnapshot
 }
 
-private func staleNetworkEpochFixture(ledgerBootIdentity: UInt64 = stableTestBootIdentity) throws -> StaleNetworkEpochFixture {
+private func staleNetworkEpochFixture(ledgerBootIdentity: UInt64 = stableTestBootIdentity, tunnelRouteWasAlreadyPresent: Bool = false) throws -> StaleNetworkEpochFixture {
     let dir = try temporaryDirectory()
     let ledger = dir.appendingPathComponent("nonceabc123.ledger")
     let tools = TunnelSurfaceNetworkTools()
@@ -810,7 +830,7 @@ private func staleNetworkEpochFixture(ledgerBootIdentity: UInt64 = stableTestBoo
     let oldBypass = RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4")
     let tunnelRoute = RouteSnapshot(destination: "10.0.0.0", gateway: "10.10.0.1", interface: "utun7", netmask: "255.0.0.0", protocol: "ipv4")
     let records = [
-        RouteRecord(before: nil, applied: RouteDelta(operation: "add", destination: tunnelRoute.destination, gateway: tunnelRoute.gateway, interface: tunnelRoute.interface, netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol), after: tunnelRoute),
+        RouteRecord(before: tunnelRouteWasAlreadyPresent ? tunnelRoute : nil, applied: RouteDelta(operation: "add", destination: tunnelRoute.destination, gateway: tunnelRoute.gateway, interface: tunnelRoute.interface, netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol), after: tunnelRoute),
         RouteRecord(before: oldBypass, applied: RouteDelta(operation: "add", destination: oldBypass.destination, gateway: oldBypass.gateway, interface: oldBypass.interface, netmask: oldBypass.netmask, protocol: oldBypass.protocol), after: oldBypass),
     ]
     let setupKey = "Setup:/Network/Service/service-wifi/DNS"

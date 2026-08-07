@@ -60,6 +60,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-restores-missing-foreign-baseline-host-route", testRepairRestoresMissingForeignBaselineHostRoute),
                 ("network-repair-retires-clean-ledger-after-default-network-change", testRepairRetiresCleanLedgerAfterDefaultNetworkChange),
                 ("network-repair-removes-owned-tunnel-route-rehomed-to-physical-interface", testRepairRemovesOwnedTunnelRouteRehomedToPhysicalInterface),
+                ("network-repair-removes-inherited-hyu-tunnel-route-rehomed-to-physical-interface", testRepairRemovesInheritedHYUTunnelRouteRehomedToPhysicalInterface),
                 ("network-repair-retires-artifact-free-ledger-after-default-route-return", testRepairRetiresArtifactFreeLedgerAfterDefaultRouteReturn),
                 ("network-repair-keeps-same-route-ledger-when-applied-dynamic-dns-remains", testRepairKeepsSameRouteLedgerWhenAppliedDynamicDNSRemains),
                 ("network-repair-restores-exact-retained-setup-dns-after-default-network-change", testRepairRestoresExactRetainedSetupDNSAfterDefaultNetworkChange),
@@ -773,6 +774,27 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(fixture.tools.restoredSearchDomains.isEmpty, "stale route cleanup leaves baseline search domains untouched")
     }
 
+    static func testRepairRemovesInheritedHYUTunnelRouteRehomedToPhysicalInterface() throws {
+        let (fixture, tunnelRoute, _) = try staleNetworkLedgerFixture(tunnelRouteWasAlreadyPresent: true)
+        fixture.tools.routes = [
+            RouteSnapshot(
+                destination: tunnelRoute.destination,
+                gateway: tunnelRoute.gateway,
+                interface: "en0",
+                netmask: tunnelRoute.netmask,
+                protocol: tunnelRoute.protocol
+            )
+        ]
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "inherited exact HYU tunnel residue is repaired after Darwin rehomes it to the physical interface")
+        try expect(fixture.tools.routes.isEmpty, "repair deletes the inherited exact HYU route residue")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "inherited stale route cleanup never restores obsolete routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "inherited stale route cleanup leaves baseline DNS untouched")
+        try expect(fixture.tools.restoredSearchDomains.isEmpty, "inherited stale route cleanup leaves baseline search domains untouched")
+    }
+
     static func testRepairRetiresArtifactFreeLedgerAfterDefaultRouteReturn() throws {
         let (fixture, _, _) = try staleNetworkLedgerFixture()
         fixture.tools.defaultGateway = "192.0.2.1"
@@ -916,13 +938,13 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(fixture.tools.restoredDNSServers.isEmpty, "stable boot mismatch never mutates DNS")
     }
 
-    static func staleNetworkLedgerFixture(ledgerBootIdentity: UInt64 = stableTestBootIdentity) throws -> (HarnessNetworkFixture, RouteSnapshot, ResolverSnapshot) {
+    static func staleNetworkLedgerFixture(ledgerBootIdentity: UInt64 = stableTestBootIdentity, tunnelRouteWasAlreadyPresent: Bool = false) throws -> (HarnessNetworkFixture, RouteSnapshot, ResolverSnapshot) {
         let fixture = try HarnessNetworkFixture()
         let oldDefault = RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: "0.0.0.0", protocol: "ipv4")
         let oldBypass = RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4")
         let tunnelRoute = RouteSnapshot(destination: "10.0.0.0", gateway: "10.10.0.1", interface: "utun7", netmask: "255.0.0.0", protocol: "ipv4")
         let records = [
-            RouteRecord(before: nil, applied: RouteDelta(operation: "add", destination: tunnelRoute.destination, gateway: tunnelRoute.gateway, interface: tunnelRoute.interface, netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol), after: tunnelRoute),
+            RouteRecord(before: tunnelRouteWasAlreadyPresent ? tunnelRoute : nil, applied: RouteDelta(operation: "add", destination: tunnelRoute.destination, gateway: tunnelRoute.gateway, interface: tunnelRoute.interface, netmask: tunnelRoute.netmask, protocol: tunnelRoute.protocol), after: tunnelRoute),
             RouteRecord(before: oldBypass, applied: RouteDelta(operation: "add", destination: oldBypass.destination, gateway: oldBypass.gateway, interface: oldBypass.interface, netmask: oldBypass.netmask, protocol: oldBypass.protocol), after: oldBypass),
         ]
         let setupKey = "Setup:/Network/Service/service-wifi/DNS"

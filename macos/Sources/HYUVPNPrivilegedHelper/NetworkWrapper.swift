@@ -818,7 +818,7 @@ public struct NetworkWrapperRunner {
         var removals: [RouteDelta] = []
         for route in current.routes {
             guard let record = records[routeKey(route)],
-                  record.before == nil,
+                  record.before == nil || record.before == record.applied.routeSnapshot,
                   record.after == record.applied.routeSnapshot,
                   record.applied.interface == recordedTunnel,
                   route.interface == current.defaultInterface,
