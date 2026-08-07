@@ -26,6 +26,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private var loginItemState: LoginItemState = .disabled
     private var lastLoginItemResult = "LOGIN_ITEM_UNAVAILABLE"
     private let launchAtLoginUserChoiceKey = "hyu.vpn.launchAtLogin.userChoice"
+    private let lastAnnouncedUpdateKey = "hyu.vpn.update.lastAnnouncedVersion"
+    private let lastUpdateCheckKey = "hyu.vpn.update.lastCheckTime"
+    private let updateCheckInterval: TimeInterval = 6 * 60 * 60
+    private var updateChecker: UpdateChecking?
+    private var updateOffer: UpdateOffer?
+    private var updateCheckTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
@@ -35,11 +41,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         startWatcher()
         apply(lifecycle.handle(.appLaunched))
         startOTPTimer()
+        configureUpdateChecker()
+        startUpdateChecks()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         otpTimer?.invalidate()
         otpTimer = nil
+        updateCheckTimer?.invalidate()
+        updateCheckTimer = nil
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -118,6 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         menu.addItem(NSMenuItem.separator())
         addResetAction(to: menu)
         addLaunchAtLoginAction(to: menu)
+        addUpdateAction(to: menu)
         menu.addItem(NSMenuItem.separator())
         addQuitAction(to: menu)
         statusItem?.menu = menu
@@ -199,6 +210,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         let item = NSMenuItem(title: "Quit HYU VPN", action: #selector(quit), keyEquivalent: "q")
         item.target = self
         item.isEnabled = !lifecycle.controlsDisabled
+        menu.addItem(item)
+    }
+
+    private func addUpdateAction(to menu: NSMenu) {
+        guard let offer = updateOffer else { return }
+        let item = NSMenuItem(title: "Update Available: v\(offer.version)…", action: #selector(openUpdate(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = offer.releaseURL
         menu.addItem(item)
     }
 
@@ -303,6 +322,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
 
     @objc private func quit() {
         NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: nil, from: self)
+    }
+
+    @objc private func openUpdate(_ sender: NSMenuItem) {
+        guard let offer = updateOffer,
+              let representedURL = sender.representedObject as? URL,
+              representedURL == offer.releaseURL
+        else { return }
+        NSWorkspace.shared.open(offer.releaseURL)
+    }
+
+    private func configureUpdateChecker() {
+        guard let versionString = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              let currentVersion = SemanticVersion(versionString),
+              let feedString = Bundle.main.object(forInfoDictionaryKey: "HYUUpdateFeedURL") as? String,
+              let feedURL = URL(string: feedString),
+              let allowedHost = Bundle.main.object(forInfoDictionaryKey: "HYUUpdateAllowedReleaseHost") as? String,
+              let allowedPath = Bundle.main.object(forInfoDictionaryKey: "HYUUpdateAllowedReleasePathPrefix") as? String
+        else { return }
+        updateChecker = HTTPSUpdateChecker(policy: UpdatePolicy(
+            currentVersion: currentVersion,
+            feedURL: feedURL,
+            allowedReleaseHost: allowedHost,
+            allowedReleasePathPrefix: allowedPath
+        ))
+    }
+
+    private func startUpdateChecks() {
+        guard updateChecker != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.performUpdateCheck() }
+        let timer = Timer(timeInterval: updateCheckInterval, target: self, selector: #selector(performScheduledUpdateCheck), userInfo: nil, repeats: true)
+        RunLoop.main.add(timer, forMode: .common)
+        updateCheckTimer = timer
+    }
+
+    @objc private func performScheduledUpdateCheck() {
+        performUpdateCheck()
+    }
+
+    private func performUpdateCheck() {
+        let now = Date().timeIntervalSince1970
+        let lastCheck = UserDefaults.standard.double(forKey: lastUpdateCheckKey)
+        guard lastCheck == 0 || now - lastCheck >= updateCheckInterval else { return }
+        UserDefaults.standard.set(now, forKey: lastUpdateCheckKey)
+        updateChecker?.check { [weak self] offer in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.updateOffer = offer
+                self.rebuildMenu()
+                if let offer { self.presentUpdateAlertIfNeeded(offer) }
+            }
+        }
+    }
+
+    private func presentUpdateAlertIfNeeded(_ offer: UpdateOffer) {
+        let version = offer.version.description
+        guard UserDefaults.standard.string(forKey: lastAnnouncedUpdateKey) != version else { return }
+        UserDefaults.standard.set(version, forKey: lastAnnouncedUpdateKey)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "HYU VPN v\(version) is available"
+        alert.informativeText = "A newer version is available to download. Your VPN connection will not be changed."
+        alert.addButton(withTitle: "Download")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(offer.releaseURL)
+        }
     }
 
     private func apply(_ transition: AppLifecycleTransition) {

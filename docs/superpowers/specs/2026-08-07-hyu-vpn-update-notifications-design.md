@@ -17,7 +17,7 @@ Starting with v0.1.1, tell users when a newer HYU VPN release exists without cou
 
 ## Distribution boundary
 
-The source repository is private, so an unauthenticated client cannot use its GitHub release API. A functional feed and downloadable DMG therefore require an explicitly approved public distribution endpoint. The recommended deployment is a separate public release/feed repository containing only the update JSON, checksums, and release assets; no source, credentials, or runtime state is published by the updater.
+The project repository is public. Installed clients read the repository's public `update.json` through `raw.githubusercontent.com` and open only the allowlisted `github.com/IRCVLab/EZ-HYU-VPN/releases/` path. The app ships no GitHub token, credentials, or automatic installer privileges.
 
 ## Verification
 

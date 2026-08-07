@@ -1,8 +1,15 @@
 #!/bin/sh
 set -eu
-if [ "$#" -ne 2 ]; then echo "usage: $0 RELEASE_EXECUTABLE DESTINATION_DIR" >&2; exit 64; fi
+if [ "$#" -ne 3 ]; then echo "usage: $0 RELEASE_EXECUTABLE DESTINATION_DIR VERSION" >&2; exit 64; fi
 exe=$1
 dest=$2
+version=$3
+/usr/bin/python3 - "$version" <<'PY'
+import re, sys
+if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", sys.argv[1]) is None:
+    print("invalid semantic version", file=sys.stderr)
+    raise SystemExit(64)
+PY
 case "$exe" in /*) ;; *) exe="$PWD/$exe" ;; esac
 case "$dest" in /*) ;; *) dest="$PWD/$dest" ;; esac
 reader="$(dirname "$exe")/hyu-vpn-credential-reader"
@@ -51,6 +58,11 @@ cp "$(dirname "$0")/../Resources/AppIcon.icns" "$resources/AppIcon.icns"
 chmod 0755 "$macos_dir/HYUVPNMenuApp"
 chmod 0755 "$macos_dir/HYUVPNCredentialReader"
 cp "$(dirname "$0")/../Resources/HYUVPNMenuApp/Info.plist" "$plist"
+plutil -insert CFBundleShortVersionString -string "$version" "$plist"
+plutil -insert CFBundleVersion -string "$version" "$plist"
+plutil -insert HYUUpdateFeedURL -string "https://raw.githubusercontent.com/IRCVLab/EZ-HYU-VPN/main/update.json" "$plist"
+plutil -insert HYUUpdateAllowedReleaseHost -string "github.com" "$plist"
+plutil -insert HYUUpdateAllowedReleasePathPrefix -string "/IRCVLab/EZ-HYU-VPN/releases/" "$plist"
 plutil -lint "$plist" >/dev/null
 codesign --force --sign - "$macos_dir/HYUVPNMenuApp" >/dev/null
 codesign --force --sign - "$macos_dir/HYUVPNCredentialReader" >/dev/null

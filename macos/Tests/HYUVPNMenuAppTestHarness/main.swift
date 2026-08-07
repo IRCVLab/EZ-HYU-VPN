@@ -64,7 +64,9 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("menu-totp-provider-and-clipboard-policy-runtime", menuTOTPProviderAndClipboardPolicyRuntime),
                 ("native-credential-reader-closed-command-surface", nativeCredentialReaderClosedCommandSurface),
                 ("credential-reset-controller-runtime-behavior", credentialResetControllerRuntimeBehavior),
-                ("credential-reset-lifecycle-runtime", credentialResetLifecycleRuntime)
+                ("credential-reset-lifecycle-runtime", credentialResetLifecycleRuntime),
+                ("update-feed-and-checker-runtime", updateFeedAndCheckerRuntime),
+                ("update-menu-source-contract", updateMenuSourceContract)
             ]
             for (name, test) in tests { print("RUN \(name)"); try test(); print("PASS \(name)") }
             print("HARNESS PASS \(tests.count) tests")
@@ -199,6 +201,74 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         let backoff = MenuModel.make(status: try VPNStatusDecoder.decode(statusData(state: .backoff, expiry: nil, connectedAt: nil)), launchAtLogin: .disabled)
         try expect(backoff[.primaryConnection]?.title == "Reconnect Now", "backoff primary title")
         try expect(backoff[.primaryConnection]?.command == .reconnect, "backoff primary command")
+    }
+
+    static func updateFeedAndCheckerRuntime() throws {
+        let policy = UpdatePolicy(
+            currentVersion: SemanticVersion("0.1.1")!,
+            feedURL: URL(string: "https://raw.githubusercontent.com/IRCVLab/EZ-HYU-VPN/main/update.json")!,
+            allowedReleaseHost: "github.com",
+            allowedReleasePathPrefix: "/IRCVLab/EZ-HYU-VPN/releases/"
+        )
+        let feed = Data(#"{"schema_version":1,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8)
+        let offer = try UpdateFeedDecoder.offer(from: feed, policy: policy)
+        try expect(offer?.version.description == "0.1.2", "newer semantic version offered")
+        try expect(SemanticVersion("0.10.0")! > SemanticVersion("0.9.9")!, "semantic components compare numerically")
+        for invalidVersion in ["1", "1.2", "v1.2.3", "01.2.3", "1.2.3-beta"] {
+            try expect(SemanticVersion(invalidVersion) == nil, "strict semantic version rejects \(invalidVersion)")
+        }
+        let equalFeed = Data(#"{"schema_version":1,"version":"0.1.1","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.1"}"#.utf8)
+        let equalOffer = try UpdateFeedDecoder.offer(from: equalFeed, policy: policy)
+        try expect(equalOffer == nil, "equal version suppressed")
+        for malformed in [
+            Data(repeating: 0x20, count: UpdateFeedDecoder.maxBytes + 1),
+            Data(#"{"schema_version":1,"version":"0.1.2"}"#.utf8),
+            Data(#"{"schema_version":1,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2","extra":true}"#.utf8),
+            Data(#"{"schema_version":1,"schema_version":1,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8),
+            Data(#"{"schema_version":1.0,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8),
+            Data(#"{"schema_version":true,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8),
+            Data(#"{"schema_version":1,"version":"0.1.2","release_url":"http://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8),
+            Data(#"{"schema_version":1,"version":"0.1.2","release_url":"https://evil.example/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8),
+            Data(#"{"schema_version":1,"version":"0.1.2","release_url":"https://github.com/other/project/releases/tag/v0.1.2"}"#.utf8),
+        ] {
+            try expectThrows("strict malformed update feed") { _ = try UpdateFeedDecoder.offer(from: malformed, policy: policy) }
+        }
+
+        var loadCount = 0
+        var finish: ((Result<Data, Error>) -> Void)?
+        let checker = HTTPSUpdateChecker(policy: policy) { _, completion in loadCount += 1; finish = completion }
+        var offers: [UpdateOffer?] = []
+        checker.check { offers.append($0) }
+        checker.check { offers.append($0) }
+        try expect(loadCount == 1, "concurrent checks coalesce into one load")
+        finish?(.success(feed))
+        try expect(offers.count == 2 && offers.allSatisfy { $0?.version.description == "0.1.2" }, "coalesced checks receive one validated offer")
+
+        let failing = HTTPSUpdateChecker(policy: policy) { _, completion in completion(.failure(UpdateCheckError.invalidFeed)) }
+        var failureCalled = false
+        failing.check { failureCalled = true; try? expect($0 == nil, "loader failure is silent nil offer") }
+        try expect(failureCalled, "loader failure completes")
+    }
+
+    static func updateMenuSourceContract() throws {
+        let root = packageRoot().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        for required in [
+            "startUpdateChecks()",
+            "6 * 60 * 60",
+            "addUpdateAction(to: menu)",
+            "Update Available: v",
+            "hyu.vpn.update.lastAnnouncedVersion",
+            "hyu.vpn.update.lastCheckTime",
+            "NSWorkspace.shared.open(offer.releaseURL)",
+            "withTitle: \"Download\"",
+            "withTitle: \"Later\"",
+            "HYUUpdateFeedURL",
+            "HYUUpdateAllowedReleaseHost",
+            "HYUUpdateAllowedReleasePathPrefix",
+        ] {
+            try expect(source.contains(required), "update menu source contains \(required)")
+        }
     }
 
     static func primaryActionDisabledTransientStates() throws {
@@ -490,7 +560,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = [root.appendingPathComponent("Scripts/assemble-menu-app.sh").path, executable.path, destination.path]
+        process.arguments = [root.appendingPathComponent("Scripts/assemble-menu-app.sh").path, executable.path, destination.path, "0.1.1"]
         try process.run(); process.waitUntilExit()
         try expect(process.terminationStatus == 0, "assembler exit")
         let app = destination.appendingPathComponent("HYU VPN.app")
@@ -505,6 +575,8 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expect(info?["CFBundleExecutable"] as? String == "HYUVPNMenuApp", "plist executable")
         try expect(info?["CFBundleName"] as? String == "HYU VPN", "plist name")
         try expect(info?["CFBundleIconFile"] as? String == "AppIcon", "plist icon")
+        try expect(info?["CFBundleShortVersionString"] as? String == "0.1.1", "plist release version")
+        try expect(info?["HYUUpdateFeedURL"] as? String == "https://raw.githubusercontent.com/IRCVLab/EZ-HYU-VPN/main/update.json", "plist update feed")
         try expect(info?["LSUIElement"] as? Bool == true, "lsui")
     }
 

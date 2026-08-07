@@ -21,6 +21,91 @@ private func sampleDocument() -> [String: Any] { [
 private func json(_ object: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) }
 private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f.date(from: string)! }
 
+@Suite struct UpdateCheckTests {
+    private let policy = UpdatePolicy(
+        currentVersion: SemanticVersion("0.1.1")!,
+        feedURL: URL(string: "https://raw.githubusercontent.com/IRCVLab/EZ-HYU-VPN/main/update.json")!,
+        allowedReleaseHost: "github.com",
+        allowedReleasePathPrefix: "/IRCVLab/EZ-HYU-VPN/releases/"
+    )
+
+    private func feed(version: String = "0.1.2", releaseURL: String = "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2") -> Data {
+        Data(#"{"schema_version":1,"version":"\#(version)","release_url":"\#(releaseURL)"}"#.utf8)
+    }
+
+    @Test func semanticVersionsAreStrictAndOrderedNumerically() {
+        #expect(SemanticVersion("0.1.2")! > SemanticVersion("0.1.1")!)
+        #expect(SemanticVersion("0.10.0")! > SemanticVersion("0.9.9")!)
+        #expect(SemanticVersion("1.0.0")! > SemanticVersion("0.99.99")!)
+        for invalid in ["1", "1.2", "v1.2.3", "01.2.3", "1.2.3.4", "1.2.-1", "1.2.3-beta", ""] {
+            #expect(SemanticVersion(invalid) == nil)
+        }
+    }
+
+    @Test func strictFeedOffersOnlyNewerAllowlistedHTTPSRelease() throws {
+        #expect(try UpdateFeedDecoder.offer(from: feed(), policy: policy)?.version.description == "0.1.2")
+        #expect(try UpdateFeedDecoder.offer(from: feed(version: "0.1.1"), policy: policy) == nil)
+        #expect(try UpdateFeedDecoder.offer(from: feed(version: "0.1.0"), policy: policy) == nil)
+        #expect(throws: UpdateCheckError.self) {
+            try UpdateFeedDecoder.offer(from: feed(releaseURL: "http://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"), policy: policy)
+        }
+        #expect(throws: UpdateCheckError.self) {
+            try UpdateFeedDecoder.offer(from: feed(releaseURL: "https://evil.example/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"), policy: policy)
+        }
+        #expect(throws: UpdateCheckError.self) {
+            try UpdateFeedDecoder.offer(from: feed(releaseURL: "https://github.com/other/project/releases/tag/v0.1.2"), policy: policy)
+        }
+    }
+
+    @Test func feedRejectsOversizeUnknownMissingDuplicateAndNonIntegerSchema() {
+        let malformed = [
+            Data(repeating: 0x20, count: UpdateFeedDecoder.maxBytes + 1),
+            Data(#"{"schema_version":1,"version":"0.1.2"}"#.utf8),
+            Data(#"{"schema_version":1,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2","extra":true}"#.utf8),
+            Data(#"{"schema_version":1,"schema_version":1,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8),
+            Data(#"{"schema_version":1.0,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8),
+            Data(#"{"schema_version":true,"version":"0.1.2","release_url":"https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.2"}"#.utf8),
+        ]
+        for data in malformed {
+            #expect(throws: UpdateCheckError.self) { try UpdateFeedDecoder.offer(from: data, policy: policy) }
+        }
+    }
+
+    @Test func checkerReturnsOfferAndFailsSilentForLoaderOrParserErrors() {
+        let good = HTTPSUpdateChecker(policy: policy) { _, completion in completion(.success(feed())) }
+        var goodOffer: UpdateOffer?
+        good.check { goodOffer = $0 }
+        #expect(goodOffer?.version.description == "0.1.2")
+
+        let loaderFailure = HTTPSUpdateChecker(policy: policy) { _, completion in completion(.failure(UpdateCheckError.invalidFeed)) }
+        var loaderOffer: UpdateOffer? = UpdateOffer(version: SemanticVersion("9.9.9")!, releaseURL: URL(string: "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v9.9.9")!)
+        loaderFailure.check { loaderOffer = $0 }
+        #expect(loaderOffer == nil)
+
+        let parserFailure = HTTPSUpdateChecker(policy: policy) { _, completion in completion(.success(Data("not-json".utf8))) }
+        var parserOffer: UpdateOffer? = UpdateOffer(version: SemanticVersion("9.9.9")!, releaseURL: URL(string: "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v9.9.9")!)
+        parserFailure.check { parserOffer = $0 }
+        #expect(parserOffer == nil)
+    }
+
+    @Test func checkerCoalescesConcurrentChecksIntoOneLoad() {
+        var loadCount = 0
+        var finish: ((Result<Data, Error>) -> Void)?
+        let checker = HTTPSUpdateChecker(policy: policy) { _, completion in
+            loadCount += 1
+            finish = completion
+        }
+        var offers: [UpdateOffer?] = []
+        checker.check { offers.append($0) }
+        checker.check { offers.append($0) }
+
+        #expect(loadCount == 1)
+        finish?(.success(feed()))
+        #expect(offers.count == 2)
+        #expect(offers.allSatisfy { $0?.version.description == "0.1.2" })
+    }
+}
+
 @Suite struct TOTPDisplayTests {
     private let rfcSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 

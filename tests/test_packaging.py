@@ -33,6 +33,7 @@ from release_packaging import (
 
 ASSEMBLE_APP = REPO / "scripts" / "assemble-app.sh"
 ASSEMBLE_MENU_APP = REPO / "macos" / "Scripts" / "assemble-menu-app.sh"
+ASSEMBLE_INSTALLER_APP = REPO / "macos" / "Scripts" / "assemble-installer-app.sh"
 PACKAGE_RELEASE = REPO / "scripts" / "package-release.py"
 INSTALLER_MANIFEST = REPO / "installer" / "manifest.py"
 
@@ -179,6 +180,57 @@ class PackagingTestCase(unittest.TestCase):
         return src
 
 
+class NativeAppAssemblyTests(PackagingTestCase):
+    def test_native_app_assemblers_inject_strict_release_version_and_update_policy(self):
+        inputs = self.root / "native-inputs"
+        inputs.mkdir()
+        menu_executable = inputs / "HYUVPNMenuApp"
+        credential_reader = inputs / "hyu-vpn-credential-reader"
+        installer_executable = inputs / "HYUVPNInstallerApp"
+        for executable in (menu_executable, credential_reader, installer_executable):
+            executable.write_bytes(Path("/usr/bin/true").read_bytes())
+            executable.chmod(0o755)
+
+        menu_output = self.root / "menu-output"
+        installer_output = self.root / "installer-output"
+        for script, executable, output in (
+            (ASSEMBLE_MENU_APP, menu_executable, menu_output),
+            (ASSEMBLE_INSTALLER_APP, installer_executable, installer_output),
+        ):
+            output.mkdir()
+            completed = subprocess.run([str(script), str(executable), str(output), "0.1.1"], text=True, capture_output=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        with (menu_output / "HYU VPN.app/Contents/Info.plist").open("rb") as stream:
+            menu_info = __import__("plistlib").load(stream)
+        with (installer_output / "Install HYU VPN.app/Contents/Info.plist").open("rb") as stream:
+            installer_info = __import__("plistlib").load(stream)
+        for info in (menu_info, installer_info):
+            self.assertEqual(info["CFBundleShortVersionString"], "0.1.1")
+            self.assertEqual(info["CFBundleVersion"], "0.1.1")
+        self.assertEqual(menu_info["HYUUpdateFeedURL"], "https://raw.githubusercontent.com/IRCVLab/EZ-HYU-VPN/main/update.json")
+        self.assertEqual(menu_info["HYUUpdateAllowedReleaseHost"], "github.com")
+        self.assertEqual(menu_info["HYUUpdateAllowedReleasePathPrefix"], "/IRCVLab/EZ-HYU-VPN/releases/")
+
+    def test_native_app_assemblers_reject_non_semantic_versions(self):
+        executable = self.root / "HYUVPNInstallerApp"
+        executable.write_bytes(Path("/usr/bin/true").read_bytes())
+        executable.chmod(0o755)
+        for version in ("v0.1.1", "01.1.1", "1.2", "1.2.3-beta", "1.2.3.4"):
+            output = self.root / ("invalid-" + version.replace("/", "_"))
+            output.mkdir()
+            completed = subprocess.run([str(ASSEMBLE_INSTALLER_APP), str(executable), str(output), version], text=True, capture_output=True)
+            self.assertEqual(completed.returncode, 64)
+            self.assertIn("invalid semantic version", completed.stderr)
+
+    def test_public_update_feed_points_to_current_release(self):
+        feed = json.loads((REPO / "update.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(feed), {"schema_version", "version", "release_url"})
+        self.assertEqual(feed["schema_version"], 1)
+        self.assertEqual(feed["version"], "0.1.1")
+        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.1")
+
+
 class FakeOtoolRunner:
     def __init__(self, outputs):
         self.outputs = outputs
@@ -316,13 +368,19 @@ class DestinationGuardTests(PackagingTestCase):
         (fixture / "source" / "main.swift").write_text("print(\"x\")\n", encoding="utf-8")
         for script in [ASSEMBLE_APP, ASSEMBLE_MENU_APP]:
             with self.subTest(script=script.name, destination="repo"):
-                proc = subprocess.run([str(script), str(fixture), str(REPO)], text=True, capture_output=True)
+                arguments = [str(script), str(fixture), str(REPO)]
+                if script == ASSEMBLE_MENU_APP:
+                    arguments.append("0.1.1")
+                proc = subprocess.run(arguments, text=True, capture_output=True)
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("unsafe destination", proc.stderr)
             link = self.root / f"{script.name}.link"
             link.symlink_to(self.build_root)
             with self.subTest(script=script.name, destination="symlink"):
-                proc = subprocess.run([str(script), str(fixture), str(link)], text=True, capture_output=True)
+                arguments = [str(script), str(fixture), str(link)]
+                if script == ASSEMBLE_MENU_APP:
+                    arguments.append("0.1.1")
+                proc = subprocess.run(arguments, text=True, capture_output=True)
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("unsafe destination", proc.stderr)
 
