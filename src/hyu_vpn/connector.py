@@ -20,7 +20,7 @@ from pathlib import Path
 from types import FrameType
 from typing import BinaryIO, Callable, Mapping, Optional, Sequence, TextIO
 
-from .otp import Keychain, TotpError, TotpProvider
+from .otp import CredentialReader, TotpError, TotpProvider
 from .status import OpenConnectExpiryParser
 
 
@@ -660,10 +660,10 @@ def main(
         print("invalid connector runtime configuration", file=sys.stderr)
         return 1
     try:
-        keychain = Keychain()
-        username = keychain.read("gp-vpn-username")
-        password = keychain.read("gp-vpn-password")
-        totp_seed = keychain.read("gp-vpn-totp")
+        credentials = CredentialReader()
+        username = credentials.read("gp-vpn-username")
+        password = credentials.read("gp-vpn-password")
+        totp_seed = credentials.read("gp-vpn-totp")
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1

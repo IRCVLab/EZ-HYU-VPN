@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 
-KEYCHAIN_READER = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader"
+CREDENTIAL_READER = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader"
 OATHTOOL = "/opt/homebrew/bin/oathtool"
 SUBPROCESS_TIMEOUT = 5.0
 
@@ -22,8 +22,8 @@ class TotpError(RuntimeError):
     """Raised when a TOTP value cannot be generated safely."""
 
 
-class Keychain:
-    def __init__(self, *, reader_path: str = KEYCHAIN_READER, runner: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None) -> None:
+class CredentialReader:
+    def __init__(self, *, reader_path: str = CREDENTIAL_READER, runner: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None) -> None:
         self.reader_path = reader_path
         self.runner = runner or subprocess.run
 
@@ -38,10 +38,10 @@ class Keychain:
                 timeout=SUBPROCESS_TIMEOUT,
             )
         except (OSError, subprocess.SubprocessError):
-            raise RuntimeError(f"missing keychain item: {service}") from None
+            raise RuntimeError(f"missing credential: {service}") from None
         value = (completed.stdout or "").strip()
         if completed.returncode != 0 or not value:
-            raise RuntimeError(f"missing keychain item: {service}")
+            raise RuntimeError(f"missing credential: {service}")
         return value
 
 

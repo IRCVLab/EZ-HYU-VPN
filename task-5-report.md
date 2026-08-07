@@ -45,7 +45,7 @@ Other agents' Task 2 files were not modified or staged.
 
 ## Implemented behavior checklist
 
-- Reads existing macOS Keychain services `gp-vpn-username`, `gp-vpn-password`, and `gp-vpn-totp` through the fixed bundled native credential reader.
+- Reads the AES-GCM encrypted local credential document through the fixed bundled native credential reader.
 - Generates TOTP through argv-array `/opt/homebrew/bin/oathtool --totp -b <seed>` by default.
 - Redacts secret material from raised/printed errors; no password, seed, OTP, cookie, host ID, or raw HIP XML logging was added.
 - Uses PTY output handling for split prompts.
@@ -72,7 +72,7 @@ Other agents' Task 2 files were not modified or staged.
 1. Replaced the fake `Gateway Challenge:` shortcut with the preserved real sequence: startup `--passwd-on-stdin` password, bare portal `Challenge:`, gateway `Password:`, then a second identical bare `Challenge:`. The gateway password is sent and the later identical challenge receives a distinct TOTP.
 2. Removed global prompt-label suppression; clearing the consumed tail deduplicates one occurrence without suppressing a later identical prompt.
 3. Added redacted handling and bounded child cleanup for OpenConnect launch failures and broken child stdin.
-4. Added five-second Keychain/oathtool timeouts, redacted subprocess/OS failure handling, and exact six-digit OTP validation.
+4. Added five-second credential-reader/oathtool timeouts, redacted subprocess/OS failure handling, and exact six-digit OTP validation.
 5. Changed privileged launcher default to absolute `/usr/bin/sudo`. The separately implemented Task 4 commit provides the executable default `bin/gp-hip-report` path.
 
 ### RED evidence

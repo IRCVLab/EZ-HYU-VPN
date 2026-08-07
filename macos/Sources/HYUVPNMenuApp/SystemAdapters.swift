@@ -1,106 +1,196 @@
 import Foundation
+import CryptoKit
 import ServiceManagement
-import Security
 import Darwin
 import HYUVPNMenuCore
-import HYUVPNKeychainAccessShim
 
-package final class KeychainCredentialStore: CredentialStore {
-    enum AdapterError: Error { case keychainFailure }
+package final class EncryptedCredentialStore: CredentialStore {
+    enum AdapterError: Error { case storageFailure }
 
-    private static let account = "hyu-vpn"
-    package static let credentialReaderPath = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader"
-    private static let services: [CredentialKey: String] = [
-        .username: "gp-vpn-username",
-        .password: "gp-vpn-password",
-        .totpSeed: "gp-vpn-totp",
-    ]
+    private struct Document: Codable {
+        let schemaVersion: Int
+        var values: [String: String]
 
-    private let additionalTrustedApplicationPath: String?
-
-    package init(additionalTrustedApplicationPath: String? = nil) {
-        self.additionalTrustedApplicationPath = additionalTrustedApplicationPath
-        precondition(Set(Self.services.keys) == Set(CredentialKey.allCases))
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case values
+        }
     }
 
+    private static let maximumFileBytes = 64 * 1024
+    private let root: URL
+    private var keyURL: URL { root.appendingPathComponent("credentials.key") }
+    private var encryptedURL: URL { root.appendingPathComponent("credentials.enc") }
+    private var lockURL: URL { root.appendingPathComponent("credentials.lock") }
+
+    package init(root: URL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/hyu-openconnect", isDirectory: true)) {
+        self.root = root
+    }
 
     package func contains(_ key: CredentialKey) throws -> Bool {
-        var query = baseQuery(for: key)
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        if status == errSecItemNotFound { return false }
-        guard status == errSecSuccess else { throw AdapterError.keychainFailure }
-        return true
+        try read(key) != nil
     }
 
     package func read(_ key: CredentialKey) throws -> String? {
-        var query = baseQuery(for: key)
-        query[kSecReturnData as String] = kCFBooleanTrue
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw AdapterError.keychainFailure }
-        guard let data = item as? Data, let value = String(data: data, encoding: .utf8) else {
-            throw AdapterError.keychainFailure
+        try withLock {
+            guard let encrypted = try readSecureFile(encryptedURL) else { return nil }
+            guard let keyData = try readSecureFile(keyURL), keyData.count == 32 else { throw AdapterError.storageFailure }
+            return try decrypt(encrypted, using: SymmetricKey(data: keyData)).values[key.rawValue]
         }
-        return value
     }
 
     package func write(_ value: String, for key: CredentialKey) throws {
-        guard let data = value.data(using: .utf8) else { throw AdapterError.keychainFailure }
-        let query = baseQuery(for: key)
-        let access = try KeychainCredentialAccessFactory.make(firstTrustedApplicationPath: Self.credentialReaderPath, secondTrustedApplicationPath: additionalTrustedApplicationPath)
-        let attributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccess as String: access,
-        ]
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if updateStatus == errSecSuccess { return }
-        guard updateStatus == errSecItemNotFound else { throw AdapterError.keychainFailure }
-
-        var addQuery = query
-        addQuery[kSecValueData as String] = attributes[kSecValueData as String]
-        addQuery[kSecAttrAccess as String] = attributes[kSecAttrAccess as String]
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        if addStatus == errSecSuccess { return }
-        if addStatus == errSecDuplicateItem {
-            let retryStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-            if retryStatus == errSecSuccess { return }
+        try withLock {
+            let symmetricKey = try loadOrCreateKey()
+            var document: Document
+            if let encrypted = try readSecureFile(encryptedURL) {
+                document = try decrypt(encrypted, using: symmetricKey)
+            } else {
+                document = Document(schemaVersion: 1, values: [:])
+            }
+            document.values[key.rawValue] = value
+            try writeSecureFile(try encrypt(document, using: symmetricKey), to: encryptedURL)
         }
-        throw AdapterError.keychainFailure
     }
 
     package func remove(_ key: CredentialKey) throws {
-        let status = SecItemDelete(baseQuery(for: key) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw AdapterError.keychainFailure }
+        try withLock {
+            guard let encrypted = try readSecureFile(encryptedURL) else { return }
+            guard let keyData = try readSecureFile(keyURL), keyData.count == 32 else { throw AdapterError.storageFailure }
+            let symmetricKey = SymmetricKey(data: keyData)
+            var document = try decrypt(encrypted, using: symmetricKey)
+            document.values.removeValue(forKey: key.rawValue)
+            try writeSecureFile(try encrypt(document, using: symmetricKey), to: encryptedURL)
+        }
     }
 
-    private func baseQuery(for key: CredentialKey) -> [String: Any] {
-        guard let service = Self.services[key] else { preconditionFailure("closed credential key map") }
-        return [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: Self.account,
-        ]
+    private func loadOrCreateKey() throws -> SymmetricKey {
+        if let data = try readSecureFile(keyURL) {
+            guard data.count == 32 else { throw AdapterError.storageFailure }
+            return SymmetricKey(data: data)
+        }
+        let key = SymmetricKey(size: .bits256)
+        let data = key.withUnsafeBytes { Data($0) }
+        try writeSecureFile(data, to: keyURL)
+        return key
     }
-}
 
-package enum KeychainCredentialAccessFactory {
-    package static func make(firstTrustedApplicationPath: String? = nil, secondTrustedApplicationPath: String? = nil) throws -> SecAccess {
-        var unmanagedAccess: Unmanaged<SecAccess>?
-        let status = withOptionalCString(firstTrustedApplicationPath) { firstPath in
-            withOptionalCString(secondTrustedApplicationPath) { secondPath in
-                HYUVPNCreateCredentialAccessWithPaths(firstPath, secondPath, &unmanagedAccess)
+    private func encrypt(_ document: Document, using key: SymmetricKey) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let plaintext = try encoder.encode(document)
+        guard let combined = try AES.GCM.seal(plaintext, using: key).combined else { throw AdapterError.storageFailure }
+        return combined
+    }
+
+    private func decrypt(_ encrypted: Data, using key: SymmetricKey) throws -> Document {
+        do {
+            let plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: encrypted), using: key)
+            let document = try JSONDecoder().decode(Document.self, from: plaintext)
+            guard document.schemaVersion == 1,
+                  Set(document.values.keys).isSubset(of: Set(CredentialKey.allCases.map(\.rawValue))) else {
+                throw AdapterError.storageFailure
+            }
+            return document
+        } catch {
+            throw AdapterError.storageFailure
+        }
+    }
+
+    private func withLock<T>(_ operation: () throws -> T) throws -> T {
+        try ensureRootDirectory()
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw AdapterError.storageFailure }
+        defer { close(descriptor) }
+        guard fchmod(descriptor, 0o600) == 0 else { throw AdapterError.storageFailure }
+        try verifyDescriptor(descriptor, directory: false, mode: 0o600)
+        guard flock(descriptor, LOCK_EX) == 0 else { throw AdapterError.storageFailure }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        return try operation()
+    }
+
+    private func ensureRootDirectory() throws {
+        let status = mkdir(root.path, 0o700)
+        guard status == 0 || errno == EEXIST else { throw AdapterError.storageFailure }
+        let descriptor = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw AdapterError.storageFailure }
+        defer { close(descriptor) }
+        try verifyDescriptor(descriptor, directory: true, mode: 0o700)
+    }
+
+    private func readSecureFile(_ url: URL) throws -> Data? {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if descriptor < 0 {
+            if errno == ENOENT { return nil }
+            throw AdapterError.storageFailure
+        }
+        defer { close(descriptor) }
+        try verifyDescriptor(descriptor, directory: false, mode: 0o600)
+
+        var result = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
+            if count == 0 { break }
+            guard count > 0 else {
+                if errno == EINTR { continue }
+                throw AdapterError.storageFailure
+            }
+            guard result.count + count <= Self.maximumFileBytes else { throw AdapterError.storageFailure }
+            result.append(contentsOf: buffer.prefix(count))
+        }
+        return result
+    }
+
+    private func writeSecureFile(_ data: Data, to url: URL) throws {
+        guard data.count <= Self.maximumFileBytes else { throw AdapterError.storageFailure }
+        try validateExistingFileIfPresent(url)
+        let temporary = root.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw AdapterError.storageFailure }
+        var committed = false
+        defer {
+            close(descriptor)
+            if !committed { _ = unlink(temporary.path) }
+        }
+        guard fchmod(descriptor, 0o600) == 0 else { throw AdapterError.storageFailure }
+        var offset = 0
+        try data.withUnsafeBytes { bytes in
+            while offset < bytes.count {
+                let written = Darwin.write(descriptor, bytes.baseAddress?.advanced(by: offset), bytes.count - offset)
+                guard written > 0 else {
+                    if errno == EINTR { continue }
+                    throw AdapterError.storageFailure
+                }
+                offset += written
             }
         }
-        guard status == errSecSuccess, let access = unmanagedAccess?.takeRetainedValue() else { throw KeychainCredentialStore.AdapterError.keychainFailure }
-        return access
+        guard fsync(descriptor) == 0, rename(temporary.path, url.path) == 0 else { throw AdapterError.storageFailure }
+        committed = true
+        let directoryDescriptor = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if directoryDescriptor >= 0 {
+            _ = fsync(directoryDescriptor)
+            close(directoryDescriptor)
+        }
     }
 
-    private static func withOptionalCString<T>(_ value: String?, body: (UnsafePointer<CChar>?) -> T) -> T {
-        guard let value else { return body(nil) }
-        return value.withCString(body)
+    private func validateExistingFileIfPresent(_ url: URL) throws {
+        var info = stat()
+        if lstat(url.path, &info) != 0 {
+            if errno == ENOENT { return }
+            throw AdapterError.storageFailure
+        }
+        guard FileTOTPMetadataPolicy.isSafe(ownerUID: info.st_uid, mode: info.st_mode, directory: false, expectedMode: 0o600) else {
+            throw AdapterError.storageFailure
+        }
+    }
+
+    private func verifyDescriptor(_ descriptor: Int32, directory: Bool, mode: mode_t) throws {
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              FileTOTPMetadataPolicy.isSafe(ownerUID: info.st_uid, mode: info.st_mode, directory: directory, expectedMode: mode) else {
+            throw AdapterError.storageFailure
+        }
     }
 }
 
@@ -112,6 +202,7 @@ package enum CredentialReaderCommand {
     ]
 
     package static func run(arguments: [String], store: CredentialStore, output: (String) -> Void) -> Int32 {
+        precondition(Set(Self.services.values) == Set(CredentialKey.allCases))
         guard arguments.count == 1, let key = services[arguments[0]] else { return 64 }
         do {
             guard let value = try store.read(key), !value.isEmpty else { return 1 }
@@ -125,7 +216,7 @@ package enum CredentialReaderCommand {
 
 package enum SystemCredentialBootstrap {
     package static func currentID() -> String? {
-        try? KeychainCredentialStore().read(.username)
+        try? EncryptedCredentialStore().read(.username)
     }
 }
 
@@ -188,7 +279,7 @@ package final class FileTOTPStateResetter: TOTPStateResetting {
 
 package enum SystemCredentialTransactionFactory {
     package static func make() -> CredentialTransaction {
-        CredentialTransaction(store: KeychainCredentialStore(), totpResetter: FileTOTPStateResetter())
+        CredentialTransaction(store: EncryptedCredentialStore(), totpResetter: FileTOTPStateResetter())
     }
 }
 

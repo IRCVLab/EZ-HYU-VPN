@@ -12,7 +12,7 @@ Install after merge, not from a partially reviewed worktree. Keep the native Glo
 - OpenConnect 9.21 or compatible at `/opt/homebrew/bin/openconnect`.
 - `oathtool` at `/opt/homebrew/bin/oathtool`.
 - vpnc-script at `/opt/homebrew/etc/vpnc/vpnc-script`.
-- Existing Keychain generic-password service names, with values kept only in Keychain:
+- Fixed credential service names stored only inside the local AES-GCM encrypted credential document:
   - `gp-vpn-username`
   - `gp-vpn-password`
   - `gp-vpn-totp`

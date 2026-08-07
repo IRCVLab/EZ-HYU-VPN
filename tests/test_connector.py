@@ -26,7 +26,7 @@ from hyu_vpn.connector import (
     main,
     parse_connector_event_line,
 )
-from hyu_vpn.otp import KEYCHAIN_READER, Keychain, TotpError, TotpProvider
+from hyu_vpn.otp import CREDENTIAL_READER, CredentialReader, TotpError, TotpProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_OPENCONNECT = ROOT / "tests" / "helpers" / "fake_openconnect.py"
@@ -301,10 +301,10 @@ class ConnectorTests(unittest.TestCase):
         self.assertNotIn("COOKIE-CANARY", written)
         self.assertNotIn("PASSWORD-CANARY", written)
 
-    def test_main_rejects_all_arguments_before_keychain_access(self):
-        with mock.patch("hyu_vpn.connector.Keychain") as keychain:
+    def test_main_rejects_all_arguments_before_credential_store_access(self):
+        with mock.patch("hyu_vpn.connector.CredentialReader") as credential_store:
             self.assertEqual(main(["--helper", "/tmp/evil"]), 2)
-        keychain.assert_not_called()
+        credential_store.assert_not_called()
     def test_uses_distinct_totp_for_portal_and_gateway(self):
         with tempfile.TemporaryDirectory() as td:
             marker = Path(td) / "openconnect.json"
@@ -715,12 +715,12 @@ class ConnectorTests(unittest.TestCase):
                     required_uid=os.getuid(),
                 )
 
-    def test_main_fails_closed_before_keychain_when_runtime_config_missing(self):
-        with tempfile.TemporaryDirectory() as td, mock.patch("hyu_vpn.connector.Keychain") as keychain:
+    def test_main_fails_closed_before_credential_store_when_runtime_config_missing(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch("hyu_vpn.connector.CredentialReader") as credential_store:
             rc = main(runtime_config_path=Path(td) / "missing.json", runtime_required_uid=os.getuid())
 
         self.assertEqual(rc, 1)
-        keychain.assert_not_called()
+        credential_store.assert_not_called()
 
     def test_main_uses_verified_installed_oathtool_instead_of_homebrew_fallback(self):
         with tempfile.TemporaryDirectory() as td:
@@ -753,7 +753,7 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(provider.oathtool_path, str(oathtool))
         self.assertNotEqual(provider.oathtool_path, "/opt/homebrew/bin/oathtool")
 
-    def test_main_reads_keychain_services_by_absolute_native_reader_argv(self):
+    def test_main_reads_credential_store_services_by_absolute_native_reader_argv(self):
         calls = []
         def fake_run(argv, **kwargs):
             calls.append(tuple(argv))
@@ -782,9 +782,9 @@ class ConnectorTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [
-            (KEYCHAIN_READER, "gp-vpn-username"),
-            (KEYCHAIN_READER, "gp-vpn-password"),
-            (KEYCHAIN_READER, "gp-vpn-totp"),
+            (CREDENTIAL_READER, "gp-vpn-username"),
+            (CREDENTIAL_READER, "gp-vpn-password"),
+            (CREDENTIAL_READER, "gp-vpn-totp"),
         ])
         provider = session_cls.call_args.kwargs["totp_provider"]
         self.assertEqual(provider.state_path.name, "totp-counter.json")
@@ -796,26 +796,26 @@ class ConnectorTests(unittest.TestCase):
 
 
 
-    def test_keychain_reads_use_fixed_native_reader(self):
+    def test_credential_store_reads_use_fixed_native_reader(self):
         calls = []
         def fake_run(argv, **kwargs):
             calls.append(tuple(argv))
             return mock.Mock(returncode=0, stdout="value\n", stderr="")
 
-        self.assertEqual(Keychain(runner=fake_run).read("gp-vpn-password"), "value")
+        self.assertEqual(CredentialReader(runner=fake_run).read("gp-vpn-password"), "value")
 
-        self.assertEqual(KEYCHAIN_READER, "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader")
+        self.assertEqual(CREDENTIAL_READER, "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader")
         self.assertEqual(calls, [
-            (KEYCHAIN_READER, "gp-vpn-password"),
+            (CREDENTIAL_READER, "gp-vpn-password"),
         ])
 
-    def test_keychain_missing_item_error_is_redacted_and_does_not_expose_account_query_output(self):
+    def test_credential_store_missing_item_error_is_redacted_and_does_not_expose_account_query_output(self):
         def fake_run(argv, **kwargs):
-            self.assertEqual(argv, [KEYCHAIN_READER, "gp-vpn-password"])
+            self.assertEqual(argv, [CREDENTIAL_READER, "gp-vpn-password"])
             return mock.Mock(returncode=44, stdout="", stderr="multiple accounts PASSWORD-CANARY SEED-CANARY hyu-vpn")
 
         with self.assertRaisesRegex(RuntimeError, "gp-vpn-password") as cm:
-            Keychain(runner=fake_run).read("gp-vpn-password")
+            CredentialReader(runner=fake_run).read("gp-vpn-password")
 
         message = str(cm.exception)
         self.assertNotIn("PASSWORD-CANARY", message)
@@ -952,24 +952,24 @@ class TotpProviderTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
-    def test_keychain_and_oathtool_timeouts_are_redacted(self):
+    def test_credential_store_and_oathtool_timeouts_are_redacted(self):
         def timeout(*_args, **_kwargs):
             raise subprocess.TimeoutExpired(cmd=["SECRET-CANARY"], timeout=5)
 
-        with self.assertRaisesRegex(RuntimeError, "gp-vpn-password") as keychain_error:
-            Keychain(runner=timeout).read("gp-vpn-password")
-        self.assertNotIn("SECRET-CANARY", str(keychain_error.exception))
+        with self.assertRaisesRegex(RuntimeError, "gp-vpn-password") as credential_store_error:
+            CredentialReader(runner=timeout).read("gp-vpn-password")
+        self.assertNotIn("SECRET-CANARY", str(credential_store_error.exception))
 
         with self.assertRaises(TotpError) as totp_error:
             TotpProvider("SEED-CANARY", runner=timeout).current()
         self.assertNotIn("SEED-CANARY", str(totp_error.exception))
 
-    def test_keychain_missing_item_raises_redacted_error(self):
+    def test_credential_store_missing_item_raises_redacted_error(self):
         def fake_run(argv, **kwargs):
             return mock.Mock(returncode=44, stdout="", stderr="no PASSWORD-CANARY")
 
         with self.assertRaisesRegex(RuntimeError, "gp-vpn-password") as cm:
-            Keychain(runner=fake_run).read("gp-vpn-password")
+            CredentialReader(runner=fake_run).read("gp-vpn-password")
         self.assertNotIn("PASSWORD-CANARY", str(cm.exception))
 
 

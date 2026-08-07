@@ -5,7 +5,7 @@ exe=$1
 dest=$2
 case "$exe" in /*) ;; *) exe="$PWD/$exe" ;; esac
 case "$dest" in /*) ;; *) dest="$PWD/$dest" ;; esac
-reader="$(dirname "$exe")/hyu-vpn-keychain-reader"
+reader="$(dirname "$exe")/hyu-vpn-credential-reader"
 /usr/bin/python3 - "$dest" "$(cd "$(dirname "$0")/../.." && pwd -P)" <<'PY'
 import pathlib, stat, sys
 dest = pathlib.Path(sys.argv[1])

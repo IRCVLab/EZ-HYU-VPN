@@ -13,7 +13,7 @@ For named internal lab users only. The DMG is a native GUI distribution; normal 
    - TOTP authenticator setup secret twice; do not enter the current 6-digit OTP code.
 5. Approve the single macOS administrator authorization dialog.
 
-Existing HYU VPN Keychain credentials are retained. Missing credentials are collected in memory before elevation and written after the root install succeeds using Security.framework with access limited to the signed installer, installed menu app, and bundled native credential reader. The generic Keychain command-line tool is not used.
+Missing credentials are collected in memory before elevation and written after the root install succeeds. They are stored as an AES-GCM encrypted document with a random 256-bit local key; the containing directory is mode `0700` and the key, ciphertext, and lock files are mode `0600`. Keychain and its authorization prompts are not used.
 
 ## What the installer does
 

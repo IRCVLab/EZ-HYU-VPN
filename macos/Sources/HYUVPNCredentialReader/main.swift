@@ -4,7 +4,7 @@ import HYUVPNMenuAppSupport
 
 let status = CredentialReaderCommand.run(
     arguments: Array(CommandLine.arguments.dropFirst()),
-    store: KeychainCredentialStore()
+    store: EncryptedCredentialStore()
 ) { value in
     FileHandle.standardOutput.write(Data(value.utf8))
 }

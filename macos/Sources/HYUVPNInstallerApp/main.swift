@@ -163,7 +163,7 @@ struct InstallerController {
     let bundleURL: URL
     let status: (String) -> Void
     private var payloadURL: URL { bundleURL.deletingLastPathComponent() }
-    private let credentialReader = InstallerKeychainStore()
+    private let credentialReader = InstallerEncryptedCredentialStore()
 
     func runInstall() throws -> InstallerRunResult {
         status("Preparing HYU VPN installer…")
@@ -202,8 +202,7 @@ struct InstallerController {
         }
 
         status("Saving HYU VPN credentials…")
-        let installedMenuExecutable = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
-        let credentialWriter = InstallerKeychainStore(additionalTrustedApplicationPath: installedMenuExecutable)
+        let credentialWriter = InstallerEncryptedCredentialStore()
         let writtenKeys = try InstallerCredentialBootstrapper.writeCollectedCredentials(store: credentialWriter, collected: missingCredentialValues)
         do {
             status("Starting HYU VPN menu app…")
@@ -424,12 +423,8 @@ struct InstallerController {
 }
 
 
-final class InstallerKeychainStore: InstallerCredentialStoring {
-    private let store: KeychainCredentialStore
-
-    init(additionalTrustedApplicationPath: String? = nil) {
-        self.store = KeychainCredentialStore(additionalTrustedApplicationPath: additionalTrustedApplicationPath)
-    }
+final class InstallerEncryptedCredentialStore: InstallerCredentialStoring {
+    private let store = EncryptedCredentialStore()
 
     func contains(_ key: CredentialKey) throws -> Bool { try store.contains(key) }
     func read(_ key: CredentialKey) throws -> String? { try store.read(key) }

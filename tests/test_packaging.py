@@ -357,10 +357,11 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertIn("Install HYU VPN.app", text)
         self.assertIn("native GUI distribution", text)
         self.assertIn("single macOS administrator authorization", text)
-        self.assertIn("Security.framework", text)
+        self.assertIn("AES-GCM", text)
+        self.assertIn("Keychain and its authorization prompts are not used", text)
         self.assertIn("auto-reconnect enabled", text)
         self.assertIn("No Terminal installer or uninstaller is packaged", text)
-        self.assertIn("native credential reader", text)
+        self.assertIn("AES-GCM encrypted document", text)
         for obsolete in [
             "Install HYU VPN.command",
             "Uninstall HYU VPN.command",
@@ -390,7 +391,7 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertIn("root-admin.sh", source)
         self.assertIn("--verify-manifest", source)
         self.assertIn("--stage-user-payload", source)
-        self.assertIn("KeychainCredentialStore", source)
+        self.assertIn("EncryptedCredentialStore", source)
         self.assertIn("InstallerCredentialBootstrapper", source)
         self.assertIn("RootAdminInvocation.makeInstallArgv", source)
         self.assertIn("RootAdminAuthorizer.authorizeOnce", source)
@@ -423,20 +424,17 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertLess(source.index("/usr/bin/open"), source.index("waitForSingleMenubar"))
 
 
-    def test_installer_keychain_acl_trusts_installed_menu_app_after_root_install(self):
+    def test_installer_uses_encrypted_file_store_after_root_install(self):
         app_source = (REPO / "macos/Sources/HYUVPNInstallerApp/main.swift").read_text(encoding="utf-8")
         adapter_source = (REPO / "macos/Sources/HYUVPNMenuApp/SystemAdapters.swift").read_text(encoding="utf-8")
-        shim_source = (REPO / "macos/Sources/HYUVPNKeychainAccessShim/HYUVPNKeychainAccessShim.c").read_text(encoding="utf-8")
-        installed_exec = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
 
-        self.assertIn(installed_exec, app_source)
-        self.assertIn("InstallerKeychainStore(additionalTrustedApplicationPath: installedMenuExecutable)", app_source)
-        self.assertIn("HYUVPNCreateCredentialAccessWithPaths", adapter_source)
+        self.assertIn("InstallerEncryptedCredentialStore", app_source)
+        self.assertIn("EncryptedCredentialStore", adapter_source)
         self.assertIn("package func contains(_ key: CredentialKey)", adapter_source)
-        self.assertIn("SecItemCopyMatching(query as CFDictionary, nil)", adapter_source)
-        self.assertIn("HYUVPNCreateCredentialAccessWithPaths", shim_source)
-        self.assertIn("HYUVPNCredentialReader", adapter_source)
-        self.assertNotIn("/usr/bin/security", shim_source)
+        self.assertIn("AES.GCM.seal", adapter_source)
+        self.assertIn("AES.GCM.open", adapter_source)
+        self.assertNotIn("import Security", adapter_source)
+        self.assertNotIn("SecItem", adapter_source)
         self.assertLess(app_source.index("runWithAdministratorPrivileges(argv)"), app_source.index("writeCollectedCredentials"))
         self.assertLess(app_source.index("writeCollectedCredentials"), app_source.index("try activateUserSession"))
         self.assertNotIn("HYUVPNInstallerCore", adapter_source)

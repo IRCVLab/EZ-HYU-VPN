@@ -56,12 +56,12 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("control-tower-credential-validation", controlTowerCredentialValidation),
                 ("control-tower-transaction-policy-gate", controlTowerTransactionPolicyGate),
                 ("native-credential-reset-source-contract", nativeCredentialResetSourceContract),
-                ("security-keychain-and-totp-source-contract", securityKeychainAndTOTPSourceContract),
+                ("encrypted-credential-and-totp-source-contract", encryptedCredentialAndTOTPSourceContract),
                 ("totp-resetter-runtime-secure-delete-and-missing-state", totpResetterRuntimeSecureDeleteAndMissingState),
                 ("totp-resetter-runtime-unsafe-metadata-fails-closed", totpResetterRuntimeUnsafeMetadataFailsClosed),
                 ("totp-resetter-runtime-flock-coordination", totpResetterRuntimeFlockCoordination),
-                ("keychain-add-access-runtime-and-source-contract", keychainAddAccessRuntimeAndSourceContract),
-                ("native-keychain-reader-closed-command-surface", nativeKeychainReaderClosedCommandSurface),
+                ("encrypted-credential-store-runtime", encryptedCredentialStoreRuntime),
+                ("native-credential-reader-closed-command-surface", nativeCredentialReaderClosedCommandSurface),
                 ("credential-reset-controller-runtime-behavior", credentialResetControllerRuntimeBehavior),
                 ("credential-reset-lifecycle-runtime", credentialResetLifecycleRuntime)
             ]
@@ -482,7 +482,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fixture) }
         let executable = inputs.appendingPathComponent("HYUVPNMenuApp")
-        let reader = inputs.appendingPathComponent("hyu-vpn-keychain-reader")
+        let reader = inputs.appendingPathComponent("hyu-vpn-credential-reader")
         for input in [executable, reader] {
             try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: input)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: input.path)
@@ -811,18 +811,18 @@ time.sleep(20)
         try expect(!controllerSource.contains("Terminal") && !controllerSource.contains("installer"), "reset controller avoids terminal and installer")
     }
 
-    static func securityKeychainAndTOTPSourceContract() throws {
+    static func encryptedCredentialAndTOTPSourceContract() throws {
         let root = packageRoot().deletingLastPathComponent()
         let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/SystemAdapters.swift"))
-        for required in ["import Security", "SecItemCopyMatching", "SecItemUpdate", "SecItemAdd", "SecItemDelete", "hyu-vpn", "gp-vpn-username", "gp-vpn-password", "gp-vpn-totp", "O_NOFOLLOW", "O_CLOEXEC", "flock", "LOCK_EX", "fstatat", "AT_SYMLINK_NOFOLLOW", "unlinkat", "totp-counter.json.lock", "totp-counter.json", "0o600", "0o700"] {
+        for required in ["import CryptoKit", "AES.GCM.seal", "AES.GCM.open", "credentials.key", "credentials.enc", "credentials.lock", "gp-vpn-username", "gp-vpn-password", "gp-vpn-totp", "O_NOFOLLOW", "O_CLOEXEC", "flock", "LOCK_EX", "fstatat", "AT_SYMLINK_NOFOLLOW", "unlinkat", "totp-counter.json.lock", "totp-counter.json", "0o600", "0o700"] {
             try expect(source.contains(required), "system adapter source contains \(required)")
         }
-        for forbidden in ["/usr/bin/security", "Process(", "posix_spawn", "NSTask", "NSLog", "os_log", "print(", "SecCopyErrorMessageString"] {
+        for forbidden in ["import Security", "SecItem", "SecAccess", "KeychainCredential", "/usr/bin/security", "Process(", "posix_spawn", "NSTask", "NSLog", "os_log", "print("] {
             try expect(!source.contains(forbidden), "system adapter source omits \(forbidden)")
         }
-        try expect(source.contains("private static let services: [CredentialKey: String]"), "closed service map by CredentialKey")
-        try expect(source.contains("Set(CredentialKey.allCases)"), "service map covers only enum keys")
-        try expect(!source.contains("createDirectory") && !source.contains("setAttributes"), "totp reset does not chmod or create through unverified paths")
+        try expect(source.contains("private static let services: [String: CredentialKey]"), "reader has a closed service map")
+        try expect(source.contains("Set(Self.services.values) == Set(CredentialKey.allCases)"), "service map covers only enum keys")
+        try expect(!source.contains("setAttributes"), "credential and TOTP storage avoid path-following chmod")
     }
 
     static func totpResetterRuntimeSecureDeleteAndMissingState() throws {
@@ -915,43 +915,51 @@ time.sleep(20)
         try expect(FileManager.default.fileExists(atPath: fixture.lock.path), "lock preserved after coordinated delete")
     }
 
-    static func keychainAddAccessRuntimeAndSourceContract() throws {
-        _ = try KeychainCredentialAccessFactory.make()
-        try expect(true, "SecAccess ACL can be created without keychain mutation")
-        let root = packageRoot().deletingLastPathComponent()
-        let shimSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNKeychainAccessShim/HYUVPNKeychainAccessShim.c"))
-        let adapterSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/SystemAdapters.swift"))
-        for required in [
-            "HYUVPNCreateCredentialAccessWithPaths(NULL, NULL, accessOut)",
-            "SecTrustedApplicationCreateFromPath(NULL",
-            "trustedApplications[3]",
-            "firstTrustedPath",
-            "secondTrustedPath",
-            "CFArrayCreate(kCFAllocatorDefault, trustedApplications, trustedCount",
-            "SecAccessCreate",
-        ] {
-            try expect(shimSource.contains(required), "keychain ACL shim contains \(required)")
-        }
-        try expect(!shimSource.contains("/usr/bin/security"), "keychain ACL never trusts the generic security CLI")
-        try expect(adapterSource.contains("additionalTrustedApplicationPath"), "keychain adapter accepts optional trusted app path")
-        try expect(adapterSource.contains("HYUVPNCreateCredentialAccessWithPaths"), "keychain adapter forwards native trusted app paths")
-        try expect(shimSource.contains("-Wdeprecated-declarations") || shimSource.contains("deprecated-declarations"), "deprecation warning is scoped to shim")
-        let accessFactoryIndex = try requireIndex(of: "let access = try KeychainCredentialAccessFactory.make(firstTrustedApplicationPath: Self.credentialReaderPath, secondTrustedApplicationPath: additionalTrustedApplicationPath)", in: adapterSource, message: "access factory before attrs")
-        let attributesIndex = try requireIndex(of: "let attributes: [String: Any]", in: adapterSource, message: "attributes dictionary")
-        let firstUpdateIndex = try requireIndex(of: "let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)", in: adapterSource, message: "initial update uses shared attributes")
-        let addIndex = try requireIndex(of: "SecItemAdd", in: adapterSource, message: "add index")
-        let retryIndex = try requireIndex(of: "let retryStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)", in: adapterSource, message: "duplicate retry uses shared attributes")
-        try expect(accessFactoryIndex < attributesIndex, "ACL constructed before update attributes")
-        try expect(attributesIndex < firstUpdateIndex, "ACL-bearing attributes are present before first update")
-        try expect(firstUpdateIndex < addIndex, "update attempted before add")
-        try expect(addIndex < retryIndex, "duplicate retry happens after add")
-        try expect(adapterSource.contains("kSecValueData as String: data"), "attributes contain credential data")
-        try expect(adapterSource.contains("kSecAttrAccess as String: access"), "attributes contain ACL access")
-        try expect(adapterSource.contains("addQuery[kSecValueData as String] = attributes[kSecValueData as String]"), "add reuses data from shared attributes")
-        try expect(adapterSource.contains("addQuery[kSecAttrAccess as String] = attributes[kSecAttrAccess as String]"), "add reuses ACL from shared attributes")
+    static func encryptedCredentialStoreRuntime() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-credentials-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = EncryptedCredentialStore(root: root)
+        try store.write("reader-user", for: .username)
+        try store.write("reader-password", for: .password)
+        try store.write("JBSWY3DPEHPK3PXP", for: .totpSeed)
+        let storedUsername = try store.read(.username)
+        let storedPassword = try store.read(.password)
+        try expect(storedUsername == "reader-user", "encrypted store reads username")
+        try expect(storedPassword == "reader-password", "encrypted store reads password")
+        let ciphertext = try Data(contentsOf: root.appendingPathComponent("credentials.enc"))
+        try expect(!String(decoding: ciphertext, as: UTF8.self).contains("reader-password"), "ciphertext excludes plaintext credentials")
+        let keyAttributes = try FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("credentials.key").path)
+        let encryptedAttributes = try FileManager.default.attributesOfItem(atPath: root.appendingPathComponent("credentials.enc").path)
+        let rootAttributes = try FileManager.default.attributesOfItem(atPath: root.path)
+        try expect((rootAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700, "credential directory mode is 0700")
+        try expect((keyAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "key mode is 0600")
+        try expect((encryptedAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "ciphertext mode is 0600")
+        try store.remove(.password)
+        let removedPassword = try store.read(.password)
+        try expect(removedPassword == nil, "encrypted store removes one credential")
+        try Data("tampered".utf8).write(to: root.appendingPathComponent("credentials.enc"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: root.appendingPathComponent("credentials.enc").path)
+        try expectThrows("tampered ciphertext") { _ = try store.read(.username) }
+
+        let unsafeRoot = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-credentials-unsafe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: unsafeRoot) }
+        let unsafeStore = EncryptedCredentialStore(root: unsafeRoot)
+        try unsafeStore.write("reader-user", for: .username)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: unsafeRoot.appendingPathComponent("credentials.key").path)
+        try expectThrows("unsafe key permissions") { _ = try unsafeStore.read(.username) }
+
+        let symlinkRoot = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-credentials-symlink-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: symlinkRoot) }
+        let symlinkStore = EncryptedCredentialStore(root: symlinkRoot)
+        try symlinkStore.write("reader-user", for: .username)
+        let encryptedURL = symlinkRoot.appendingPathComponent("credentials.enc")
+        let encryptedTarget = symlinkRoot.appendingPathComponent("credentials-target")
+        try FileManager.default.moveItem(at: encryptedURL, to: encryptedTarget)
+        try FileManager.default.createSymbolicLink(atPath: encryptedURL.path, withDestinationPath: encryptedTarget.path)
+        try expectThrows("symlink ciphertext") { _ = try symlinkStore.read(.username) }
     }
 
-    static func nativeKeychainReaderClosedCommandSurface() throws {
+    static func nativeCredentialReaderClosedCommandSurface() throws {
         let store = HarnessCredentialStore(initial: [.username: "reader-user", .password: "reader-password", .totpSeed: "JBSWY3DPEHPK3PXP"])
         var output = ""
         try expect(CredentialReaderCommand.run(arguments: ["gp-vpn-username"], store: store) { output += $0 } == 0, "reader returns success for username")

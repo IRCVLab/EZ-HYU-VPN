@@ -844,10 +844,13 @@ class LauncherAndTemplateTests(InstallerTestCase):
             "src/hyu_vpn/otp.py",
             "installer/manifest.py",
             "scripts/preflight.sh",
-            "macos/Sources/HYUVPNKeychainAccessShim/HYUVPNKeychainAccessShim.c",
             "macos/Sources/HYUVPNMenuApp/SystemAdapters.swift",
         ]:
             self.assertNotIn("/usr/bin/security", (REPO / rel).read_text(encoding="utf-8"), rel)
+        adapter = (REPO / "macos/Sources/HYUVPNMenuApp/SystemAdapters.swift").read_text(encoding="utf-8")
+        self.assertNotIn("import Security", adapter)
+        self.assertNotIn("SecItem", adapter)
+        self.assertIn("AES.GCM", adapter)
 
     def test_launchd_templates_are_valid_safe_defaults(self):
         for rel in ["launchd/com.hyu.vpn.service.plist.in"]:
