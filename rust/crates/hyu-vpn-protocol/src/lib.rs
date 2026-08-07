@@ -40,6 +40,16 @@ pub struct RequestEnvelope {
     pub request: Request,
 }
 
+impl RequestEnvelope {
+    pub fn new(request_id: impl Into<String>, request: Request) -> Self {
+        Self {
+            schema_version: PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            request,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     Status,
@@ -51,6 +61,43 @@ pub enum Request {
     CredentialsPresent,
     ReplaceCredentials { credentials: Credentials },
     CurrentOtp,
+}
+
+#[derive(Serialize)]
+struct WireRequestRef<'a> {
+    schema_version: u16,
+    request_id: &'a str,
+    command: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credentials: Option<&'a Credentials>,
+}
+
+pub fn encode_request(request: &RequestEnvelope) -> Result<Vec<u8>, ProtocolError> {
+    if request.schema_version != PROTOCOL_VERSION || !valid_request_id(&request.request_id) {
+        return Err(ProtocolError::InvalidRequest);
+    }
+    let (command, credentials) = match &request.request {
+        Request::Status => ("status", None),
+        Request::Connect => ("connect", None),
+        Request::Disconnect => ("disconnect", None),
+        Request::Reconnect => ("reconnect", None),
+        Request::AutomaticOn => ("automatic_on", None),
+        Request::AutomaticOff => ("automatic_off", None),
+        Request::CredentialsPresent => ("credentials_present", None),
+        Request::ReplaceCredentials { credentials } => ("replace_credentials", Some(credentials)),
+        Request::CurrentOtp => ("current_otp", None),
+    };
+    let encoded = serde_json::to_vec(&WireRequestRef {
+        schema_version: request.schema_version,
+        request_id: &request.request_id,
+        command,
+        credentials,
+    })
+    .map_err(|_| ProtocolError::InvalidDocument)?;
+    if encoded.len() > MAX_FRAME_BYTES {
+        return Err(ProtocolError::FrameTooLarge);
+    }
+    Ok(encoded)
 }
 
 pub fn decode_request(frame: &[u8]) -> Result<RequestEnvelope, ProtocolError> {
@@ -267,7 +314,7 @@ impl TryFrom<WireVpnStatus> for VpnStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseEnvelope {
     schema_version: u16,
     request_id: String,
@@ -283,9 +330,21 @@ impl ResponseEnvelope {
             response,
         }
     }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn response(&self) -> &Response {
+        &self.response
+    }
+
+    pub fn into_response(self) -> Response {
+        self.response
+    }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
     Ack,
@@ -301,4 +360,16 @@ pub fn encode_response(response: &ResponseEnvelope) -> Result<Vec<u8>, ProtocolE
         return Err(ProtocolError::FrameTooLarge);
     }
     Ok(encoded)
+}
+
+pub fn decode_response(frame: &[u8]) -> Result<ResponseEnvelope, ProtocolError> {
+    if frame.len() > MAX_FRAME_BYTES {
+        return Err(ProtocolError::FrameTooLarge);
+    }
+    let response: ResponseEnvelope =
+        serde_json::from_slice(frame).map_err(|_| ProtocolError::InvalidDocument)?;
+    if response.schema_version != PROTOCOL_VERSION || !valid_request_id(&response.request_id) {
+        return Err(ProtocolError::InvalidDocument);
+    }
+    Ok(response)
 }

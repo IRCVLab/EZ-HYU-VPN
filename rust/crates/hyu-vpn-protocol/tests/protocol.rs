@@ -1,6 +1,6 @@
 use hyu_vpn_protocol::{
-    Credentials, ErrorCode, MAX_FRAME_BYTES, Request, Response, ResponseEnvelope, VpnState,
-    VpnStatus, decode_request, encode_response,
+    Credentials, ErrorCode, MAX_FRAME_BYTES, Request, RequestEnvelope, Response, ResponseEnvelope,
+    VpnState, VpnStatus, decode_request, decode_response, encode_request, encode_response,
 };
 use zeroize::Zeroize;
 
@@ -125,4 +125,19 @@ fn rejects_invalid_status_version_timestamps_interface_and_build() {
             "accepted invalid {field}"
         );
     }
+}
+
+#[test]
+fn request_and_response_codecs_round_trip_for_native_clients() {
+    let request = RequestEnvelope {
+        schema_version: 1,
+        request_id: "tray-codec".into(),
+        request: Request::Status,
+    };
+    let encoded = encode_request(&request).unwrap();
+    assert_eq!(decode_request(&encoded).unwrap(), request);
+
+    let response = ResponseEnvelope::new("tray-codec", Response::Ack);
+    let encoded = encode_response(&response).unwrap();
+    assert_eq!(decode_response(&encoded).unwrap(), response);
 }

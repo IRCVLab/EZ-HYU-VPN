@@ -1,0 +1,23 @@
+[package]
+name = "hyu-vpn-gtk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+gtk-ui = ["dep:gtk4"]
+
+[dependencies]
+hyu-vpn-protocol = { path = "../../crates/hyu-vpn-protocol" }
+ksni.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+gtk4 = { version = "0.10.1", optional = true, features = ["v4_6"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+hyu-vpn-daemon = { path = "../../crates/hyu-vpn-daemon" }
+tempfile.workspace = true
