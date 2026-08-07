@@ -25,10 +25,7 @@
                       Remove="uninstall" Wait="yes" />
     </Component>
     <Component Id="ApplicationComponent" Directory="INSTALLFOLDER" Guid="EF00466B-1B8C-563F-8460-9E1A4D3D388C">
-      <File Id="TrayExe" Source="$(PayloadDir)\hyu-vpn-windows-tray.exe" KeyPath="yes">
-        <Shortcut Id="StartMenuShortcut" Directory="PROGRAMMENUDIR" Name="HYU VPN"
-                  Description="HYU VPN system tray client" WorkingDirectory="INSTALLFOLDER" />
-      </File>
+      <File Id="TrayExe" Source="$(PayloadDir)\hyu-vpn-windows-tray.exe" KeyPath="yes" />
       <File Id="HipExe" Source="$(PayloadDir)\hyu-vpn-hip.exe" />
       <File Id="AppIconFile" Source="$(PayloadDir)\hyu-vpn.ico" />
       <File Id="LicenseFile" Source="$(PayloadDir)\LICENSE.txt" />
@@ -64,8 +61,10 @@
       </CreateFolder>
     </Component>
     <Component Id="ProgramMenuComponent" Directory="PROGRAMMENUDIR" Guid="BBA0FC3A-8D77-556E-A267-1795FBA10DBA">
+      <Shortcut Id="StartMenuShortcut" Name="HYU VPN" Target="[#TrayExe]"
+                Description="HYU VPN system tray client" WorkingDirectory="INSTALLFOLDER" />
       <RemoveFolder Id="RemoveProgramMenuFolder" On="uninstall" />
-      <RegistryValue Root="HKLM" Key="Software\IRCVLab\HYU VPN" Name="Installed"
+      <RegistryValue Root="HKCU" Key="Software\IRCVLab\HYU VPN" Name="Installed"
                      Type="integer" Value="1" KeyPath="yes" />
     </Component>
     <Feature Id="MainFeature" Title="HYU VPN" Level="1">

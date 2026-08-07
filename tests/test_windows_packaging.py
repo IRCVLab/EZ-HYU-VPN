@@ -42,6 +42,24 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("password", text.lower())
         self.assertNotIn("totp_seed", text.lower())
 
+    def test_wix_shortcut_is_isolated_in_user_profile_component(self):
+        root = ET.fromstring(WXS.read_text(encoding="utf-8"))
+        ns = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
+        application = root.find('.//w:Component[@Id="ApplicationComponent"]', ns)
+        menu = root.find('.//w:Component[@Id="ProgramMenuComponent"]', ns)
+        self.assertIsNotNone(application)
+        self.assertIsNotNone(menu)
+        self.assertIsNone(application.find('.//w:Shortcut', ns))
+        shortcut = menu.find('w:Shortcut', ns)
+        self.assertIsNotNone(shortcut)
+        self.assertEqual(shortcut.attrib["Target"], "[#TrayExe]")
+        self.assertEqual(shortcut.attrib["WorkingDirectory"], "INSTALLFOLDER")
+        registry = menu.find('w:RegistryValue', ns)
+        self.assertIsNotNone(registry)
+        self.assertEqual(registry.attrib["Root"], "HKCU")
+        self.assertEqual(registry.attrib["KeyPath"], "yes")
+        self.assertIsNotNone(menu.find('w:RemoveFolder', ns))
+
     def test_wix_uses_explicit_stable_unique_component_guids(self):
         root = ET.fromstring(WXS.read_text(encoding="utf-8"))
         ns = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
