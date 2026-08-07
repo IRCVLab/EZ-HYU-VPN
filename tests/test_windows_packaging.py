@@ -42,6 +42,15 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("password", text.lower())
         self.assertNotIn("totp_seed", text.lower())
 
+    def test_wix_uses_explicit_stable_unique_component_guids(self):
+        root = ET.fromstring(WXS.read_text(encoding="utf-8"))
+        ns = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
+        components = root.findall(".//w:Component", ns)
+        guids = [component.attrib.get("Guid", "") for component in components]
+        self.assertTrue(components)
+        self.assertTrue(all(re.fullmatch(r"[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}", guid) for guid in guids))
+        self.assertEqual(len(guids), len(set(guids)))
+
     def test_wix_preserves_encrypted_state_during_major_upgrade(self):
         root = ET.fromstring(WXS.read_text(encoding="utf-8"))
         ns = {"w": "http://wixtoolset.org/schemas/v4/wxs"}

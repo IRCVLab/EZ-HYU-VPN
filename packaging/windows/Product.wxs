@@ -13,7 +13,7 @@
     </StandardDirectory>
     <StandardDirectory Id="CommonAppDataFolder"><Directory Id="STATEFOLDER" Name="HYUVPN" /></StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder"><Directory Id="PROGRAMMENUDIR" Name="HYU VPN" /></StandardDirectory>
-    <Component Id="ServiceComponent" Directory="INSTALLFOLDER" Guid="*">
+    <Component Id="ServiceComponent" Directory="INSTALLFOLDER" Guid="8CA66349-CB40-55D3-B488-2633DD235D9B">
       <File Id="ServiceExe" Source="$(PayloadDir)\hyu-vpn-windows-service.exe" KeyPath="yes" />
       <ServiceInstall Id="HYUVPNServiceInstall" Name="HYUVPN" DisplayName="HYU VPN"
                       Description="Maintains the HYU GlobalProtect VPN connection and reconnects after network changes."
@@ -24,7 +24,7 @@
       <ServiceControl Id="HYUVPNServiceControl" Name="HYUVPN" Start="install" Stop="both"
                       Remove="uninstall" Wait="yes" />
     </Component>
-    <Component Id="ApplicationComponent" Directory="INSTALLFOLDER" Guid="*">
+    <Component Id="ApplicationComponent" Directory="INSTALLFOLDER" Guid="EF00466B-1B8C-563F-8460-9E1A4D3D388C">
       <File Id="TrayExe" Source="$(PayloadDir)\hyu-vpn-windows-tray.exe" KeyPath="yes">
         <Shortcut Id="StartMenuShortcut" Directory="PROGRAMMENUDIR" Name="HYU VPN"
                   Description="HYU VPN system tray client" WorkingDirectory="INSTALLFOLDER" />
@@ -37,7 +37,7 @@
       <File Id="PatchedOpenConnectManifestFile" Source="$(PayloadDir)\OPENCONNECT-PATCHED-SHA256SUMS.txt" />
       <File Id="ManifestFile" Source="$(PayloadDir)\artifact-manifest.sha256" />
     </Component>
-    <Component Id="RuntimeComponent" Directory="RUNTIMEFOLDER" Guid="*">
+    <Component Id="RuntimeComponent" Directory="RUNTIMEFOLDER" Guid="357446C2-DC7D-5A9F-B650-E63E341DB5BF">
       <File Id="OpenConnectExe" Source="$(PayloadDir)\runtime\openconnect.exe" KeyPath="yes" />
       <File Id="VpncScript" Source="$(PayloadDir)\runtime\vpnc-script-win.js" />
       <File Id="WintunDll" Source="$(PayloadDir)\runtime\wintun.dll" />
@@ -63,7 +63,7 @@
         <util:PermissionEx User="Administrators" GenericAll="yes" />
       </CreateFolder>
     </Component>
-    <Component Id="ProgramMenuComponent" Directory="PROGRAMMENUDIR" Guid="*">
+    <Component Id="ProgramMenuComponent" Directory="PROGRAMMENUDIR" Guid="BBA0FC3A-8D77-556E-A267-1795FBA10DBA">
       <RemoveFolder Id="RemoveProgramMenuFolder" On="uninstall" />
       <RegistryValue Root="HKLM" Key="Software\IRCVLab\HYU VPN" Name="Installed"
                      Type="integer" Value="1" KeyPath="yes" />
