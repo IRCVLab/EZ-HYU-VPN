@@ -417,17 +417,20 @@ class RootAdminShellHarnessTests(InstallerTestCase):
 
     def _inject_stale_old_helper_during_quarantine(self, env, tools):
         helper = env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper"
-        state = env.root / "private/var/db/hyu-vpn/fake-helper-state"
+        state_dir = env.root / "private/var/db/hyu-vpn"
+        state = state_dir / "fake-helper-state"
+        session = state_dir / "session.json"
+        ledger = state_dir / "ledger/oldsession1.ledger"
         launchctl = tools / "bin/launchctl"
         launchctl.write_text(
             "#!/bin/sh\n"
-            f"mkdir -p {str(helper.parent)!r} {str(state.parent)!r}\n"
+            f"mkdir -p {str(helper.parent)!r} {str(state.parent)!r} {str(ledger.parent)!r}\n"
             f"if [ ! -e {str(helper)!r} ]; then\n"
             f"  cat > {str(helper)!r} <<'OLD_HELPER'\n"
             "#!/bin/sh\n"
             f"state={str(state)!r}\n"
             "case \"${1:-}\" in\n"
-            "  status) printf '%s\\n' '{\"schema_version\":1,\"state\":\"repair-required\",\"session_nonce\":\"old\"}' ;;\n"
+            "  status) printf '%s\\n' '{\"schema_version\":1,\"state\":\"repair-required\",\"session_nonce\":\"oldsession1\"}' ;;\n"
             "  repair) exit 42 ;;\n"
             "  stop) exit 42 ;;\n"
             "  *) exit 64 ;;\n"
@@ -435,6 +438,9 @@ class RootAdminShellHarnessTests(InstallerTestCase):
             "OLD_HELPER\n"
             f"  chmod 755 {str(helper)!r}\n"
             f"  printf repair-required > {str(state)!r}\n"
+            f"  printf stale-session > {str(session)!r}\n"
+            f"  printf stale-ledger > {str(ledger)!r}\n"
+            f"  chmod 600 {str(session)!r} {str(ledger)!r}\n"
             "fi\n"
             "exit 0\n",
             encoding="utf-8",
@@ -452,8 +458,12 @@ class RootAdminShellHarnessTests(InstallerTestCase):
 
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         self.assertEqual(state.read_text(encoding="utf-8"), "stopped")
+        self.assertFalse((env.root / "private/var/db/hyu-vpn/session.json").exists())
+        self.assertFalse((env.root / "private/var/db/hyu-vpn/ledger/oldsession1.ledger").exists())
         journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
         self.assertLess(journal.index("old-helper-repair-deferred"), journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"))
+        self.assertLess(journal.index("legacy-quarantined-never-restore"), journal.index("inactive-repair-state-cleared"))
+        self.assertLess(journal.index("inactive-repair-state-cleared"), journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"))
         self.assertLess(journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"), journal.index("installed-helper-stopped"))
 
     def test_upgrade_rolls_back_if_new_helper_cannot_clear_deferred_repair(self):

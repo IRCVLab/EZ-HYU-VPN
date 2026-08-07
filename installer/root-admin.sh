@@ -119,6 +119,18 @@ if state not in {"stopped","running","repair-required"}: raise SystemExit(1)
 print(state)
 ' 2>/dev/null
 }
+helper_repair_nonce(){
+  local raw
+  raw="$(capture_cmd "$HELPER_DST" status)"
+  print -r -- "$raw" | /usr/bin/python3 -I -c 'import json,re,sys
+try: data=json.load(sys.stdin)
+except Exception: raise SystemExit(1)
+if not isinstance(data,dict) or data.get("schema_version") != 1 or data.get("state") != "repair-required": raise SystemExit(1)
+nonce=data.get("session_nonce")
+if not isinstance(nonce,str) or re.fullmatch(r"[A-Za-z0-9_-]{8,128}", nonce) is None: raise SystemExit(1)
+print(nonce)
+' 2>/dev/null
+}
 drain_existing_helper(){
   [[ -x "$HELPER_DST" ]] || return 0
   [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0
@@ -147,6 +159,25 @@ drain_existing_helper(){
       fi
       ;;
   esac
+}
+clear_inactive_repair_state(){
+  [[ -x "$HELPER_DST" ]] || return 0
+  [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0
+  local state nonce ledger_dir ledger_path ledger_lock owner mode
+  state="$(helper_state)" || { print -u2 "existing HYU VPN helper status is invalid after quarantine"; return 1; }
+  [[ "$state" == repair-required ]] || return 0
+  nonce="$(helper_repair_nonce)" || { print -u2 "existing HYU VPN repair state has invalid nonce"; return 1; }
+  ledger_dir="$STATE_DIR/ledger"
+  [[ -d "$ledger_dir" && ! -L "$ledger_dir" ]] || { print -u2 "existing HYU VPN ledger directory is unsafe"; return 1; }
+  if [[ -z "$DRY_RUN_ROOT" ]]; then
+    owner="$(/usr/bin/stat -f %u "$ledger_dir")"; mode="$(/usr/bin/stat -f %Lp "$ledger_dir")"
+    [[ "$owner" == 0 && "$mode" == 700 ]] || { print -u2 "existing HYU VPN ledger directory is unsafe"; return 1; }
+  fi
+  ledger_path="$ledger_dir/$nonce.ledger"; ledger_lock="$ledger_dir/.$nonce.lock"
+  log "inactive-repair-state-clear-start"
+  /bin/rm -f "$STATE_DIR/session.json" "$ledger_path" "$ledger_lock"
+  durable_flush "$STATE_DIR"; durable_flush "$ledger_dir"
+  log "inactive-repair-state-cleared"
 }
 stop_current_user_service(){
   log "current-service-stop-start"
@@ -417,6 +448,7 @@ install_phase(){
   stop_current_user_service
   drain_existing_helper
   quarantine_legacy
+  clear_inactive_repair_state
   migrate_legacy_menu_launchagent
   copy_file "$TXN_SNAPSHOT/com.hyu.vpn.helper" "$HELPER_DST" 755; fail_after helper
   /bin/mkdir -p "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime/openconnect" "$APP_SUPPORT/runtime/vpnc" "$STATE_DIR/ledger"
