@@ -42,11 +42,8 @@ terminate_menubar() {
   wait_for_menubar_exit || { print -u2 "could not stop existing HYU VPN menu process"; return 1; }
 }
 unregister_login_item() {
-  local app_exec="${HYU_VPN_TEST_APP_EXEC:-/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp}"
-  if [[ -n "${HYU_VPN_TEST_APP_EXEC:-}" ]]; then
-    case "$app_exec" in /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;; *) print -u2 "unsafe test app exec override"; return 65 ;; esac
-  fi
-  [[ -x "$app_exec" ]] || return 0
+  local app_exec="/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
+  [[ -x "$app_exec" ]] || { print -u2 "missing installed app executable: $app_exec"; return 66; }
   local output unregister_status
   set +e
   output="$("$app_exec" --unregister-login-item 2>&1)"

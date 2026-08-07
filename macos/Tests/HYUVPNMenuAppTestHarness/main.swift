@@ -24,6 +24,8 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("dynamic-menu-actions-and-checks", dynamicMenuActionsAndChecks),
                 ("primary-action-disabled-transient-states", primaryActionDisabledTransientStates),
                 ("login-item-state-projections-and-actions", loginItemStateProjectionsAndActions),
+                ("login-item-error-normalization", loginItemErrorNormalization),
+                ("login-item-runtime-truth-after-operation-failure", loginItemRuntimeTruthAfterOperationFailure),
                 ("login-item-first-launch-policy", loginItemFirstLaunchPolicy),
                 ("live-menu-includes-native-login-item-control", liveMenuIncludesNativeLoginItemControl),
                 ("control-security-timeout-and-normalized-errors", controlSecurityTimeoutAndErrors),
@@ -74,6 +76,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
 
     final class FakeLoginItemProbe {
         var events: [FakeLoginItemEvent] = []
+        var status: LoginItemPlatformStatus?
     }
 
     struct FakeLoginItemPlatform: LoginItemPlatforming {
@@ -82,7 +85,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         var unregisterError: String? = nil
         var probe = FakeLoginItemProbe()
 
-        mutating func status() -> LoginItemPlatformStatus { currentStatus }
+        mutating func status() -> LoginItemPlatformStatus { probe.status ?? currentStatus }
 
         mutating func register() throws {
             probe.events.append(.register)
@@ -242,13 +245,47 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
 
         var registerFailure = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .notRegistered, registerError: "LOGIN_ITEM_REGISTER_FAILED"))
         try expectThrows("register failure is unavailable") { try registerFailure.setEnabled(true) }
-        try expect(registerFailure.state() == .unavailable(code: "LOGIN_ITEM_REGISTER_FAILED"), "register failure code projected")
+        try expect(registerFailure.state() == .disabled, "register failure does not override runtime disabled state")
 
         var unregisterFailure = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .enabled, unregisterError: "LOGIN_ITEM_UNREGISTER_FAILED"))
         try expectThrows("unregister failure is unavailable") { try unregisterFailure.setEnabled(false) }
-        try expect(unregisterFailure.state() == .unavailable(code: "LOGIN_ITEM_UNREGISTER_FAILED"), "unregister failure code projected")
+        try expect(unregisterFailure.state() == .enabled, "unregister failure does not override runtime enabled state")
     }
 
+
+
+    static func loginItemErrorNormalization() throws {
+        let domain = "com.apple.ServiceManagement"
+        let expected: [(Int, Bool, String)] = [
+            (3, true, "LOGIN_ITEM_INVALID_SIGNATURE"),
+            (4, true, "LOGIN_ITEM_AUTHORIZATION_FAILED"),
+            (5, true, "LOGIN_ITEM_TOOL_NOT_VALID"),
+            (6, false, "LOGIN_ITEM_NOT_REGISTERED"),
+            (11, true, "LOGIN_ITEM_LAUNCH_DENIED_BY_USER"),
+            (12, true, "LOGIN_ITEM_ALREADY_REGISTERED"),
+        ]
+        for (code, registering, expectedCode) in expected {
+            let normalized = SMAppServiceLoginItemPlatform.normalizeForTest(error: NSError(domain: domain, code: code), registering: registering)
+            try expect(normalized == .unavailable(code: expectedCode), "SM error code \(code) normalizes to \(expectedCode)")
+        }
+
+        var alreadyRegistered = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .enabled, registerError: "LOGIN_ITEM_ALREADY_REGISTERED"))
+        try alreadyRegistered.setEnabled(true)
+        try expect(alreadyRegistered.state() == .enabled, "already registered remains idempotent success")
+
+        var notRegistered = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .notRegistered, unregisterError: "LOGIN_ITEM_NOT_REGISTERED"))
+        try notRegistered.setEnabled(false)
+        try expect(notRegistered.state() == .disabled, "not registered remains idempotent success")
+    }
+
+    static func loginItemRuntimeTruthAfterOperationFailure() throws {
+        let probe = FakeLoginItemProbe()
+        probe.status = .notRegistered
+        var controller = LoginItemController(platform: FakeLoginItemPlatform(currentStatus: .notRegistered, registerError: "LOGIN_ITEM_INVALID_SIGNATURE", probe: probe))
+        try expectThrows("register failure records operation result") { try controller.setEnabled(true) }
+        probe.status = .enabled
+        try expect(controller.state() == .enabled, "runtime status wins after operation failure")
+    }
 
     static func loginItemFirstLaunchPolicy() throws {
         try expect(LoginItemStartupPolicy.shouldRegisterOnLaunch(userChoice: nil, state: .disabled), "first launch disabled registers")

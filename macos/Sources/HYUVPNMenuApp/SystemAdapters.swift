@@ -190,16 +190,13 @@ package extension LoginItemControlling {
 
 package struct LoginItemController<Platform: LoginItemPlatforming>: LoginItemControlling {
     private var platform: Platform
-    private var lastFailureCode: String?
 
     package init(platform: Platform) {
         self.platform = platform
-        self.lastFailureCode = nil
     }
 
     package mutating func state() -> LoginItemState {
-        if let lastFailureCode { return .unavailable(code: lastFailureCode) }
-        return Self.project(status: platform.status())
+        Self.project(status: platform.status())
     }
 
     package mutating func setEnabled(_ enabled: Bool) throws {
@@ -209,15 +206,12 @@ package struct LoginItemController<Platform: LoginItemPlatforming>: LoginItemCon
             } else {
                 try platform.unregister()
             }
-            lastFailureCode = nil
         } catch LoginItemControllerError.unavailable(let code) {
-            if enabled && code == "LOGIN_ITEM_ALREADY_REGISTERED" { lastFailureCode = nil; return }
-            if !enabled && code == "LOGIN_ITEM_NOT_REGISTERED" { lastFailureCode = nil; return }
-            lastFailureCode = code
+            if enabled && code == "LOGIN_ITEM_ALREADY_REGISTERED" { return }
+            if !enabled && code == "LOGIN_ITEM_NOT_REGISTERED" { return }
             throw LoginItemControllerError.unavailable(code: code)
         } catch {
             let code = enabled ? "LOGIN_ITEM_REGISTER_FAILED" : "LOGIN_ITEM_UNREGISTER_FAILED"
-            lastFailureCode = code
             throw LoginItemControllerError.unavailable(code: code)
         }
     }
@@ -247,6 +241,15 @@ package enum LoginItemStartupPolicy {
         if userChoice == false { return false }
         return state == .disabled
     }
+}
+
+package enum ServiceManagementErrorCode {
+    package static let invalidSignature = 3
+    package static let authorizationFailure = 4
+    package static let toolNotValid = 5
+    package static let jobNotFound = 6
+    package static let launchDeniedByUser = 11
+    package static let alreadyRegistered = 12
 }
 
 package struct SMAppServiceLoginItemPlatform: LoginItemPlatforming {
@@ -287,13 +290,28 @@ package struct SMAppServiceLoginItemPlatform: LoginItemPlatforming {
         SMAppService.openSystemSettingsLoginItems()
     }
 
+    package static func normalizeForTest(error: Error, registering: Bool) -> LoginItemControllerError {
+        normalize(error: error, registering: registering)
+    }
+
     private static func normalize(error: Error, registering: Bool) -> LoginItemControllerError {
         let nsError = error as NSError
-        if registering && nsError.code == 12 { return .unavailable(code: "LOGIN_ITEM_ALREADY_REGISTERED") }
-        if !registering && nsError.code == 6 { return .unavailable(code: "LOGIN_ITEM_NOT_REGISTERED") }
-        if nsError.code == 4 { return .unavailable(code: "LOGIN_ITEM_AUTHORIZATION_FAILED") }
-        if nsError.code == 5 { return .unavailable(code: "LOGIN_ITEM_TOOL_NOT_VALID") }
-        return .unavailable(code: registering ? "LOGIN_ITEM_REGISTER_FAILED" : "LOGIN_ITEM_UNREGISTER_FAILED")
+        switch nsError.code {
+        case ServiceManagementErrorCode.invalidSignature:
+            return .unavailable(code: "LOGIN_ITEM_INVALID_SIGNATURE")
+        case ServiceManagementErrorCode.authorizationFailure:
+            return .unavailable(code: "LOGIN_ITEM_AUTHORIZATION_FAILED")
+        case ServiceManagementErrorCode.toolNotValid:
+            return .unavailable(code: "LOGIN_ITEM_TOOL_NOT_VALID")
+        case ServiceManagementErrorCode.jobNotFound where !registering:
+            return .unavailable(code: "LOGIN_ITEM_NOT_REGISTERED")
+        case ServiceManagementErrorCode.launchDeniedByUser:
+            return .unavailable(code: "LOGIN_ITEM_LAUNCH_DENIED_BY_USER")
+        case ServiceManagementErrorCode.alreadyRegistered where registering:
+            return .unavailable(code: "LOGIN_ITEM_ALREADY_REGISTERED")
+        default:
+            return .unavailable(code: registering ? "LOGIN_ITEM_REGISTER_FAILED" : "LOGIN_ITEM_UNREGISTER_FAILED")
+        }
     }
 }
 

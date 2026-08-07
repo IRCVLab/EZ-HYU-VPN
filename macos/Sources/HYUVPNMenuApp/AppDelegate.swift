@@ -34,6 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         apply(lifecycle.handle(.appLaunched))
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        refreshLoginItemState()
+        rebuildMenu()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         resetController?.dismissWithoutSaving()
         pendingResetPayload = nil
@@ -96,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     }
 
     private func rebuildMenu() {
+        refreshLoginItemState()
         let menu = NSMenu(title: "HYU VPN")
         menu.addItem(disabledItem(title: statusLineText()))
         menu.addItem(NSMenuItem.separator())
@@ -247,10 +253,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
             refreshLoginItemState()
         } catch LoginItemControllerError.unavailable(let code) {
             lastLoginItemResult = code
-            loginItemState = .unavailable(code: code)
+            refreshLoginItemState()
         } catch {
             lastLoginItemResult = "LOGIN_ITEM_TOGGLE_FAILED"
-            loginItemState = .unavailable(code: "LOGIN_ITEM_TOGGLE_FAILED")
+            refreshLoginItemState()
         }
         rebuildMenu()
     }
@@ -378,10 +384,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
             refreshLoginItemState()
         } catch LoginItemControllerError.unavailable(let code) {
             lastLoginItemResult = code
-            loginItemState = .unavailable(code: code)
+            refreshLoginItemState()
         } catch {
             lastLoginItemResult = "LOGIN_ITEM_REGISTER_FAILED"
-            loginItemState = .unavailable(code: "LOGIN_ITEM_REGISTER_FAILED")
+            refreshLoginItemState()
         }
     }
 

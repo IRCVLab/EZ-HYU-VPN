@@ -853,16 +853,26 @@ exit 0
         self.manifest_path = PayloadManifest.write_for_tree(self.payload, self.payload / "manifest.json")
         return script
 
-    def _fake_uninstall_app_exec(self, status: int = 0, output: str = "LOGIN_ITEM_UNREGISTERED") -> Path:
+    def _fake_uninstall_app_exec(self, status: int = 0, output: str = "LOGIN_ITEM_UNREGISTERED", *, create: bool = True) -> Path:
         app_exec = self.root / "fixture Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
         app_exec.parent.mkdir(parents=True, exist_ok=True)
-        app_exec.write_text(f"#!/bin/sh\nlog=\"$FAKE_INSTALL_LOG\"\nprintf 'app-exec [%s]' \"$0\" >> \"$log\"\nfor arg in \"$@\"; do printf ' [%s]' \"$arg\" >> \"$log\"; done\nprintf '\\n' >> \"$log\"\nprintf '%s\\n' {output!r}\nexit {status}\n", encoding="utf-8")
-        app_exec.chmod(0o755)
-        self.assertTrue(app_exec.resolve().is_relative_to(self.root.resolve()))
+        if create:
+            app_exec.write_text(
+                f"#!/bin/sh\n"
+                f"log=\"$FAKE_INSTALL_LOG\"\n"
+                f"printf 'app-exec [%s]' \"$0\" >> \"$log\"\n"
+                f"for arg in \"$@\"; do printf ' [%s]' \"$arg\" >> \"$log\"; done\n"
+                f"printf '\\n' >> \"$log\"\n"
+                f"printf '%s\\n' {output!r}\n"
+                f"exit {status}\n",
+                encoding="utf-8",
+            )
+            app_exec.chmod(0o755)
+        self.assertTrue(app_exec.parent.resolve().is_relative_to(self.root.resolve()))
         self.assertNotEqual(app_exec, Path("/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"))
         return app_exec
 
-    def _patched_uninstall_script_for_fake_tools(self, tools: Path) -> tuple[Path, Path]:
+    def _patched_uninstall_script_for_fake_tools(self, tools: Path, *, app_status: int = 0, app_output: str = "LOGIN_ITEM_UNREGISTERED", create_app: bool = True) -> tuple[Path, Path]:
         script = self.payload / "installer/uninstall.fake-tools.sh"
         text = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
         text = text.replace("/usr/bin/security", str(tools / "security"))
@@ -871,10 +881,13 @@ exit 0
         text = text.replace("/usr/bin/pgrep", str(tools / "pgrep"))
         text = text.replace("/usr/bin/pkill", str(tools / "pkill"))
         text = text.replace("/usr/bin/id", str(tools / "id"))
+        app_exec = self._fake_uninstall_app_exec(status=app_status, output=app_output, create=create_app)
+        exact_app = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
+        self.assertIn(exact_app, text)
+        text = text.replace(exact_app, str(app_exec))
         text = text.replace("/bin/sleep", str(tools / "sleep"))
         script.write_text(text, encoding="utf-8")
         script.chmod(0o755)
-        app_exec = self._fake_uninstall_app_exec()
         self.manifest_path = PayloadManifest.write_for_tree(self.payload, self.payload / "manifest.json")
         return script, app_exec
 
@@ -907,8 +920,6 @@ exit 0
         proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="tester\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
         self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
         logged = log.read_text(encoding="utf-8")
-        self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
-        self.assertNotIn("app-exec [/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp]", logged)
         auth = logged.index("sudo [-v]")
         nonce = logged.index("date [+%s]", auth)
         root_admin = logged.index("sudo [-n] [/bin/zsh]", nonce)
@@ -916,11 +927,50 @@ exit 0
         self.assertLess(nonce, root_admin)
         self.assertIn("[--live-install] [hyu-install-mutation-1785881401]", logged[root_admin:])
 
+
+    def test_uninstall_uses_literal_installed_app_and_has_no_environment_override(self):
+        uninstall = (REPO / "installer/uninstall.sh").read_text(encoding="utf-8")
+        exact_app = "/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
+        self.assertIn(f'local app_exec="{exact_app}"', uninstall)
+        self.assertNotIn("HYU_VPN_TEST_APP_EXEC", uninstall)
+
+    def test_uninstall_missing_installed_app_blocks_before_sudo(self):
+        tools = self._write_fake_install_tools(self.root)
+        script, app_exec = self._patched_uninstall_script_for_fake_tools(tools, create_app=False)
+        log = self.root / "fake-uninstall-missing-app.log"
+        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(str(app_exec), proc.stderr)
+        self.assertFalse(log.exists(), "sudo must not run when exact app executable is missing")
+
+    def test_uninstall_tolerates_only_normalized_absent_login_item_outcomes(self):
+        for output in ["LOGIN_ITEM_NOT_REGISTERED", "LOGIN_ITEM_NOT_FOUND"]:
+            with self.subTest(output=output):
+                tools = self._write_fake_install_tools(self.root / output)
+                script, app_exec = self._patched_uninstall_script_for_fake_tools(tools, app_status=7, app_output=output)
+                log = self.root / f"fake-uninstall-{output}.log"
+                proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
+                self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+                logged = log.read_text(encoding="utf-8")
+                self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
+                self.assertIn("sudo [-n] [/bin/zsh]", logged)
+
+    def test_uninstall_other_login_item_failure_blocks_before_sudo(self):
+        tools = self._write_fake_install_tools(self.root)
+        script, app_exec = self._patched_uninstall_script_for_fake_tools(tools, app_status=42, app_output="LOGIN_ITEM_AUTHORIZATION_FAILED")
+        log = self.root / "fake-uninstall-fatal-app.log"
+        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("LOGIN_ITEM_AUTHORIZATION_FAILED", proc.stderr)
+        logged = log.read_text(encoding="utf-8")
+        self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
+        self.assertNotIn("sudo [-n] [/bin/zsh]", logged)
+
     def test_uninstall_live_nonce_is_generated_after_admin_auth_and_used_noninteractively(self):
         tools = self._write_fake_install_tools(self.root)
         script, app_exec = self._patched_uninstall_script_for_fake_tools(tools)
         log = self.root / "fake-uninstall-nonce.log"
-        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home"), "HYU_VPN_TEST_APP_EXEC": str(app_exec)})
+        proc = subprocess.run(["/bin/zsh", str(script), "--live-install"], input="KEEP\n", text=True, capture_output=True, env={**os.environ, "FAKE_INSTALL_LOG": str(log), "HOME": str(self.root / "home")})
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         logged = log.read_text(encoding="utf-8")
         self.assertIn(f"app-exec [{app_exec}] [--unregister-login-item]", logged)
