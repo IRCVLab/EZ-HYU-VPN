@@ -64,6 +64,13 @@ class PackagingTestCase(unittest.TestCase):
             "patches/openconnect.patch": b"diff --git a/a b/a\n",
             "resources/vpnc-script": b"#!/bin/sh\n",
             "build-info.txt": b"HYU VPN internal source compliance bundle\n",
+            "homebrew-formula-info.json": json.dumps({
+                "formulae": [
+                    {"name": "openconnect", "versions": {"stable": "9.21"}, "revision": 0},
+                    {"name": "oath-toolkit", "versions": {"stable": "2.6.14"}, "revision": 3},
+                ],
+                "casks": [],
+            }, sort_keys=True).encode() + b"\n",
         }
         if runtime_files is None:
             runtime_entries = [
@@ -89,6 +96,7 @@ class PackagingTestCase(unittest.TestCase):
                 {"package": "oath-toolkit", "file": "source/oath-toolkit.tar.gz", "sha256": digests["source/oath-toolkit.tar.gz"]},
                 {"package": "openconnect", "file": "formula/openconnect.rb", "sha256": digests["formula/openconnect.rb"]},
                 {"package": "oath-toolkit", "file": "formula/oath-toolkit.rb", "sha256": digests["formula/oath-toolkit.rb"]},
+                {"package": "homebrew:formula-metadata", "file": "homebrew-formula-info.json", "sha256": digests["homebrew-formula-info.json"]},
             ],
             "resource_sources": [{"name": "vpnc-script", "file": "resources/vpnc-script", "sha256": digests["resources/vpnc-script"]}],
             "receipts": [
@@ -553,6 +561,77 @@ class ReleaseBuilderTests(PackagingTestCase):
         openconnect.write_bytes(openconnect.read_bytes() + b"-post-binding-tamper")
         with self.assertRaisesRegex(PackagingError, "final runtime binding mismatch"):
             packaging_module.validate_final_runtime_binding(binding, packaged_bundle, src)
+
+    def test_rebind_source_bundle_updates_exact_runtime_hashes_and_internal_checksums(self):
+        src = self.make_payload_source()
+        runtime_files = {
+            rel: src / rel for rel in [
+                "runtime/openconnect/bin/openconnect",
+                "runtime/oathtool",
+                "runtime/openconnect/lib/libopenconnect.5.dylib",
+                "runtime/vpnc/vpnc-script",
+            ]
+        }
+        bundle = self.make_source_bundle(runtime_files=runtime_files)
+        packaged_bundle = src / "SOURCE-COMPLIANCE-BUNDLE.tar.gz"
+        packaged_bundle.write_bytes(bundle.read_bytes())
+        base_sha = packaging_module._sha256(packaged_bundle)
+        openconnect = src / "runtime/openconnect/bin/openconnect"
+        openconnect.write_bytes(openconnect.read_bytes() + b"-different-homebrew-bottle")
+
+        packaging_module.rebind_source_compliance_bundle(packaged_bundle, src)
+
+        packaging_module.validate_source_compliance_bundle(packaged_bundle)
+        packaging_module.validate_source_bundle_matches_payload(packaged_bundle, src)
+        with tarfile.open(packaged_bundle, "r:gz") as tf:
+            build_info = tf.extractfile("build-info.txt").read().decode("utf-8")
+        self.assertIn(base_sha, build_info)
+        self.assertIn("runtime hashes rebound", build_info)
+
+    def test_rebind_source_bundle_refuses_changed_noncompiled_resource(self):
+        src = self.make_payload_source()
+        runtime_files = {
+            rel: src / rel for rel in [
+                "runtime/openconnect/bin/openconnect",
+                "runtime/oathtool",
+                "runtime/openconnect/lib/libopenconnect.5.dylib",
+                "runtime/vpnc/vpnc-script",
+            ]
+        }
+        bundle = self.make_source_bundle(runtime_files=runtime_files)
+        packaged_bundle = src / "SOURCE-COMPLIANCE-BUNDLE.tar.gz"
+        packaged_bundle.write_bytes(bundle.read_bytes())
+        vpnc = src / "runtime/vpnc/vpnc-script"
+        vpnc.write_bytes(vpnc.read_bytes() + b"-tampered")
+        with self.assertRaisesRegex(PackagingError, "noncompiled source resource mismatch"):
+            packaging_module.rebind_source_compliance_bundle(packaged_bundle, src)
+
+    def test_homebrew_runtime_provenance_requires_exact_bundle_formula_kegs(self):
+        cellar = self.root / "Cellar"
+        oc = cellar / "openconnect/9.21/bin/openconnect"
+        oath = cellar / "oath-toolkit/2.6.14_3/bin/oathtool"
+        lib = cellar / "openconnect/9.21/lib/libopenconnect.5.dylib"
+        for path in (oc, oath, lib):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(path.name.encode())
+        bundle = self.make_source_bundle(runtime_files={
+            "runtime/openconnect/bin/openconnect": oc,
+            "runtime/oathtool": oath,
+            "runtime/openconnect/lib/libopenconnect.5.dylib": lib,
+            "runtime/vpnc/vpnc-script": self.make_payload_source() / "runtime/vpnc/vpnc-script",
+        })
+        packaging_module.validate_homebrew_runtime_provenance(
+            bundle, [oc, oath, lib], [oc, oath],
+            allowed_cellars=[cellar, self.root / "absent-cellar"],
+        )
+
+        wrong = cellar / "openconnect/9.22/lib/libopenconnect.5.dylib"
+        wrong.parent.mkdir(parents=True, exist_ok=True)
+        wrong.write_bytes(lib.read_bytes())
+        with self.assertRaisesRegex(PackagingError, "runtime source keg mismatch"):
+            packaging_module.validate_homebrew_runtime_provenance(
+                bundle, [oc, oath, wrong], [oc, oath], allowed_cellars=[cellar]
+            )
 
     def test_build_creates_a_missing_explicit_output_root(self):
         src = self.make_payload_source()

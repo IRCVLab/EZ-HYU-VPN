@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
+import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -418,6 +420,177 @@ def _source_bundle_runtime_files(bundle: Path) -> Dict[str, Dict[str, Any]]:
     return {item["path"]: {"sha256": item["sha256"], "size": item["size"]} for item in closure["files"]}
 
 
+def _source_bundle_regular_files(bundle: Path) -> Dict[str, bytes]:
+    validate_source_compliance_bundle(bundle)
+    with tarfile.open(bundle, "r:gz") as tf:
+        return {
+            member.name.rstrip("/"): tf.extractfile(member).read()
+            for member in tf.getmembers()
+            if member.isfile()
+        }
+
+
+def _source_bundle_runtime_items(bundle: Path) -> List[Dict[str, Any]]:
+    regular = _source_bundle_regular_files(bundle)
+    inventory = _json_no_duplicate_keys(regular["inventory.json"], "inventory.json")
+    runtime_entry = next(
+        entry for entry in inventory["runtime"]
+        if isinstance(entry, dict) and "runtime_closure" in entry
+    )
+    closure = _json_no_duplicate_keys(
+        regular[runtime_entry["runtime_closure"]], "runtime-closure.json"
+    )
+    return closure["files"]
+
+
+def validate_homebrew_runtime_provenance(
+    bundle: Path,
+    closure: Sequence[Path],
+    roots: Sequence[Path],
+    *,
+    allowed_cellars: Sequence[Path] = (Path("/opt/homebrew/Cellar"), Path("/usr/local/Cellar")),
+) -> None:
+    regular = _source_bundle_regular_files(bundle)
+    formula_info = _json_no_duplicate_keys(
+        regular.get("homebrew-formula-info.json", b""),
+        "homebrew-formula-info.json",
+    )
+    formulae = formula_info.get("formulae") if isinstance(formula_info, dict) else None
+    if not isinstance(formulae, list):
+        raise PackagingError("source bundle lacks Homebrew formula metadata")
+    formula_by_name: Dict[str, Dict[str, Any]] = {}
+    for item in formulae:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise PackagingError("invalid Homebrew formula metadata")
+        name = item["name"]
+        if name in formula_by_name:
+            raise PackagingError(f"duplicate Homebrew formula metadata: {name}")
+        formula_by_name[name] = item
+
+    runtime_items = _source_bundle_runtime_items(bundle)
+    by_rel = {item["path"]: item for item in runtime_items}
+    expected_rels = set(by_rel) - {"runtime/vpnc/vpnc-script"}
+    seen: Dict[str, Path] = {}
+    cellars: List[Path] = []
+    for candidate in map(Path, allowed_cellars):
+        if not candidate.exists():
+            continue
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise PackagingError(f"unsafe Homebrew Cellar root: {candidate}")
+        cellars.append(candidate.resolve(strict=True))
+    if not cellars:
+        raise PackagingError("no trusted Homebrew Cellar root is available")
+    for source in closure:
+        source = Path(source)
+        rel = copied_runtime_rel(source, roots)
+        if rel not in expected_rels:
+            raise PackagingError(f"runtime source path is absent from source bundle: {rel}")
+        resolved = source.resolve(strict=True)
+        previous = seen.get(rel)
+        if previous is not None and previous != resolved:
+            raise PackagingError(f"runtime source collision: {rel}")
+        seen[rel] = resolved
+        package = by_rel[rel]["package"]
+        formula = formula_by_name.get(package)
+        versions = formula.get("versions") if isinstance(formula, dict) else None
+        version = versions.get("stable") if isinstance(versions, dict) else None
+        revision = formula.get("revision", 0) if isinstance(formula, dict) else None
+        if not isinstance(version, str) or not version or not isinstance(revision, int) or revision < 0:
+            raise PackagingError(f"source bundle lacks exact formula version: {package}")
+        keg = version if revision == 0 else f"{version}_{revision}"
+        expected_roots = [cellar / package / keg for cellar in cellars]
+        if not any(_is_under(resolved, expected) for expected in expected_roots):
+            raise PackagingError(
+                f"runtime source keg mismatch: {rel} must come from {package}/{keg}"
+            )
+    if set(seen) != expected_rels:
+        raise PackagingError(
+            "runtime provenance path mismatch: "
+            f"extras={sorted(set(seen) - expected_rels)} "
+            f"missing={sorted(expected_rels - set(seen))}"
+        )
+
+
+def _write_source_bundle(path: Path, regular: Mapping[str, bytes]) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        with temp_path.open("wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+                with tarfile.open(fileobj=gz, mode="w") as tf:
+                    for rel, data in sorted(regular.items()):
+                        info = tarfile.TarInfo(rel)
+                        info.size = len(data)
+                        info.mode = 0o644
+                        info.uid = 0
+                        info.gid = 0
+                        info.mtime = 0
+                        tf.addfile(info, io.BytesIO(data))
+        temp_path.chmod(0o644)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def rebind_source_compliance_bundle(bundle: Path, payload: Path) -> None:
+    bundle = _require_regular_file(Path(bundle))
+    base_sha = _sha256(bundle)
+    regular = _source_bundle_regular_files(bundle)
+    inventory = _json_no_duplicate_keys(regular["inventory.json"], "inventory.json")
+    runtime_entry = next(
+        entry for entry in inventory["runtime"]
+        if isinstance(entry, dict) and "runtime_closure" in entry
+    )
+    closure_name = runtime_entry["runtime_closure"]
+    closure = _json_no_duplicate_keys(regular[closure_name], "runtime-closure.json")
+    actual = _source_payload_runtime_files(payload)
+    by_path = {item["path"]: item for item in closure["files"]}
+    if set(by_path) != set(actual):
+        raise PackagingError(
+            "runtime rebind path mismatch: "
+            f"extras={sorted(set(by_path) - set(actual))} "
+            f"missing={sorted(set(actual) - set(by_path))}"
+        )
+    resource_rel = "runtime/vpnc/vpnc-script"
+    if {key: by_path[resource_rel][key] for key in ("sha256", "size")} != actual[resource_rel]:
+        raise PackagingError("noncompiled source resource mismatch: runtime/vpnc/vpnc-script")
+    if all(
+        {key: by_path[rel][key] for key in ("sha256", "size")} == actual[rel]
+        for rel in by_path
+    ):
+        return
+
+    for rel, item in by_path.items():
+        item["sha256"] = actual[rel]["sha256"]
+        item["size"] = actual[rel]["size"]
+    regular[closure_name] = (
+        json.dumps(closure, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    runtime_entry["sha256"] = hashlib.sha256(regular[closure_name]).hexdigest()
+    regular["inventory.json"] = (
+        json.dumps(inventory, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    original_info = regular["build-info.txt"].decode("utf-8")
+    regular["build-info.txt"] = (
+        "HYU VPN derived corresponding-source binding\n\n"
+        f"Verified base source bundle SHA256: {base_sha}\n"
+        "The package and Homebrew keg versions were verified against the base inventory; "
+        "canonical runtime hashes rebound to the exact current bottle bytes before "
+        "install-name rewriting and signing.\n\n"
+        "Original verified base source-collection record follows:\n"
+        + original_info
+    ).encode("utf-8")
+    regular["checksums.txt"] = "".join(
+        f"{hashlib.sha256(data).hexdigest()}  {rel}\n"
+        for rel, data in sorted(regular.items())
+        if rel != "checksums.txt"
+    ).encode("utf-8")
+    _write_source_bundle(bundle, regular)
+    validate_source_compliance_bundle(bundle)
+
+
 def validate_source_bundle_matches_payload(bundle: Path, payload: Path) -> None:
     closure_files = _source_bundle_runtime_files(bundle)
     actual = _source_payload_runtime_files(payload)
@@ -668,6 +841,7 @@ def assemble_payload_from_repo(
     vpnc_script: Path,
     source_compliance_bundle: Path | None = None,
     closure_runner: ToolRunner | None = None,
+    rebind_source_compliance: bool = False,
 ) -> Path:
     repo_root = Path(repo_root).resolve(strict=True)
     if not _is_under(repo_root, REPO_ROOT.resolve()):
@@ -704,6 +878,12 @@ def assemble_payload_from_repo(
         if item.is_file():
             item.chmod(0o644)
     closure = RuntimeClosurePlanner(closure_runner).discover([openconnect, oathtool])
+    if rebind_source_compliance:
+        if source_compliance_bundle is None:
+            raise PackagingError("runtime source rebinding requires a source compliance bundle")
+        validate_homebrew_runtime_provenance(
+            source_compliance_bundle, closure, [openconnect, oathtool]
+        )
     copy_runtime_closure(closure, [openconnect, oathtool], payload_root)
     copy_file_rel(repo_root / "packaging/README-lab.md", "README-lab.md", 0o644)
     copy_file_rel(repo_root / "packaging/THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES.txt", 0o644)
@@ -711,6 +891,10 @@ def assemble_payload_from_repo(
     if source_compliance_bundle is not None:
         validate_source_compliance_bundle(source_compliance_bundle)
         copy_file_rel(source_compliance_bundle, SOURCE_COMPLIANCE_BUNDLE, 0o644)
+        if rebind_source_compliance:
+            rebind_source_compliance_bundle(
+                payload_root / SOURCE_COMPLIANCE_BUNDLE, payload_root
+            )
     return payload_root
 
 

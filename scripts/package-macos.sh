@@ -87,6 +87,7 @@ python3 "$ROOT/scripts/package-release.py" \
   --menu-app "$BUILD_ROOT/menu/HYU VPN.app" \
   --installer-app "$BUILD_ROOT/installer/Install HYU VPN.app" \
   --source-compliance-bundle "$SOURCE_COMPLIANCE_BUNDLE" \
+  --rebind-source-compliance-bundle \
   --build-root "$BUILD_ROOT/release" \
   --output-root "$RELEASE_OUTPUT_ROOT" \
   --version "$VERSION" \

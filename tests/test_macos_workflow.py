@@ -57,6 +57,7 @@ class MacOSWorkflowTests(unittest.TestCase):
         self.assertIn("assemble-installer-app.sh", text)
         self.assertIn("package-release.py", text)
         self.assertIn("--source-compliance-bundle", text)
+        self.assertIn("--rebind-source-compliance-bundle", text)
         self.assertIn("EZ-HYU-VPN-arm64.dmg", text)
         self.assertIn("mktemp -d /private/tmp/hyu-vpn-macos-build.XXXXXX", text)
         self.assertIn("RELEASE_OUTPUT_ROOT", text)
