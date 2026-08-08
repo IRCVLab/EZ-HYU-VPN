@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   test-and-package:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -20,8 +20,10 @@ jobs:
       SOURCE_BUNDLE_URL: https://github.com/IRCVLab/EZ-HYU-VPN/releases/download/v0.1.1/SOURCE-COMPLIANCE-BUNDLE.tar.gz
     steps:
       - uses: actions/checkout@v4
-      - name: Verify arm64 runner
-        run: test "$(uname -m)" = arm64
+      - name: Verify source-bundle-compatible arm64 runner
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 26
       - name: Install pinned runtime formulas
         run: brew install openconnect oath-toolkit
       - name: Swift package tests

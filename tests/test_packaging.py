@@ -536,7 +536,10 @@ class ReleaseBuilderTests(PackagingTestCase):
 
         openconnect = src / "runtime/openconnect/bin/openconnect"
         openconnect.write_bytes(openconnect.read_bytes() + b"-rewritten-and-signed")
-        with self.assertRaisesRegex(PackagingError, "runtime closure mismatch"):
+        with self.assertRaisesRegex(
+            PackagingError,
+            r"runtime closure mismatch: changed=\['runtime/openconnect/bin/openconnect'\] extras=\[\] missing=\[\]",
+        ):
             packaging_module.validate_source_bundle_matches_payload(packaged_bundle, src)
 
         binding = packaging_module.write_final_runtime_binding(packaged_bundle, src)

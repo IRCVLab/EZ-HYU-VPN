@@ -11,7 +11,9 @@ README = ROOT / "README.md"
 class MacOSWorkflowTests(unittest.TestCase):
     def test_macos_ci_tests_builds_and_verifies_arm64_dmg(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("runs-on: macos-15", text)
+        self.assertIn("runs-on: macos-26", text)
+        self.assertNotIn("runs-on: macos-15", text)
+        self.assertIn('test "$(sw_vers -productVersion | cut -d. -f1)" = 26', text)
         self.assertIn("swift test", text)
         self.assertIn("hyu-vpn-helper-test-harness", text)
         self.assertIn("hyu-vpn-menu-harness", text)

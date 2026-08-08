@@ -422,7 +422,16 @@ def validate_source_bundle_matches_payload(bundle: Path, payload: Path) -> None:
     closure_files = _source_bundle_runtime_files(bundle)
     actual = _source_payload_runtime_files(payload)
     if closure_files != actual:
-        raise PackagingError(f"runtime closure mismatch: extras={sorted(set(closure_files)-set(actual))} missing={sorted(set(actual)-set(closure_files))}")
+        changed = sorted(
+            rel for rel in set(closure_files) & set(actual)
+            if closure_files[rel] != actual[rel]
+        )
+        raise PackagingError(
+            "runtime closure mismatch: "
+            f"changed={changed} "
+            f"extras={sorted(set(closure_files) - set(actual))} "
+            f"missing={sorted(set(actual) - set(closure_files))}"
+        )
 
 
 def _final_runtime_binding_data(bundle: Path, payload: Path) -> Dict[str, Any]:
