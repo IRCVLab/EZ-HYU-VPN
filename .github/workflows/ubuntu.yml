@@ -38,7 +38,7 @@ jobs:
         run: |
           deb="$(find dist/linux -maxdepth 1 -name '*.deb' -print -quit)"
           test -n "$deb"
-          sha256sum -c "$deb.sha256"
+          (cd "$(dirname "$deb")" && sha256sum -c "$(basename "$deb").sha256")
           HYU_VPN_DEB="$deb" python3 -m unittest -v tests.test_linux_packaging
           dpkg-deb --info "$deb"
       - name: Smoke test native applications

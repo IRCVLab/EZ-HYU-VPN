@@ -177,6 +177,11 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn('cd "$OUT"', script)
         self.assertIn('sha256sum "$(basename "$DEB")"', script)
         self.assertNotIn('sha256sum "$DEB" >', script)
+        workflow = (ROOT / ".github/workflows/ubuntu.yml").read_text()
+        self.assertIn(
+            '(cd "$(dirname "$deb")" && sha256sum -c "$(basename "$deb").sha256")',
+            workflow,
+        )
 
     def test_openconnect_download_is_bounded_and_cached_atomically(self):
         script = (ROOT / "scripts/build-openconnect-linux.sh").read_text()
