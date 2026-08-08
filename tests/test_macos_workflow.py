@@ -41,6 +41,12 @@ class MacOSWorkflowTests(unittest.TestCase):
             block = f"- name: {name}\n        timeout-minutes: 10\n        run: {command}"
             self.assertIn(block, text)
 
+    def test_platform_workflows_do_not_duplicate_feature_branch_and_pr_runs(self):
+        for name in ("macos.yml", "ubuntu.yml", "windows.yml"):
+            text = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            self.assertIn("branches: [main]", text)
+            self.assertNotIn('"feat/**"', text)
+
     def test_release_collects_all_three_platforms(self):
         text = RELEASE.read_text(encoding="utf-8")
         for workflow in ("macOS", "Ubuntu", "Windows"):
