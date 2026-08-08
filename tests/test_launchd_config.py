@@ -35,8 +35,13 @@ class LaunchdConfigTests(unittest.TestCase):
 
         self.assertEqual(config["StandardOutPath"], "/Users/shchoi/Library/Logs/hyu-openconnect-service.log")
         self.assertEqual(config["StandardErrorPath"], "/Users/shchoi/Library/Logs/hyu-openconnect-service.err")
-        self.assertTrue(Path(config["StandardOutPath"]).parent.is_dir())
-        self.assertTrue(Path(config["StandardErrorPath"]).parent.is_dir())
+        stdout_path = Path(config["StandardOutPath"])
+        stderr_path = Path(config["StandardErrorPath"])
+        expected_log_dir = Path("/Users/shchoi/Library/Logs")
+        self.assertTrue(stdout_path.is_absolute())
+        self.assertTrue(stderr_path.is_absolute())
+        self.assertEqual(stdout_path.parent, expected_log_dir)
+        self.assertEqual(stderr_path.parent, expected_log_dir)
         forbidden = ["secure.hanyang.ac.kr", "password", "totp", "cookie", "PanGPS", "PanGPA", "PanGpHip", "GlobalProtect", "/Applications/GlobalProtect"]
         for value in forbidden:
             with self.subTest(value=value):
