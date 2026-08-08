@@ -28,7 +28,7 @@ class MacOSWorkflowTests(unittest.TestCase):
     def test_swift_ci_commands_have_independent_bounded_steps(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         expected = {
-            "Swift package tests": "swift test --package-path macos </dev/null",
+            "Swift package tests": "swift test --package-path macos --no-parallel </dev/null",
             "Privileged helper harness": "swift run --package-path macos hyu-vpn-helper-test-harness </dev/null",
             "Menu harness": "swift run --package-path macos hyu-vpn-menu-harness </dev/null",
             "Installer harness": "swift run --package-path macos hyu-vpn-installer-harness </dev/null",

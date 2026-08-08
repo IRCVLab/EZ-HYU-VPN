@@ -199,10 +199,11 @@ import Testing
 @Suite struct SystemProcessControllerTests {
     @Test func realHarmlessChildHasKernelBirthTimeAndCanBeReapedByForegroundMonitor() throws {
         let process = SystemProcessController()
-        let child = try process.prepareSpawn(SpawnRequest(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["0"], inheritStdin: true, inheritStdout: true, usesShell: false))
+        let child = try process.prepareSpawn(SpawnRequest(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["1"], inheritStdin: true, inheritStdout: true, usesShell: false))
         #expect(child.pid > 0)
         #expect(child.processGroupID == child.pid)
         #expect(child.birthTime > 0)
+        try process.commitSpawn(child)
         let live = try process.liveIdentity(for: child.pid)
         #expect(live?.birthTime == child.birthTime)
         let record = SessionRecord(pid: child.pid, processGroupID: child.processGroupID, processBirthTime: child.birthTime, sessionNonce: "nonce12345", consoleUID: UInt32(getuid()), portal: "secure.hanyang.ac.kr", executableIdentity: ExecutableIdentity(path: live?.executablePath ?? "/bin/sleep", fileID: "unused"), launchTime: Date(), ledger: OpaqueLedger(path: URL(fileURLWithPath: "/tmp/ledger"), nonce: "nonce12345"))

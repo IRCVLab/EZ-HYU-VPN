@@ -26,7 +26,7 @@ jobs:
         run: brew install openconnect oath-toolkit
       - name: Swift package tests
         timeout-minutes: 10
-        run: swift test --package-path macos </dev/null
+        run: swift test --package-path macos --no-parallel </dev/null
       - name: Privileged helper harness
         timeout-minutes: 10
         run: swift run --package-path macos hyu-vpn-helper-test-harness </dev/null
