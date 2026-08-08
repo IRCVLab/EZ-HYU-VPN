@@ -746,15 +746,18 @@ private final class Round10DriftTools: NetworkTooling {
 
 private final class TunnelSurfaceApplyingUpstream: VpncUpstreamRunning {
     let tools: TunnelSurfaceNetworkTools
-    init(tools: TunnelSurfaceNetworkTools) { self.tools = tools }
+    let expectedNonce: String
+    init(tools: TunnelSurfaceNetworkTools, expectedNonce: String = "nonceabc123") {
+        self.tools = tools
+        self.expectedNonce = expectedNonce
+    }
     func run(reason: String, environment: [String: String]) throws -> Int32 {
         guard reason == "connect" else { return 0 }
-        guard let ledgerPath = environment["HYU_SESSION_LEDGER"],
-              let nonce = environment["HYU_NONCE"] else { throw HelperError.processMismatch }
+        guard let ledgerPath = environment["HYU_SESSION_LEDGER"] else { throw HelperError.processMismatch }
         let intent = try NetworkLedgerStore(
             path: URL(fileURLWithPath: ledgerPath),
             expectedOwnerUID: UInt32(getuid())
-        ).load(expectedNonce: nonce)
+        ).load(expectedNonce: expectedNonce)
         tools.routes = intent.routeRecords.map(\.applied.routeSnapshot)
         return 0
     }
