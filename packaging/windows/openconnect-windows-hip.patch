@@ -1,0 +1,334 @@
+--- openconnect-v9.21-clean/gpst.c	2026-06-16 20:32:46.000000000 +0900
++++ openconnect-v9.21-src/gpst.c	2026-08-08 07:24:30.220710376 +0900
+@@ -910,6 +910,277 @@
+ 	return result;
+ }
+ 
++#ifdef _WIN32
++#define WIN32_HIP_TIMEOUT_MS 60000
++#define WIN32_HIP_READER_TIMEOUT_MS 5000
++
++struct win32_hip_reader {
++	HANDLE pipe;
++	struct oc_text_buf *report;
++	DWORD error;
++};
++
++static DWORD WINAPI win32_read_hip_report(LPVOID opaque)
++{
++	struct win32_hip_reader *reader = opaque;
++	char block[4096];
++	DWORD count;
++
++	while (ReadFile(reader->pipe, block, sizeof(block), &count, NULL)) {
++		if (count)
++			buf_append_bytes(reader->report, block, count);
++	}
++	reader->error = GetLastError();
++	if (reader->error == ERROR_BROKEN_PIPE)
++		reader->error = ERROR_SUCCESS;
++	return 0;
++}
++
++static void win32_append_backslashes(struct oc_text_buf *command, int count)
++{
++	while (count-- > 0)
++		buf_append_bytes(command, "\\", 1);
++}
++
++/* Quote one argument according to the CommandLineToArgvW/CRT parsing rules. */
++static void win32_append_hip_argument(struct oc_text_buf *command, const char *argument)
++{
++	const char *cursor;
++	int backslashes = 0;
++
++	if (command->pos)
++		buf_append_bytes(command, " ", 1);
++	buf_append_bytes(command, "\"", 1);
++	for (cursor = argument; *cursor; cursor++) {
++		if (*cursor == '\\') {
++			backslashes++;
++			continue;
++		}
++		if (*cursor == '"') {
++			win32_append_backslashes(command, backslashes * 2 + 1);
++			buf_append_bytes(command, "\"", 1);
++		} else {
++			win32_append_backslashes(command, backslashes);
++			buf_append_bytes(command, cursor, 1);
++		}
++		backslashes = 0;
++	}
++	win32_append_backslashes(command, backslashes * 2);
++	buf_append_bytes(command, "\"", 1);
++}
++
++static wchar_t *win32_hip_utf16(const char *value)
++{
++	wchar_t *wide;
++	int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
++
++	if (!count)
++		return NULL;
++	wide = malloc(count * sizeof(*wide));
++	if (!wide)
++		return NULL;
++	if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
++		free(wide);
++		return NULL;
++	}
++	return wide;
++}
++
++static int win32_run_hip_script(struct openconnect_info *vpninfo)
++{
++	struct oc_text_buf *command = buf_alloc();
++	struct win32_hip_reader reader = { 0 };
++	STARTUPINFOEXW startup;
++	PROCESS_INFORMATION process;
++	SECURITY_ATTRIBUTES security;
++	HANDLE input_read = NULL, input_write = NULL;
++	HANDLE output_read = NULL, output_write = NULL, nul = INVALID_HANDLE_VALUE;
++	HANDLE reader_thread = NULL;
++	HANDLE inherited[3];
++	SIZE_T attributes_size = 0;
++	wchar_t *application = NULL, *command_w = NULL;
++	DWORD flags = CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
++	DWORD wait_result, exit_status = 0, spawn_error = ERROR_SUCCESS, written = 0;
++	int ret = -EIO;
++
++	memset(&startup, 0, sizeof(startup));
++	memset(&process, 0, sizeof(process));
++	memset(&security, 0, sizeof(security));
++	startup.StartupInfo.cb = sizeof(startup);
++	security.nLength = sizeof(security);
++	security.bInheritHandle = TRUE;
++
++	reader.report = buf_alloc();
++	win32_append_hip_argument(command, vpninfo->csd_wrapper);
++	win32_append_hip_argument(command, "--cookie-on-stdin");
++	if (vpninfo->ip_info.addr) {
++		win32_append_hip_argument(command, "--client-ip");
++		win32_append_hip_argument(command, vpninfo->ip_info.addr);
++	}
++	if (vpninfo->ip_info.addr6) {
++		win32_append_hip_argument(command, "--client-ipv6");
++		win32_append_hip_argument(command, vpninfo->ip_info.addr6);
++	}
++	win32_append_hip_argument(command, "--md5");
++	win32_append_hip_argument(command, vpninfo->csd_token);
++	win32_append_hip_argument(command, "--client-os");
++	win32_append_hip_argument(command, gpst_os_name(vpninfo));
++	if (vpninfo->csd_ticket) {
++		win32_append_hip_argument(command, "--app-version");
++		win32_append_hip_argument(command, vpninfo->csd_ticket);
++	}
++	if (buf_error(command) || buf_error(reader.report)) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	application = win32_hip_utf16(vpninfo->csd_wrapper);
++	command_w = win32_hip_utf16(command->data);
++	if (!application || !command_w) {
++		ret = -EINVAL;
++		goto out;
++	}
++	if (!CreatePipe(&input_read, &input_write, &security, 0) ||
++	    !SetHandleInformation(input_write, HANDLE_FLAG_INHERIT, 0) ||
++	    !CreatePipe(&output_read, &output_write, &security, 0) ||
++	    !SetHandleInformation(output_read, HANDLE_FLAG_INHERIT, 0))
++		goto out;
++	nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
++			  FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
++	if (nul == INVALID_HANDLE_VALUE)
++		goto out;
++
++	InitializeProcThreadAttributeList(NULL, 1, 0, &attributes_size);
++	startup.lpAttributeList = malloc(attributes_size);
++	if (!startup.lpAttributeList ||
++	    !InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attributes_size))
++		goto out;
++	inherited[0] = input_read;
++	inherited[1] = output_write;
++	inherited[2] = nul;
++	if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0,
++				       PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited,
++				       sizeof(inherited), NULL, NULL))
++		goto out;
++	startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
++	startup.StartupInfo.wShowWindow = SW_HIDE;
++	startup.StartupInfo.hStdInput = input_read;
++	startup.StartupInfo.hStdOutput = output_write;
++	startup.StartupInfo.hStdError = nul;
++
++	vpn_progress(vpninfo, PRG_INFO, _("Trying to run HIP report generator '%s'.\n"),
++		     vpninfo->csd_wrapper);
++	if (!CreateProcessW(application, command_w, NULL, NULL, TRUE, flags, NULL, NULL,
++			    &startup.StartupInfo, &process)) {
++		spawn_error = GetLastError();
++		goto out;
++	}
++	CloseHandle(input_read);
++	input_read = NULL;
++	CloseHandle(output_write);
++	output_write = NULL;
++	if (!WriteFile(input_write, vpninfo->cookie, strlen(vpninfo->cookie), &written, NULL) ||
++	    written != strlen(vpninfo->cookie) ||
++	    !WriteFile(input_write, "\n", 1, &written, NULL) || written != 1) {
++		vpn_progress(vpninfo, PRG_ERR, _("Failed to pass HIP cookie over protected stdin.\n"));
++		TerminateProcess(process.hProcess, ERROR_WRITE_FAULT);
++		WaitForSingleObject(process.hProcess, INFINITE);
++		ret = -EIO;
++		goto out;
++	}
++	CloseHandle(input_write);
++	input_write = NULL;
++	reader.pipe = output_read;
++	reader_thread = CreateThread(NULL, 0, win32_read_hip_report, &reader, 0, NULL);
++	if (!reader_thread) {
++		TerminateProcess(process.hProcess, ERROR_NOT_ENOUGH_MEMORY);
++		WaitForSingleObject(process.hProcess, INFINITE);
++		goto out;
++	}
++
++	wait_result = WaitForSingleObject(process.hProcess, WIN32_HIP_TIMEOUT_MS);
++	if (wait_result == WAIT_TIMEOUT) {
++		vpn_progress(vpninfo, PRG_ERR, _("HIP report generator exceeded the 60 second timeout.\n"));
++		TerminateProcess(process.hProcess, ERROR_TIMEOUT);
++		WaitForSingleObject(process.hProcess, INFINITE);
++		ret = -ETIMEDOUT;
++	} else if (wait_result != WAIT_OBJECT_0 ||
++		   !GetExitCodeProcess(process.hProcess, &exit_status)) {
++		ret = -EIO;
++	} else if (exit_status) {
++		vpn_progress(vpninfo, PRG_ERR,
++			     _("HIP report generator returned non-zero status: %lu\n"),
++			     (unsigned long)exit_status);
++		ret = -EINVAL;
++	} else {
++		ret = 0;
++	}
++	wait_result = WaitForSingleObject(reader_thread, WIN32_HIP_READER_TIMEOUT_MS);
++	if (wait_result != WAIT_OBJECT_0) {
++		CancelSynchronousIo(reader_thread);
++		if (output_read) {
++			CloseHandle(output_read);
++			output_read = NULL;
++		}
++		wait_result = WaitForSingleObject(reader_thread, WIN32_HIP_READER_TIMEOUT_MS);
++		if (wait_result != WAIT_OBJECT_0) {
++			vpn_progress(vpninfo, PRG_ERR, _("HIP report reader could not be stopped safely.\n"));
++			ExitProcess(ERROR_TIMEOUT);
++		}
++		ret = -ETIMEDOUT;
++	}
++	if (!ret && (reader.error || buf_error(reader.report) || !reader.report->pos)) {
++		vpn_progress(vpninfo, PRG_ERR, _("HIP report generator returned no valid report.\n"));
++		ret = -EIO;
++	}
++	if (!ret) {
++		vpn_progress(vpninfo, PRG_INFO,
++			     _("HIP report generator completed successfully (report is %d bytes).\n"),
++			     reader.report->pos);
++		ret = check_or_submit_hip_report(vpninfo, reader.report->data);
++		if (ret < 0)
++			vpn_progress(vpninfo, PRG_ERR, _("HIP report submission failed.\n"));
++		else {
++			vpn_progress(vpninfo, PRG_INFO, _("HIP report submitted successfully.\n"));
++			ret = 0;
++		}
++	}
++
++out:
++	if (spawn_error != ERROR_SUCCESS) {
++		char *error = openconnect__win32_strerror(spawn_error);
++		vpn_progress(vpninfo, PRG_ERR, _("Failed to spawn HIP report generator '%s': %s\n"),
++			     vpninfo->csd_wrapper, error);
++		free(error);
++	}
++	if (reader_thread)
++		CloseHandle(reader_thread);
++	if (process.hThread)
++		CloseHandle(process.hThread);
++	if (process.hProcess)
++		CloseHandle(process.hProcess);
++	if (input_read)
++		CloseHandle(input_read);
++	if (input_write)
++		CloseHandle(input_write);
++	if (output_write)
++		CloseHandle(output_write);
++	if (output_read)
++		CloseHandle(output_read);
++	if (nul != INVALID_HANDLE_VALUE)
++		CloseHandle(nul);
++	if (startup.lpAttributeList) {
++		DeleteProcThreadAttributeList(startup.lpAttributeList);
++		free(startup.lpAttributeList);
++	}
++	free(application);
++	free(command_w);
++	buf_free(command);
++	buf_free(reader.report);
++	return ret;
++}
++#endif /* _WIN32 */
++
+ static int run_hip_script(struct openconnect_info *vpninfo)
+ {
+ #if !defined(_WIN32) && !defined(__native_client__)
+@@ -936,7 +1207,9 @@
+ 		return 0;
+ 	}
+ 
+-#if defined(_WIN32) || defined(__native_client__)
++#if defined(_WIN32)
++	return win32_run_hip_script(vpninfo);
++#elif defined(__native_client__)
+ 	vpn_progress(vpninfo, PRG_ERR,
+ 		     _("Error: Running the 'HIP Report' script on this platform is not yet implemented.\n"));
+ 	return -EPERM;
+@@ -1052,7 +1325,7 @@
+ 		exit(1);
+ 	}
+ 
+-#endif /* !_WIN32 && !__native_client__ */
++#endif /* platform HIP runner */
+ }
+ 
+ static int check_and_maybe_submit_hip_report(struct openconnect_info *vpninfo)
+--- openconnect-v9.21-clean/main.c	2026-06-16 20:32:46.000000000 +0900
++++ openconnect-v9.21-src/main.c	2026-08-08 07:24:30.202710424 +0900
+@@ -240,8 +240,8 @@
+ 	OPTION("script-tun", 0, 'S'),
+ 	OPTION("syslog", 0, 'l'),
+ 	OPTION("csd-user", 1, OPT_CSD_USER),
+-	OPTION("csd-wrapper", 1, OPT_CSD_WRAPPER),
+ #endif
++	OPTION("csd-wrapper", 1, OPT_CSD_WRAPPER),
+ #if defined(HAVE_POSIX_SPAWN) || defined(_WIN32)
+ 	OPTION("external-browser", 1, OPT_EXT_BROWSER),
+ #endif
+@@ -1121,8 +1121,8 @@
+ 	printf("\n%s:\n", _("Trojan binary (CSD) execution"));
+ #ifndef _WIN32
+ 	printf("      --csd-user=USER             %s\n", _("Drop privileges during trojan execution"));
+-	printf("      --csd-wrapper=SCRIPT        %s\n", _("Run SCRIPT instead of trojan binary"));
+ #endif
++	printf("      --csd-wrapper=SCRIPT        %s\n", _("Run SCRIPT instead of trojan binary or HIP report generator"));
+ 	printf("      --force-trojan=INTERVAL     %s\n", _("Set minimum interval between trojan runs (in seconds)"));
+ 
+ 	printf("\n%s:\n", _("Server bugs"));
+@@ -1900,10 +1900,10 @@
+ 			get_uids(config_arg, &vpninfo->uid_csd, &vpninfo->gid_csd);
+ 			vpninfo->uid_csd_given = 1;
+ 			break;
++#endif /* !_WIN32 */
+ 		case OPT_CSD_WRAPPER:
+ 			vpninfo->csd_wrapper = keep_config_arg();
+ 			break;
+-#endif /* !_WIN32 */
+ 		case 'F':
+ 			add_form_field(keep_config_arg());
+ 			break;

@@ -44,6 +44,13 @@ private func credentialCollectionUsesContainsAndValidator() throws {
     } catch InstallerCoreError.invalidInput { }
 }
 
+private func missingCredentialKeysAreOrderedAndDoNotDecryptExistingValues() throws {
+    let store = MemoryCredentialStore([.password: "retained-password"])
+    let missing = try InstallerCredentialBootstrapper.missingCredentialKeys(store: store)
+    try expect(missing == [.username, .totpSeed], "missing credential keys preserve form order")
+    try expect(store.reads.isEmpty, "missing-key detection never decrypts retained credentials")
+}
+
 private final class FailingWriteStore: MemoryCredentialStore {
     override func write(_ value: String, for key: CredentialKey) throws {
         if key == .password { throw InstallerCoreError.commandFailed(code: "WRITE_FAILED") }
@@ -115,19 +122,21 @@ private func installerAppProvidesStandardEditShortcutsForCredentialFields() thro
     try expect(source.contains("keyEquivalent: \"v\""), "installer edit menu binds Command-V")
 }
 
-private func installerCollectsEachConfirmedSecretInOneDialog() throws {
+private func installerCollectsAllMissingCredentialsInOneDialog() throws {
     let source = try String(contentsOfFile: "macos/Sources/HYUVPNInstallerApp/main.swift", encoding: .utf8)
-    guard let start = source.range(of: "private func promptConfirmedSecret"),
+    guard let start = source.range(of: "private func promptCredentialForm"),
           let end = source.range(of: "private func run(_ argv:", range: start.upperBound..<source.endIndex) else {
-        throw HarnessError.failure("confirmed secret prompt source boundary missing")
+        throw HarnessError.failure("credential form source boundary missing")
     }
     let body = String(source[start.lowerBound..<end.lowerBound])
-    try expect(body.components(separatedBy: "NSSecureTextField(").count - 1 == 2, "confirmed secret dialog contains two secure fields")
-    try expect(body.components(separatedBy: "alert.runModal()").count - 1 == 1, "confirmed secret uses one modal")
-    try expect(body.contains("NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 124))"), "confirmed secret dialog uses a stable large accessory frame")
-    try expect(body.contains("firstField.nextKeyView = confirmationField"), "Tab moves from the first secret field to confirmation")
+    try expect(body.contains("width: 460"), "credential dialog is wide enough for three inputs")
+    try expect(body.components(separatedBy: "alert.runModal()").count - 1 == 1, "all missing credentials use one modal")
+    try expect(body.contains("case .password, .totpSeed") && body.contains("NSSecureTextField"), "password and TOTP use secure fields")
+    try expect(body.contains("fields[index].nextKeyView = fields[index + 1]"), "Tab advances through every credential field")
+    try expect(body.contains("fields.last?.nextKeyView = alert.buttons.first"), "Tab advances from the final field to Continue")
     try expect(body.contains("alert.window.recalculateKeyViewLoop()"), "alert recalculates the explicit key view loop")
-    try expect(!body.contains("promptText("), "confirmed secret does not open sequential dialogs")
+    try expect(body.contains("field.stringValue = \"\""), "secure form fields are cleared after capture")
+    try expect(!source.contains("promptConfirmedSecret") && !source.contains("promptText("), "installer has no sequential credential prompt path")
 }
 
 
@@ -199,13 +208,14 @@ private func rootAuthorizationPreservesMappedTransactionFailureCode() throws {
 
 do {
     try credentialCollectionUsesContainsAndValidator()
+    try missingCredentialKeysAreOrderedAndDoNotDecryptExistingValues()
     try writeRollbackOnlyNewKeys()
     try activationFailureCleanupOnlyWrittenKeys()
     try cleanupIncompleteStillAttemptsLaterKeys()
     try activationPolicyClassifiesMenuStartAsWarning()
     try installerAppUsesExplicitAppKitDelegateBootstrap()
     try installerAppProvidesStandardEditShortcutsForCredentialFields()
-    try installerCollectsEachConfirmedSecretInOneDialog()
+    try installerCollectsAllMissingCredentialsInOneDialog()
     try rootAdminAuthorizationScriptQuotesCommandInOSAScriptArgv()
     try rootAdminHarmlessParserVariantExecutesViaArgv()
     try privilegedArgvAndSingleAuthorization()

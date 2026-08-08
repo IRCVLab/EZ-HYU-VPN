@@ -713,7 +713,7 @@ private final class Round9AssertingUpstream: VpncUpstreamRunning {
 private final class Round9NetworkTools: NetworkTooling {
     var routes: [RouteSnapshot] = []
     var deletedRoutes: [String] = []
-    func rebootIdentity() throws -> UInt64 { 4242 }
+    func rebootIdentity() throws -> UInt64 { stableTestBootIdentity }
     func primaryServiceID() throws -> String { "service-wifi" }
     func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: "192.0.2.1", interface: "en0", netmask: "0.0.0.0", protocol: "ipv4") }
     func route(destination: String, netmask: String?) throws -> RouteSnapshot? { routes.first { $0.destination == destination && (netmask == nil || $0.netmask == netmask) } }
@@ -733,7 +733,7 @@ private func round10ValidEnv(ledger: URL) -> [String: String] { ["HYU_SESSION_LE
 private final class Round10CountingUpstream: VpncUpstreamRunning { var calls = 0; func run(reason: String, environment: [String: String]) throws -> Int32 { calls += 1; return 0 } }
 private final class Round10DriftTools: NetworkTooling {
     var defaultGateway = "192.0.2.1"
-    func rebootIdentity() throws -> UInt64 { 4242 }
+    func rebootIdentity() throws -> UInt64 { stableTestBootIdentity }
     func primaryServiceID() throws -> String { "service-wifi" }
     func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: defaultGateway, interface: "en0", netmask: "0.0.0.0", protocol: "ipv4") }
     func route(destination: String, netmask: String?) throws -> RouteSnapshot? { nil }
@@ -746,13 +746,19 @@ private final class Round10DriftTools: NetworkTooling {
 
 private final class TunnelSurfaceApplyingUpstream: VpncUpstreamRunning {
     let tools: TunnelSurfaceNetworkTools
-    init(tools: TunnelSurfaceNetworkTools) { self.tools = tools }
+    let expectedNonce: String
+    init(tools: TunnelSurfaceNetworkTools, expectedNonce: String = "nonceabc123") {
+        self.tools = tools
+        self.expectedNonce = expectedNonce
+    }
     func run(reason: String, environment: [String: String]) throws -> Int32 {
         guard reason == "connect" else { return 0 }
-        tools.routes = [
-            RouteSnapshot(destination: "10.0.0.0", gateway: "10.10.0.1", interface: "utun7", netmask: "255.0.0.0", protocol: "ipv4"),
-            RouteSnapshot(destination: "198.51.100.9", gateway: "192.0.2.1", interface: "en0", netmask: "255.255.255.255", protocol: "ipv4"),
-        ]
+        guard let ledgerPath = environment["HYU_SESSION_LEDGER"] else { throw HelperError.processMismatch }
+        let intent = try NetworkLedgerStore(
+            path: URL(fileURLWithPath: ledgerPath),
+            expectedOwnerUID: UInt32(getuid())
+        ).load(expectedNonce: expectedNonce)
+        tools.routes = intent.routeRecords.map(\.applied.routeSnapshot)
         return 0
     }
 }

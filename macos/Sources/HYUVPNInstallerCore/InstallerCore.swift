@@ -43,22 +43,37 @@ package enum InstallerCredentialBootstrapper {
     private static let validFallbackPassword = "hyu-password"
     private static let validFallbackTOTP = "JBSWY3DPEHPK3PXP"
 
+    package static func missingCredentialKeys(store: InstallerCredentialStoring) throws -> [CredentialKey] {
+        try CredentialKey.allCases.filter { try !store.contains($0) }
+    }
+
     package static func collectMissingFinalCredentials(store: InstallerCredentialStoring, prompt: (CredentialKey) throws -> String) throws -> [CredentialKey: String] {
+        let missingKeys = try missingCredentialKeys(store: store)
+        var values: [CredentialKey: String] = [:]
+        for key in missingKeys {
+            values[key] = try prompt(key)
+        }
+        return try validateCollectedCredentialValues(missingKeys: missingKeys, values: values)
+    }
+
+    package static func validateCollectedCredentialValues(missingKeys: [CredentialKey], values: [CredentialKey: String]) throws -> [CredentialKey: String] {
+        guard Set(values.keys) == Set(missingKeys), Set(missingKeys).count == missingKeys.count else {
+            throw InstallerCoreError.invalidInput("CREDENTIAL_FORM_VALUES_INVALID")
+        }
         var collected: [CredentialKey: String] = [:]
-        if try !store.contains(.username) {
-            let username = try prompt(.username)
-            let validated = try validate(username: username, password: validFallbackPassword, totpSeed: validFallbackTOTP)
-            collected[.username] = validated.username
-        }
-        if try !store.contains(.password) {
-            let password = try prompt(.password)
-            let validated = try validate(username: validFallbackUsername, password: password, totpSeed: validFallbackTOTP)
-            collected[.password] = validated.password
-        }
-        if try !store.contains(.totpSeed) {
-            let totpSeed = try prompt(.totpSeed)
-            let validated = try validate(username: validFallbackUsername, password: validFallbackPassword, totpSeed: totpSeed)
-            collected[.totpSeed] = validated.normalizedTOTPSeed
+        for key in missingKeys {
+            guard let value = values[key] else { throw InstallerCoreError.invalidInput("CREDENTIAL_FORM_VALUES_INVALID") }
+            switch key {
+            case .username:
+                collected[.username] = try validate(username: value, password: validFallbackPassword, totpSeed: validFallbackTOTP).username
+            case .password:
+                collected[.password] = try validate(username: validFallbackUsername, password: value, totpSeed: validFallbackTOTP).password
+            case .totpSeed:
+                guard let normalized = try validate(username: validFallbackUsername, password: validFallbackPassword, totpSeed: value).normalizedTOTPSeed else {
+                    throw InstallerCoreError.invalidInput("TOTP_SEED_REQUIRED")
+                }
+                collected[.totpSeed] = normalized
+            }
         }
         return collected
     }

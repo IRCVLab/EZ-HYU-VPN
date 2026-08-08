@@ -659,7 +659,7 @@ class Supervisor:
         self._stop_requested = True
         self._stop_event.set()
         self._control_event.set()
-        self._stop_child(signum)
+        self._signal_child(signum)
 
     def _finish_failed_start(self) -> None:
         with self._state_changed:
@@ -750,7 +750,7 @@ class Supervisor:
             if child is None:
                 return 0, False
             if established:
-                return child.wait() or 0, False
+                return self._wait_for_connected_child(child), False
             remaining = deadline - self.monotonic()
             if remaining <= 0:
                 timeout_result = self._handle_connect_establish_timeout(expected_child=child, expected_generation=generation)
@@ -797,21 +797,61 @@ class Supervisor:
             self._enter_repair_required(automatic=False)
         return 1
 
-    def _stop_child(self, signum: int = signal.SIGTERM) -> None:
-        child = self._child
+    def _signal_child(self, signum: int = signal.SIGTERM) -> None:
+        with self._state_lock:
+            child = self._child
         if child is None:
             return
         try:
             os.killpg(child.pid, signum)
         except ProcessLookupError:
             return
+
+    def _connected_network_ready(self) -> bool:
+        if self.readiness is None:
+            return True
+        ready_once = getattr(self.readiness, "ready_once", None)
+        if ready_once is None:
+            return True
+        try:
+            return ready_once() is not None
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _wait_for_connected_child(self, child: subprocess.Popen) -> int:
+        probe_interval = max(1.0, min(10.0, float(getattr(self.readiness, "poll_interval", 5.0))))
+        next_probe = self.monotonic() + probe_interval
+        failed_probes = 0
+        while True:
+            try:
+                return child.wait(timeout=_CONNECT_WAIT_SLICE_SECONDS) or 0
+            except subprocess.TimeoutExpired:
+                pass
+            if self._stop_requested:
+                continue
+            now = self.monotonic()
+            if now < next_probe:
+                continue
+            next_probe = now + probe_interval
+            if self._connected_network_ready():
+                failed_probes = 0
+                continue
+            failed_probes += 1
+            if failed_probes < 2:
+                continue
+            self._stop_child()
+            return child.wait() or 1
+
+    def _stop_child(self, signum: int = signal.SIGTERM) -> None:
+        with self._state_lock:
+            child = self._child
+        if child is None:
+            return
+        self._signal_child(signum)
         try:
             child.wait(timeout=self.config.stop_timeout)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
+            self._signal_child(signal.SIGKILL)
             child.wait(timeout=self.config.stop_timeout)
 
     def _sleep_stop_aware(self, delay: float) -> None:

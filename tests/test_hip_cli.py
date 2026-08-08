@@ -213,6 +213,25 @@ class HipCliTests(unittest.TestCase):
         ET.fromstring(stdout.buffer.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_xml_illegal_control_characters_are_removed_from_collected_posture(self):
+        from hyu_vpn import hip_cli
+        stdout = BytesWriter()
+        stderr = io.StringIO()
+        collector = mock.Mock()
+        collector.collect.return_value = MacPosture(
+            host_info=HostInfo(host_name="CLI\x01HOST", host_id="HOST\x7fID"),
+            anti_malware=(Product(vendor="Apple\x0bInc.", name="Xprotect", version="1"),),
+        )
+
+        rc = hip_cli.main(ARGV, _collector_factory=lambda: collector, _stdout=stdout, _stderr=stderr)
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        raw = stdout.buffer.getvalue()
+        self.assertNotIn(b"\x01", raw)
+        self.assertNotIn(b"\x0b", raw)
+        self.assertNotIn(b"\x7f", raw)
+        ET.fromstring(raw)
+
     def test_non_utf8_surrogate_environment_does_not_crash_or_leak(self):
         from hyu_vpn import hip_cli
         stdout = BytesWriter()

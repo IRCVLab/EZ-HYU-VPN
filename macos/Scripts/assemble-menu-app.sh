@@ -18,8 +18,11 @@ import pathlib, stat, sys
 dest = pathlib.Path(sys.argv[1])
 repo = pathlib.Path(sys.argv[2]).resolve(strict=False)
 resolved = dest.resolve(strict=False)
-forbidden = [pathlib.Path('/'), repo, pathlib.Path('/Applications'), pathlib.Path('/Library'), pathlib.Path('/System'), pathlib.Path('/usr')]
-if dest.is_symlink() or any(resolved == root or (root != pathlib.Path('/') and root in resolved.parents) for root in forbidden):
+system_forbidden = [pathlib.Path('/'), pathlib.Path('/Applications'), pathlib.Path('/Library'), pathlib.Path('/System'), pathlib.Path('/usr')]
+repo_target = repo / 'target'
+inside_safe_repo_target = repo_target in resolved.parents
+inside_forbidden_repo = resolved == repo or (repo in resolved.parents and not inside_safe_repo_target)
+if dest.is_symlink() or inside_forbidden_repo or any(resolved == root or (root != pathlib.Path('/') and root in resolved.parents) for root in system_forbidden):
     print(f"unsafe destination: {dest}", file=sys.stderr)
     raise SystemExit(73)
 original = dest if dest.is_absolute() else pathlib.Path.cwd() / dest

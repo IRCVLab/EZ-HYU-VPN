@@ -826,6 +826,8 @@ resolver #1
         self.assertIn("print-disabled", text)
         self.assertIn("openconnect.*secure", text)
         self.assertIn("run_optional_cmd", text)
+        self.assertIn('uninstall_phase(){\n  if [[ -x "$HELPER_DST" ]]', text)
+        self.assertIn("verify_installed_helper_stopped", text)
         self.assertIn("--stage-manifest-sha256", text)
         self.assertIn("--package-manifest-sha256", text)
         self.assertIn("verify_package_manifest_digest", text)

@@ -64,6 +64,13 @@ class PackagingTestCase(unittest.TestCase):
             "patches/openconnect.patch": b"diff --git a/a b/a\n",
             "resources/vpnc-script": b"#!/bin/sh\n",
             "build-info.txt": b"HYU VPN internal source compliance bundle\n",
+            "homebrew-formula-info.json": json.dumps({
+                "formulae": [
+                    {"name": "openconnect", "versions": {"stable": "9.21"}, "revision": 0},
+                    {"name": "oath-toolkit", "versions": {"stable": "2.6.14"}, "revision": 3},
+                ],
+                "casks": [],
+            }, sort_keys=True).encode() + b"\n",
         }
         if runtime_files is None:
             runtime_entries = [
@@ -89,6 +96,7 @@ class PackagingTestCase(unittest.TestCase):
                 {"package": "oath-toolkit", "file": "source/oath-toolkit.tar.gz", "sha256": digests["source/oath-toolkit.tar.gz"]},
                 {"package": "openconnect", "file": "formula/openconnect.rb", "sha256": digests["formula/openconnect.rb"]},
                 {"package": "oath-toolkit", "file": "formula/oath-toolkit.rb", "sha256": digests["formula/oath-toolkit.rb"]},
+                {"package": "homebrew:formula-metadata", "file": "homebrew-formula-info.json", "sha256": digests["homebrew-formula-info.json"]},
             ],
             "resource_sources": [{"name": "vpnc-script", "file": "resources/vpnc-script", "sha256": digests["resources/vpnc-script"]}],
             "receipts": [
@@ -227,8 +235,8 @@ class NativeAppAssemblyTests(PackagingTestCase):
         feed = json.loads((REPO / "update.json").read_text(encoding="utf-8"))
         self.assertEqual(set(feed), {"schema_version", "version", "release_url"})
         self.assertEqual(feed["schema_version"], 1)
-        self.assertEqual(feed["version"], "0.1.1")
-        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.1.1")
+        self.assertEqual(feed["version"], "0.2.0")
+        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.2.0")
 
 
 class FakeOtoolRunner:
@@ -332,6 +340,7 @@ class DestinationGuardTests(PackagingTestCase):
         with self.assertRaises(PackagingError):
             guard_destination(target, allowed_root=self.build_root)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS /tmp resolves through /private/tmp")
     def test_allows_unresolved_system_var_alias_but_rejects_user_symlink_ancestor(self):
         canonical_tmp = Path(tempfile.mkdtemp(prefix="hyu-var-alias-", dir="/private/tmp"))
         self.addCleanup(lambda: subprocess.run(["/bin/rm", "-rf", str(canonical_tmp)]))
@@ -344,12 +353,14 @@ class DestinationGuardTests(PackagingTestCase):
         with self.assertRaises(PackagingError):
             guard_destination(user_link / "release", allowed_root=user_link)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS /private path policy")
     def test_guard_root_rejects_private_non_temp_locations(self):
         for bad in [Path("/private"), Path("/private/var"), Path("/private/var/db"), Path("/private/etc")]:
             with self.subTest(path=bad), self.assertRaises(PackagingError):
                 guard_root(bad)
         self.assertEqual(guard_root(Path("/tmp/hyu-vpn-safe-root")).as_posix(), "/private/tmp/hyu-vpn-safe-root")
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS /tmp resolves through /private/tmp")
     def test_legacy_assemblers_allow_unresolved_temp_alias_when_destination_is_safe_empty_dir(self):
         canonical_tmp = Path(tempfile.mkdtemp(prefix="hyu-assembler-var-", dir="/private/tmp"))
         self.addCleanup(lambda: subprocess.run(["/bin/rm", "-rf", str(canonical_tmp)]))
@@ -366,10 +377,10 @@ class DestinationGuardTests(PackagingTestCase):
         fixture = self.root / "fixture"
         (fixture / "source").mkdir(parents=True)
         (fixture / "source" / "main.swift").write_text("print(\"x\")\n", encoding="utf-8")
-        for script in [ASSEMBLE_APP, ASSEMBLE_MENU_APP]:
+        for script in [ASSEMBLE_APP, ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
             with self.subTest(script=script.name, destination="repo"):
                 arguments = [str(script), str(fixture), str(REPO)]
-                if script == ASSEMBLE_MENU_APP:
+                if script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
                     arguments.append("0.1.1")
                 proc = subprocess.run(arguments, text=True, capture_output=True)
                 self.assertNotEqual(proc.returncode, 0)
@@ -378,11 +389,26 @@ class DestinationGuardTests(PackagingTestCase):
             link.symlink_to(self.build_root)
             with self.subTest(script=script.name, destination="symlink"):
                 arguments = [str(script), str(fixture), str(link)]
-                if script == ASSEMBLE_MENU_APP:
+                if script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
                     arguments.append("0.1.1")
                 proc = subprocess.run(arguments, text=True, capture_output=True)
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("unsafe destination", proc.stderr)
+
+    def test_native_assemblers_allow_empty_descendants_of_repo_target(self):
+        target_root = REPO / "target"
+        target_root.mkdir(exist_ok=True)
+        for script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
+            destination = Path(tempfile.mkdtemp(prefix="assembler-safe-", dir=target_root))
+            self.addCleanup(destination.rmdir)
+            proc = subprocess.run(
+                [str(script), str(target_root / "missing-executable"), str(destination), "0.1.1"],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 66, proc.stderr)
+            self.assertIn("missing executable", proc.stderr)
+            self.assertNotIn("unsafe destination", proc.stderr)
+
 
 
 class NoticeTests(PackagingTestCase):
@@ -518,7 +544,10 @@ class ReleaseBuilderTests(PackagingTestCase):
 
         openconnect = src / "runtime/openconnect/bin/openconnect"
         openconnect.write_bytes(openconnect.read_bytes() + b"-rewritten-and-signed")
-        with self.assertRaisesRegex(PackagingError, "runtime closure mismatch"):
+        with self.assertRaisesRegex(
+            PackagingError,
+            r"runtime closure mismatch: changed=\['runtime/openconnect/bin/openconnect'\] extras=\[\] missing=\[\]",
+        ):
             packaging_module.validate_source_bundle_matches_payload(packaged_bundle, src)
 
         binding = packaging_module.write_final_runtime_binding(packaged_bundle, src)
@@ -532,6 +561,77 @@ class ReleaseBuilderTests(PackagingTestCase):
         openconnect.write_bytes(openconnect.read_bytes() + b"-post-binding-tamper")
         with self.assertRaisesRegex(PackagingError, "final runtime binding mismatch"):
             packaging_module.validate_final_runtime_binding(binding, packaged_bundle, src)
+
+    def test_rebind_source_bundle_updates_exact_runtime_hashes_and_internal_checksums(self):
+        src = self.make_payload_source()
+        runtime_files = {
+            rel: src / rel for rel in [
+                "runtime/openconnect/bin/openconnect",
+                "runtime/oathtool",
+                "runtime/openconnect/lib/libopenconnect.5.dylib",
+                "runtime/vpnc/vpnc-script",
+            ]
+        }
+        bundle = self.make_source_bundle(runtime_files=runtime_files)
+        packaged_bundle = src / "SOURCE-COMPLIANCE-BUNDLE.tar.gz"
+        packaged_bundle.write_bytes(bundle.read_bytes())
+        base_sha = packaging_module._sha256(packaged_bundle)
+        openconnect = src / "runtime/openconnect/bin/openconnect"
+        openconnect.write_bytes(openconnect.read_bytes() + b"-different-homebrew-bottle")
+
+        packaging_module.rebind_source_compliance_bundle(packaged_bundle, src)
+
+        packaging_module.validate_source_compliance_bundle(packaged_bundle)
+        packaging_module.validate_source_bundle_matches_payload(packaged_bundle, src)
+        with tarfile.open(packaged_bundle, "r:gz") as tf:
+            build_info = tf.extractfile("build-info.txt").read().decode("utf-8")
+        self.assertIn(base_sha, build_info)
+        self.assertIn("runtime hashes rebound", build_info)
+
+    def test_rebind_source_bundle_refuses_changed_noncompiled_resource(self):
+        src = self.make_payload_source()
+        runtime_files = {
+            rel: src / rel for rel in [
+                "runtime/openconnect/bin/openconnect",
+                "runtime/oathtool",
+                "runtime/openconnect/lib/libopenconnect.5.dylib",
+                "runtime/vpnc/vpnc-script",
+            ]
+        }
+        bundle = self.make_source_bundle(runtime_files=runtime_files)
+        packaged_bundle = src / "SOURCE-COMPLIANCE-BUNDLE.tar.gz"
+        packaged_bundle.write_bytes(bundle.read_bytes())
+        vpnc = src / "runtime/vpnc/vpnc-script"
+        vpnc.write_bytes(vpnc.read_bytes() + b"-tampered")
+        with self.assertRaisesRegex(PackagingError, "noncompiled source resource mismatch"):
+            packaging_module.rebind_source_compliance_bundle(packaged_bundle, src)
+
+    def test_homebrew_runtime_provenance_requires_exact_bundle_formula_kegs(self):
+        cellar = self.root / "Cellar"
+        oc = cellar / "openconnect/9.21/bin/openconnect"
+        oath = cellar / "oath-toolkit/2.6.14_3/bin/oathtool"
+        lib = cellar / "openconnect/9.21/lib/libopenconnect.5.dylib"
+        for path in (oc, oath, lib):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(path.name.encode())
+        bundle = self.make_source_bundle(runtime_files={
+            "runtime/openconnect/bin/openconnect": oc,
+            "runtime/oathtool": oath,
+            "runtime/openconnect/lib/libopenconnect.5.dylib": lib,
+            "runtime/vpnc/vpnc-script": self.make_payload_source() / "runtime/vpnc/vpnc-script",
+        })
+        packaging_module.validate_homebrew_runtime_provenance(
+            bundle, [oc, oath, lib], [oc, oath],
+            allowed_cellars=[cellar, self.root / "absent-cellar"],
+        )
+
+        wrong = cellar / "openconnect/9.22/lib/libopenconnect.5.dylib"
+        wrong.parent.mkdir(parents=True, exist_ok=True)
+        wrong.write_bytes(lib.read_bytes())
+        with self.assertRaisesRegex(PackagingError, "runtime source keg mismatch"):
+            packaging_module.validate_homebrew_runtime_provenance(
+                bundle, [oc, oath, wrong], [oc, oath], allowed_cellars=[cellar]
+            )
 
     def test_build_creates_a_missing_explicit_output_root(self):
         src = self.make_payload_source()

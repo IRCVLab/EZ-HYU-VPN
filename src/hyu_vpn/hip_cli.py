@@ -164,7 +164,17 @@ def _validate_authoritative_identity(identity: CookieIdentity) -> None:
 def _clean_text(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
-    return value.encode("utf-8", "replace").decode("utf-8", "replace")
+    repaired = value.encode("utf-8", "replace").decode("utf-8", "replace")
+    return "".join(
+        character
+        for character in repaired
+        if character in "\t\n\r"
+        or (
+            ord(character) >= 0x20
+            and not 0x7F <= ord(character) <= 0x9F
+            and ord(character) not in {0xFFFE, 0xFFFF}
+        )
+    )
 
 
 def _clean_tuple(values: Sequence[str]) -> tuple[str, ...]:

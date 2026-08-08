@@ -1,0 +1,55 @@
+name: Ubuntu
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             build-essential curl pkg-config libxml2-dev libgnutls28-dev zlib1g-dev             libgtk-4-dev libglib2.0-dev dbus-x11 xvfb vpnc-scripts shellcheck
+      - name: Install Rust toolchain
+        run: rustup show
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Rust tests
+        run: cargo test --workspace --locked
+      - name: Rust Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Static and packaging tests
+        run: |
+          python3 -m unittest -v             tests.test_rust_protocol_compat             tests.test_linux_packaging             tests.test_windows_packaging             tests.test_security_privacy
+          shellcheck scripts/*.sh packaging/linux/hyu-vpnc-script packaging/linux/debian/postinst packaging/linux/debian/prerm packaging/linux/debian/postrm
+      - name: Build Ubuntu package
+        run: scripts/package-linux.sh
+      - name: Inspect Ubuntu artifact
+        run: |
+          deb="$(find dist/linux -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$deb"
+          sha256sum -c "$deb.sha256"
+          HYU_VPN_DEB="$deb" python3 -m unittest -v tests.test_linux_packaging
+          dpkg-deb --info "$deb"
+      - name: Smoke test native applications
+        run: |
+          target/release/hyu-vpn-linux-service --smoke-test
+          target/release/hyu-vpn-hip --smoke-test
+          dbus-run-session -- xvfb-run -a target/release/hyu-vpn-gtk --smoke-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hyu-vpn-ubuntu-amd64
+          path: |
+            dist/linux/*.deb
+            dist/linux/*.sha256
+          if-no-files-found: error

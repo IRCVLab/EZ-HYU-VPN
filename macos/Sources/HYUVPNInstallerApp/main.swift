@@ -220,16 +220,14 @@ struct InstallerController {
     }
 
     private func collectMissingCredentialsBeforeElevation() throws -> [CredentialKey: String] {
-        try InstallerCredentialBootstrapper.collectMissingFinalCredentials(store: credentialReader) { key in
-            switch key {
-            case .username:
-                return try promptText(title: "HYU VPN ID", message: "Enter your HYU ID.", secure: false)
-            case .password:
-                return try promptConfirmedSecret(title: "HYU VPN Password", message: "Enter your HYU VPN password twice.", fieldLabel: "Password")
-            case .totpSeed:
-                return try promptConfirmedSecret(title: "TOTP Setup Secret", message: "Enter the authenticator setup secret twice, not the current 6-digit code.", fieldLabel: "Setup secret")
-            }
+        let missingKeys = try InstallerCredentialBootstrapper.missingCredentialKeys(store: credentialReader)
+        guard !missingKeys.isEmpty else { return [:] }
+        var values = try promptCredentialForm(missingKeys: missingKeys)
+        defer {
+            for key in values.keys { values[key] = "" }
+            values.removeAll(keepingCapacity: false)
         }
+        return try InstallerCredentialBootstrapper.validateCollectedCredentialValues(missingKeys: missingKeys, values: values)
     }
 
     private func activateUserSession() throws -> UserActivationResult {
@@ -314,50 +312,63 @@ struct InstallerController {
         return url
     }
 
-    private func promptText(title: String, message: String, secure: Bool) throws -> String {
+    private func promptCredentialForm(missingKeys: [CredentialKey]) throws -> [CredentialKey: String] {
         let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
+        alert.messageText = "HYU VPN Credentials"
+        alert.informativeText = "Enter the missing values below. For TOTP, paste the authenticator setup secret—not the current 6-digit code."
         alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Cancel")
-        let field: NSTextField = secure ? NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24)) : NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        alert.accessoryView = field
-        guard alert.runModal() == .alertFirstButtonReturn else { throw InstallerAppError.cancelled }
-        return secure ? field.stringValue : field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func promptConfirmedSecret(title: String, message: String, fieldLabel: String) throws -> String {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.addButton(withTitle: "Continue")
-        alert.addButton(withTitle: "Cancel")
-
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 124))
-        let firstLabel = NSTextField(labelWithString: fieldLabel)
-        let firstField = NSSecureTextField(frame: NSRect(x: 0, y: 66, width: 420, height: 24))
-        let confirmationLabel = NSTextField(labelWithString: "Confirm \(fieldLabel.lowercased())")
-        let confirmationField = NSSecureTextField(frame: NSRect(x: 0, y: 8, width: 420, height: 24))
-        firstLabel.frame = NSRect(x: 0, y: 96, width: 420, height: 18)
-        confirmationLabel.frame = NSRect(x: 0, y: 38, width: 420, height: 18)
-        firstField.placeholderString = fieldLabel
-        confirmationField.placeholderString = "Confirm \(fieldLabel.lowercased())"
-        accessory.addSubview(firstLabel)
-        accessory.addSubview(firstField)
-        accessory.addSubview(confirmationLabel)
-        accessory.addSubview(confirmationField)
+        let rowHeight: CGFloat = 62
+        let accessoryHeight = rowHeight * CGFloat(missingKeys.count)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: accessoryHeight))
+        var fields: [NSTextField] = []
+        for (index, key) in missingKeys.enumerated() {
+            let labelText: String
+            let placeholder: String
+            switch key {
+            case .username:
+                labelText = "HYU ID"
+                placeholder = "HYU ID"
+            case .password:
+                labelText = "VPN password"
+                placeholder = "VPN password"
+            case .totpSeed:
+                labelText = "TOTP setup secret"
+                placeholder = "Authenticator setup secret"
+            }
+            let top = accessoryHeight - CGFloat(index) * rowHeight
+            let label = NSTextField(labelWithString: labelText)
+            label.frame = NSRect(x: 0, y: top - 20, width: 460, height: 18)
+            let field: NSTextField
+            switch key {
+            case .username:
+                field = NSTextField(frame: NSRect(x: 0, y: top - 52, width: 460, height: 26))
+            case .password, .totpSeed:
+                field = NSSecureTextField(frame: NSRect(x: 0, y: top - 52, width: 460, height: 26))
+            }
+            field.placeholderString = placeholder
+            accessory.addSubview(label)
+            accessory.addSubview(field)
+            fields.append(field)
+        }
         alert.accessoryView = accessory
+        for index in fields.indices.dropLast() {
+            fields[index].nextKeyView = fields[index + 1]
+        }
+        fields.last?.nextKeyView = alert.buttons.first
         alert.window.recalculateKeyViewLoop()
-        firstField.nextKeyView = confirmationField
-        confirmationField.nextKeyView = alert.buttons.first
-        alert.window.initialFirstResponder = firstField
-        guard alert.runModal() == .alertFirstButtonReturn else { throw InstallerAppError.cancelled }
-
-        let first = firstField.stringValue
-        let second = confirmationField.stringValue
-        guard !first.isEmpty else { throw InstallerCoreError.invalidInput("SECRET_REQUIRED") }
-        guard first == second else { throw InstallerCoreError.invalidInput("SECRET_MISMATCH") }
-        return first
+        alert.window.initialFirstResponder = fields.first
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else {
+            for field in fields { field.stringValue = "" }
+            throw InstallerAppError.cancelled
+        }
+        var values: [CredentialKey: String] = [:]
+        for (key, field) in zip(missingKeys, fields) {
+            values[key] = key == .username ? field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) : field.stringValue
+            field.stringValue = ""
+        }
+        return values
     }
 
     private func run(_ argv: [String], code: String, allowFailure: Bool = false) throws {

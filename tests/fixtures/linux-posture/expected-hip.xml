@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hip-report name="hip-report">
+  <md5-sum>00000000000000000000000000000000</md5-sum>
+  <user-name>TEST-USER</user-name>
+  <domain></domain>
+  <host-name>test-ubuntu</host-name>
+  <host-id>00:11:22:33:44:55</host-id>
+  <ip-address>192.0.2.10</ip-address>
+  <ipv6-address></ipv6-address>
+  <generate-time>08/04/2026 01:02:03</generate-time>
+  <hip-report-version>4</hip-report-version>
+  <categories>
+    <entry name="host-info">
+      <client-version>OpenConnect TEST</client-version>
+      <os>Ubuntu 22.04 (6.8.0-40-generic)</os>
+      <os-vendor>Canonical</os-vendor>
+      <domain></domain>
+      <host-name>test-ubuntu</host-name>
+      <host-id>00:11:22:33:44:55</host-id>
+      <network-interface>
+        <entry name="eth0">
+          <description>eth0</description>
+          <mac-address>00:11:22:33:44:55</mac-address>
+          <ip-address>
+            <entry name="192.0.2.10"/>
+          </ip-address>
+        </entry>
+      </network-interface>
+    </entry>
+    <entry name="anti-malware">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Linux" name="Endpoint Protection" version="unknown"/>
+            <real-time-protection>unknown</real-time-protection>
+            <last-full-scan-time>unknown</last-full-scan-time>
+          </ProductInfo>
+        </entry>
+      </list>
+    </entry>
+    <entry name="disk-backup">
+      <list/>
+    </entry>
+    <entry name="disk-encryption">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Linux" name="dm-crypt" version="unknown"/>
+            <drives>
+              <entry>
+                <drive-name>All</drive-name>
+                <enc-state>encrypted</enc-state>
+              </entry>
+            </drives>
+          </ProductInfo>
+        </entry>
+      </list>
+    </entry>
+    <entry name="firewall">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Linux" name="Firewall" version="unknown"/>
+            <is-enabled>yes</is-enabled>
+          </ProductInfo>
+        </entry>
+      </list>
+    </entry>
+    <entry name="patch-management">
+      <list>
+        <entry>
+          <ProductInfo>
+            <Prod vendor="Ubuntu" name="APT" version="unknown"/>
+            <is-enabled>yes</is-enabled>
+          </ProductInfo>
+        </entry>
+      </list>
+      <missing-patches>
+        <entry>
+          <title>3 updates available</title>
+          <is-installed>no</is-installed>
+        </entry>
+      </missing-patches>
+    </entry>
+    <entry name="data-loss-prevention">
+      <list/>
+    </entry>
+  </categories>
+</hip-report>

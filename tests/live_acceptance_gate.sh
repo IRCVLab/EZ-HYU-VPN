@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034
 # Side-effect-free argument parser and live mutation gate for live_acceptance.sh.
 
 live_acceptance_usage() {

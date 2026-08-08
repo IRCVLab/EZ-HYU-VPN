@@ -83,6 +83,7 @@ import Testing
     @Test func channelLossTerminatesVerifiedOwnedProcessGroupOnlyAfterRevalidation() throws {
         var harness = HelperHarness()
         harness.process.channelLossAfterSpawn = true
+        harness.process.waitResults = [false, true]
         _ = try harness.run(command: .start, stdin: Data("HYU-Username: alice\n\n".utf8))
         #expect(harness.process.signals == [.termGroup(pgid: 1200), .killGroup(pgid: 1200)])
         #expect(harness.process.validations.count == 2)
@@ -113,6 +114,7 @@ import Testing
         var harness = HelperHarness()
         try harness.installRecord(pid: 2222, pgid: 3333, birth: 77, nonce: "nonce12345", executable: harness.config.openConnectExecutable.path)
         harness.process.liveIdentity = .matching(pid: 2222, pgid: 3333, birth: 77, executable: harness.config.openConnectExecutable.path)
+        harness.process.waitResults = [false, true]
         let result = try harness.run(command: .stop)
         #expect(result.status == .stopped)
         #expect(harness.process.signals == [.termGroup(pgid: 3333), .killGroup(pgid: 3333)])
@@ -199,10 +201,11 @@ import Testing
 @Suite struct SystemProcessControllerTests {
     @Test func realHarmlessChildHasKernelBirthTimeAndCanBeReapedByForegroundMonitor() throws {
         let process = SystemProcessController()
-        let child = try process.prepareSpawn(SpawnRequest(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["0"], inheritStdin: true, inheritStdout: true, usesShell: false))
+        let child = try process.prepareSpawn(SpawnRequest(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["1"], inheritStdin: true, inheritStdout: true, usesShell: false))
         #expect(child.pid > 0)
         #expect(child.processGroupID == child.pid)
         #expect(child.birthTime > 0)
+        try process.commitSpawn(child)
         let live = try process.liveIdentity(for: child.pid)
         #expect(live?.birthTime == child.birthTime)
         let record = SessionRecord(pid: child.pid, processGroupID: child.processGroupID, processBirthTime: child.birthTime, sessionNonce: "nonce12345", consoleUID: UInt32(getuid()), portal: "secure.hanyang.ac.kr", executableIdentity: ExecutableIdentity(path: live?.executablePath ?? "/bin/sleep", fileID: "unused"), launchTime: Date(), ledger: OpaqueLedger(path: URL(fileURLWithPath: "/tmp/ledger"), nonce: "nonce12345"))
@@ -307,6 +310,7 @@ private final class FakeProcessController: ProcessControlling {
     var liveIdentity: LiveProcessIdentity?
     var signals: [Signal] = []
     var validations: [SessionRecord] = []
+    var waitResults: [Bool] = []
     var signalGuardBegun = false
     var signalGuardEnded = false
     var injectSignalAfterCommit = false
@@ -323,8 +327,8 @@ private final class FakeProcessController: ProcessControlling {
     func abortSpawn(_ process: SpawnedProcess) throws { try killProcessGroup(process.processGroupID) }
     func liveIdentity(for pid: Int32) throws -> LiveProcessIdentity? { liveIdentity }
     func terminateProcessGroup(_ pgid: Int32) throws { signals.append(.termGroup(pgid: pgid)) }
-    func killProcessGroup(_ pgid: Int32) throws { signals.append(.killGroup(pgid: pgid)); if let killError { throw killError } }
-    func waitForExit(pid: Int32, timeout: TimeInterval) throws -> Bool { false }
+    func killProcessGroup(_ pgid: Int32) throws { signals.append(.killGroup(pgid: pgid)); if let killError { throw killError }; liveIdentity = nil }
+    func waitForExit(pid: Int32, timeout: TimeInterval) throws -> Bool { waitResults.isEmpty ? false : waitResults.removeFirst() }
     func monitorForeground(record: SessionRecord, onChannelLoss: (SessionRecord) throws -> Void) throws -> MonitorOutcome { if channelLossAfterSpawn { try onChannelLoss(record); return .channelLoss }; return .exited(status: monitorExitStatus) }
     func validateBeforeSignal(_ record: SessionRecord) throws { validations.append(record) }
 }

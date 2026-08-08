@@ -43,6 +43,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--menu-app", type=Path)
     parser.add_argument("--installer-app", type=Path)
     parser.add_argument("--source-compliance-bundle", type=Path)
+    parser.add_argument(
+        "--rebind-source-compliance-bundle",
+        action="store_true",
+        help="Rebind exact current bottle hashes after verifying source-bundle Homebrew keg provenance",
+    )
     parser.add_argument("--build-root", required=True, type=Path, help="Fresh explicit build root")
     parser.add_argument("--output-root", required=True, type=Path, help="Fresh explicit output root")
     parser.add_argument("--version", required=True)
@@ -66,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
                 menu_app=args.menu_app,
                 installer_app=args.installer_app,
                 source_compliance_bundle=args.source_compliance_bundle,
+                rebind_source_compliance=args.rebind_source_compliance_bundle,
             )
         if source_payload is None:
             raise PackagingError("--source-payload or --assemble-from-repo is required")
