@@ -24,13 +24,21 @@ jobs:
         run: test "$(uname -m)" = arm64
       - name: Install pinned runtime formulas
         run: brew install openconnect oath-toolkit
-      - name: Swift tests
-        run: |
-          swift test --package-path macos
-          swift run --package-path macos hyu-vpn-helper-test-harness
-          swift run --package-path macos hyu-vpn-menu-harness
-          swift run --package-path macos hyu-vpn-installer-harness
-          macos/Scripts/test-wrapperd-closed-stderr.sh
+      - name: Swift package tests
+        timeout-minutes: 10
+        run: swift test --package-path macos </dev/null
+      - name: Privileged helper harness
+        timeout-minutes: 10
+        run: swift run --package-path macos hyu-vpn-helper-test-harness </dev/null
+      - name: Menu harness
+        timeout-minutes: 10
+        run: swift run --package-path macos hyu-vpn-menu-harness </dev/null
+      - name: Installer harness
+        timeout-minutes: 10
+        run: swift run --package-path macos hyu-vpn-installer-harness </dev/null
+      - name: Wrapper daemon harness
+        timeout-minutes: 10
+        run: macos/Scripts/test-wrapperd-closed-stderr.sh </dev/null
       - name: Python and shell tests
         run: |
           export PYTHONDONTWRITEBYTECODE=1

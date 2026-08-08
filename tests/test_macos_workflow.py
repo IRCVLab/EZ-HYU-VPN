@@ -25,6 +25,20 @@ class MacOSWorkflowTests(unittest.TestCase):
         self.assertIn("codesign --verify --deep --strict", text)
         self.assertIn("actions/upload-artifact@v4", text)
 
+    def test_swift_ci_commands_have_independent_bounded_steps(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        expected = {
+            "Swift package tests": "swift test --package-path macos </dev/null",
+            "Privileged helper harness": "swift run --package-path macos hyu-vpn-helper-test-harness </dev/null",
+            "Menu harness": "swift run --package-path macos hyu-vpn-menu-harness </dev/null",
+            "Installer harness": "swift run --package-path macos hyu-vpn-installer-harness </dev/null",
+            "Wrapper daemon harness": "macos/Scripts/test-wrapperd-closed-stderr.sh </dev/null",
+        }
+        self.assertNotIn("- name: Swift tests", text)
+        for name, command in expected.items():
+            block = f"- name: {name}\n        timeout-minutes: 10\n        run: {command}"
+            self.assertIn(block, text)
+
     def test_release_collects_all_three_platforms(self):
         text = RELEASE.read_text(encoding="utf-8")
         for workflow in ("macOS", "Ubuntu", "Windows"):
