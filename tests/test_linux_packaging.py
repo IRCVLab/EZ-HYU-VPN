@@ -179,6 +179,23 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn('mktemp "$ARCHIVE.partial.XXXXXX"', script)
         self.assertIn('mv -- "$partial" "$ARCHIVE"', script)
 
+    def test_openconnect_download_has_verified_github_mirror_fallback(self):
+        script = (ROOT / "scripts/build-openconnect-linux.sh").read_text()
+        primary = (
+            "https://www.infradead.org/openconnect/download/"
+            "openconnect-$VERSION.tar.gz"
+        )
+        mirror = (
+            "https://github.com/IRCVLab/EZ-HYU-VPN/releases/download/"
+            "v0.1.1/openconnect-$VERSION.tar.gz"
+        )
+        self.assertIn("SOURCE_URLS=(", script)
+        self.assertIn(primary, script)
+        self.assertIn(mirror, script)
+        self.assertLess(script.index(primary), script.index(mirror))
+        self.assertIn('for source_url in "${SOURCE_URLS[@]}"; do', script)
+        self.assertIn('"$source_url"', script)
+
     def test_packaging_sources_contain_no_credential_fields_or_values(self):
         combined = "\n".join(
             path.read_text(errors="replace")
