@@ -54,6 +54,13 @@ class MacOSWorkflowTests(unittest.TestCase):
         for suffix in ("*.dmg", "*.deb", "*.msi", "*.sha256"):
             self.assertIn(suffix, text)
 
+    def test_release_rejects_nonportable_or_mismatched_checksum_assets(self):
+        text = RELEASE.read_text(encoding="utf-8")
+        self.assertIn("Validate portable release checksums", text)
+        self.assertIn("checksum must use LF without CR", text)
+        self.assertIn("checksum must reference its sibling basename", text)
+        self.assertIn("checksum digest mismatch", text)
+
     def test_macos_packager_uses_fresh_arm64_release_builder_inputs(self):
         text = PACKAGE.read_text(encoding="utf-8")
         self.assertIn("uname -m", text)

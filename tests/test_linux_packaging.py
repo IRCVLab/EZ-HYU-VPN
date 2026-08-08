@@ -172,6 +172,12 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("tokio::time::sleep(error_delay)", service)
         self.assertNotIn("current_identity().await.ok().flatten()", service)
 
+    def test_deb_checksum_is_lf_terminated_and_uses_only_the_artifact_basename(self):
+        script = (ROOT / "scripts/package-linux.sh").read_text()
+        self.assertIn('cd "$OUT"', script)
+        self.assertIn('sha256sum "$(basename "$DEB")"', script)
+        self.assertNotIn('sha256sum "$DEB" >', script)
+
     def test_openconnect_download_is_bounded_and_cached_atomically(self):
         script = (ROOT / "scripts/build-openconnect-linux.sh").read_text()
         self.assertIn("--connect-timeout 15", script)

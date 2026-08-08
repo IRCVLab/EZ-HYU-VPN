@@ -35,6 +35,34 @@ jobs:
             mkdir -p "artifacts/$workflow"
             gh run download "$run_id" --dir "artifacts/$workflow"
           done
+      - name: Validate portable release checksums
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import re
+          from pathlib import Path
+
+          checksums = sorted(Path("artifacts").rglob("*.sha256"))
+          if len(checksums) != 3:
+              raise SystemExit(f"expected 3 checksum assets, found {len(checksums)}")
+          for checksum in checksums:
+              raw = checksum.read_bytes()
+              if b"\r" in raw or not raw.endswith(b"\n") or raw.count(b"\n") != 1:
+                  raise SystemExit(f"checksum must use LF without CR: {checksum}")
+              match = re.fullmatch(rb"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]+)\n", raw)
+              if match is None:
+                  raise SystemExit(f"invalid checksum format: {checksum}")
+              referenced = match.group(2).decode("ascii")
+              sibling = checksum.with_name(checksum.name.removesuffix(".sha256"))
+              if referenced != sibling.name:
+                  raise SystemExit(f"checksum must reference its sibling basename: {checksum}")
+              if not sibling.is_file():
+                  raise SystemExit(f"checksum sibling is missing: {sibling}")
+              actual = hashlib.sha256(sibling.read_bytes()).hexdigest().encode("ascii")
+              if actual != match.group(1):
+                  raise SystemExit(f"checksum digest mismatch: {checksum}")
+          print("portable release checksums verified")
+          PY
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

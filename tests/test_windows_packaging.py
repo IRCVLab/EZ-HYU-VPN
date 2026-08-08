@@ -96,6 +96,13 @@ class WindowsPackagingTests(unittest.TestCase):
         for forbidden in ("credentials.enc", "credentials.dpapi", "totp-counter"):
             self.assertNotIn(forbidden, text)
 
+    def test_msi_checksum_is_utf8_without_bom_and_lf_terminated(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("[System.IO.File]::WriteAllText", text)
+        self.assertIn("[System.Text.UTF8Encoding]::new($false)", text)
+        self.assertIn('"$MsiHash  $MsiName`n"', text)
+        self.assertNotIn('| Set-Content -LiteralPath "$Msi.sha256"', text)
+
     def test_wix_declares_runtime_and_notice_source_offer(self):
         declared = set(re.findall(r"runtime\\([^\"$]+)", WXS.read_text(encoding="utf-8")))
         self.assertEqual(declared, RUNTIME)

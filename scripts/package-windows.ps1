@@ -138,6 +138,8 @@ if ($LASTEXITCODE -ne 0) { throw 'MSI build failed' }
 & $WixPath msi validate $Msi
 if ($LASTEXITCODE -ne 0) { throw 'MSI validation failed' }
 $MsiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Msi).Hash.ToLowerInvariant()
-"$MsiHash  $([System.IO.Path]::GetFileName($Msi))" | Set-Content -LiteralPath "$Msi.sha256" -Encoding ascii
+$MsiName = [System.IO.Path]::GetFileName($Msi)
+$ChecksumEncoding = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText("$Msi.sha256", "$MsiHash  $MsiName`n", $ChecksumEncoding)
 Write-Host "Built $Msi"
 Write-Host "SHA256 $MsiHash"

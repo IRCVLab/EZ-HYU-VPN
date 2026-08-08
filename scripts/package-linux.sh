@@ -45,5 +45,8 @@ find "$PKG" -type d -exec chmod 0755 {} +
 mkdir -p "$OUT"
 DEB="$OUT/hyu-vpn_${VERSION}_${ARCH}.deb"
 dpkg-deb --build --root-owner-group "$PKG" "$DEB"
-sha256sum "$DEB" > "$DEB.sha256"
+(
+    cd "$OUT"
+    sha256sum "$(basename "$DEB")" > "$(basename "$DEB").sha256"
+)
 printf '%s\n' "$DEB"
