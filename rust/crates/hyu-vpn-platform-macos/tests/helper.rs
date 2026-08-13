@@ -11,7 +11,7 @@ use hyu_vpn_platform_macos::{
     drop_start_session_cancel_signal_for_test, graceful_cleanup_sequence_for_test,
     helper_invocation_for_test, helper_start_invocation_for_test, parse_helper_action_for_test,
     parse_helper_status_for_test, production_short_overflow_launcher_for_test,
-    run_short_overflow_reap_for_test,
+    production_start_eof_launcher_for_test, run_short_overflow_reap_for_test,
 };
 
 #[derive(Clone)]
@@ -179,6 +179,46 @@ async fn start_prompt_driver_cancels_immediately_on_shared_output_cap_overflow()
         .unwrap_err();
 
     assert!(matches!(error, HelperError::OutputLimitExceeded));
+}
+
+#[tokio::test]
+async fn long_lived_start_session_bounds_parser_memory_without_capping_lifetime_output() {
+    // Catches: treating the 16 KiB parser-memory bound as a lifetime-output quota, which
+    // killed healthy sessions when OpenConnect emitted more output at session expiry.
+    let noise = b"keepalive status line\n".repeat(1_000);
+    assert!(noise.len() > 16 * 1024);
+    let output = [
+        b"Challenge:".as_slice(),
+        b"Password:".as_slice(),
+        b"gateway Challenge:".as_slice(),
+        b"HIP report submitted successfully.\n".as_slice(),
+        b"hyu-vpnc-wrapperd-event: network configuration verified tunnel=utun7\n".as_slice(),
+        noise.as_slice(),
+    ];
+
+    let result = drive_start_prompts_for_test(start_input(), &output, 16 * 1024)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.events,
+        vec![
+            HelperSessionEvent::HipSubmitted,
+            HelperSessionEvent::Connected {
+                tunnel: "utun7".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test]
+async fn start_session_output_eof_waits_for_natural_child_exit_instead_of_forcing_cleanup() {
+    // Catches: racing stdout/stderr EOF against child.wait() at VPN session expiry and
+    // misclassifying an ordinary OpenConnect exit as an invalid helper protocol response.
+    assert_eq!(
+        production_start_eof_launcher_for_test(64).await.unwrap(),
+        HelperSessionOutcome::Exited { status: 64 }
+    );
 }
 
 #[tokio::test]

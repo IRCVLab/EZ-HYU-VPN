@@ -19,7 +19,7 @@ members = [
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
-version = "0.2.2"
+version = "0.2.3"
 
 [workspace.dependencies]
 aes-gcm = "0.10"

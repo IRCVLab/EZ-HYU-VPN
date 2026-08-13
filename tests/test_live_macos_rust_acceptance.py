@@ -271,7 +271,7 @@ fi
 """)
         write_tool(self.tools, "/sbin/route", f"""
 printf 'route %s\n' "$*" >> '{self.audit}'
-printf '   route to: default\ndestination: default\n    gateway: 192.0.2.2\n  interface: en0\n      flags: <UP,GATEWAY,DONE,STATIC,WASCLONED>\n'
+printf '   route to: default\ndestination: default\n    gateway: 192.0.2.3\n  interface: en0\n      flags: <UP,GATEWAY,DONE,STATIC,WASCLONED>\n'
 """)
         write_tool(self.tools, "/usr/sbin/scutil", "printf 'DNS configuration\nresolver #1\n  nameserver[0] : 9.9.9.9\n'\n")
         write_tool(self.tools, "/usr/bin/curl", f"""
@@ -420,9 +420,9 @@ exit 0
             f.evidence.write_text(evidence_json(f), encoding="utf-8"); os.chmod(f.evidence, 0o600)
             commands: list[str] = []
             statuses = [
-                {"schema_version": 1, "state": "disabled", "automatic_reconnect_enabled": True, "connected_at": None, "session_expires_at": None, "last_successful_hip_at": None, "tunnel_interface": None, "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:00Z", "backend_build_version": "0.2.2"},
-                {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"},
-                {"schema_version": 1, "state": "disabled", "automatic_reconnect_enabled": True, "connected_at": None, "session_expires_at": None, "last_successful_hip_at": None, "tunnel_interface": None, "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:02Z", "backend_build_version": "0.2.2"},
+                {"schema_version": 1, "state": "disabled", "automatic_reconnect_enabled": True, "connected_at": None, "session_expires_at": None, "last_successful_hip_at": None, "tunnel_interface": None, "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:00Z", "backend_build_version": "0.2.3"},
+                {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"},
+                {"schema_version": 1, "state": "disabled", "automatic_reconnect_enabled": True, "connected_at": None, "session_expires_at": None, "last_successful_hip_at": None, "tunnel_interface": None, "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:02Z", "backend_build_version": "0.2.3"},
             ]
             with IpcServer(f.socket, commands, [statuses[1], statuses[1], statuses[1], statuses[1], statuses[2], statuses[1]], helper_state=f.helper_state) as server:
                 result = f.run(
@@ -470,7 +470,7 @@ exit 0
             nonce = f"hyu-live-macos-rust-{int(time.time())}"
             f.evidence.write_text(evidence_json(f), encoding="utf-8"); os.chmod(f.evidence, 0o600)
             commands: list[str] = []
-            connected = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            connected = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             disabled = dict(connected, state="disabled", connected_at=None, last_successful_hip_at=None, tunnel_interface=None)
             with IpcServer(f.socket, commands, [connected, connected, connected, connected, disabled, connected, connected], helper_state=f.helper_state):
                 result = f.run("--mode", "live", "--dmg", str(f.dmg), "--test-root", str(f.test_root), "--nonce", nonce, "--user-present", USER_PRESENT, "--exercise-uninstall-reinstall", env={"HYU_LIVE_MACOS_RUST_NONCE": nonce}, timeout=30)
@@ -485,7 +485,7 @@ exit 0
         with Task9Fixture(self) as f:
             nonce = f"hyu-live-macos-rust-{int(time.time())}"
             f.evidence.write_text(evidence_json(f), encoding="utf-8"); os.chmod(f.evidence, 0o600)
-            status = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            status = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             disabled = dict(status, state="disabled", connected_at=None, last_successful_hip_at=None, tunnel_interface=None)
             with IpcServer(f.socket, [], [status, status, status, status, status, dict(status, state="connecting", tunnel_interface="utun9", last_transition_at="2026-08-12T00:00:02Z"), dict(status, last_transition_at="2026-08-12T00:00:03Z"), disabled], helper_state=f.helper_state):
                 result = f.run("--mode", "live", "--dmg", str(f.dmg), "--test-root", str(f.test_root), "--nonce", nonce, "--user-present", USER_PRESENT, "--physical-wifi-gate", env={"HYU_LIVE_MACOS_RUST_NONCE": nonce}, timeout=30)
@@ -517,7 +517,7 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
 /bin/chmod 755 '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service' '{f.install_root}/Library/PrivilegedHelperTools/com.hyu.vpn.helper' '{f.install_root}/Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp'
 /bin/cp '{f.mount_payload}/launchd/com.hyu.vpn.service.plist.in' '{f.home}/Library/LaunchAgents/com.hyu.vpn.service.plist'
 """)
-            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             result = self._run_live_with_statuses(f, [st, st, st, st, dict(st, state="disabled", connected_at=None, last_successful_hip_at=None, tunnel_interface=None)])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("installed service hash mismatch", result.stderr)
@@ -526,7 +526,7 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
         with Task9Fixture(self) as f:
             residue = f.install_root / "Library/Application Support/HYU VPN/src/hyu_vpn"
             residue.mkdir(parents=True)
-            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             result = self._run_live_with_statuses(f, [st, st, st, st, dict(st, state="disabled", connected_at=None, last_successful_hip_at=None, tunnel_interface=None)])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("python/legacy residue categories=legacy:1", result.stderr)
@@ -534,7 +534,7 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
 
     def test_round3_c_rejects_owned_reconnect_same_pid_nonce(self):
         with Task9Fixture(self) as f:
-            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             result = self._run_live_with_statuses(f, [st, st, st, st, dict(st, state="disabled", connected_at=None, last_successful_hip_at=None, tunnel_interface=None)], same_generation=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("owned reconnect reused generation", result.stderr)
@@ -542,7 +542,7 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
     def test_round3_d_rejects_service_restart_changed_helper_generation(self):
         with Task9Fixture(self) as f:
             write_tool(f.tools, "/bin/launchctl", f"printf 'launchctl %s\\n' \"$*\" >> '{f.audit}'\nprintf '{{\"schema_version\":1,\"state\":\"running\",\"pid\":9002,\"session_nonce\":\"RSTRT999\",\"tunnel_interface\":\"utun13\"}}' > '{f.helper_state}'\n")
-            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             result = self._run_live_with_statuses(f, [st, st, st, st, dict(st, state="disabled", connected_at=None, last_successful_hip_at=None, tunnel_interface=None)])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("service restart changed helper generation", result.stderr)
@@ -561,7 +561,7 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
     def test_round3_g_rejects_wifi_gate_when_internet_never_drops(self):
         with Task9Fixture(self) as f:
             write_tool(f.tools, "/usr/sbin/networksetup", f"printf 'networksetup %s\\n' \"$*\" >> '{f.audit}'\nif [[ \"${{1:-}}\" == \"-listallhardwareports\" ]]; then printf 'Hardware Port: Wi-Fi\\nDevice: en0\\n'; fi\nexit 0\n")
-            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             nonce = f"hyu-live-macos-rust-{int(time.time())}"
             f.evidence.write_text(evidence_json(f), encoding="utf-8"); os.chmod(f.evidence, 0o600)
             with IpcServer(f.socket, [], [st, st, st, st, st, st], helper_state=f.helper_state):
@@ -590,7 +590,7 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
 
     def test_round4_wifi_gate_rejects_automatic_reconnect_disabled(self):
         with Task9Fixture(self) as f:
-            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": False, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": False, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             result = self._run_live_with_statuses(f, [dict(st, automatic_reconnect_enabled=True), dict(st, automatic_reconnect_enabled=True), dict(st, automatic_reconnect_enabled=True), dict(st, automatic_reconnect_enabled=True), st], flags=("--physical-wifi-gate",))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("automatic reconnect disabled before wifi gate", result.stderr)
@@ -598,7 +598,7 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
     def test_round4_bounded_gui_installer_timeout_fails(self):
         with Task9Fixture(self) as f:
             write_tool(f.tools, "/usr/bin/open", f"printf 'open %s\\n' \"$*\" >> '{f.audit}'\nsleep 5\n")
-            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            st = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             nonce = f"hyu-live-macos-rust-{int(time.time())}"
             f.evidence.write_text(evidence_json(f), encoding="utf-8"); os.chmod(f.evidence, 0o600)
             with IpcServer(f.socket, [], [st], helper_state=f.helper_state):
@@ -649,7 +649,7 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
             os.chmod(f.evidence, 0o600)
             nonce = f"hyu-live-macos-rust-{int(time.time())}"
             commands: list[str] = []
-            connected_status = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.2"}
+            connected_status = {"schema_version": 1, "state": "connected", "automatic_reconnect_enabled": True, "connected_at": "2026-08-12T00:00:01Z", "session_expires_at": None, "last_successful_hip_at": "2026-08-12T00:00:01Z", "tunnel_interface": "utun9", "next_retry_at": None, "error_code": None, "last_transition_at": "2026-08-12T00:00:01Z", "backend_build_version": "0.2.3"}
             disabled_status = dict(connected_status, state="disabled", connected_at=None, last_successful_hip_at=None, tunnel_interface=None)
             with IpcServer(f.socket, commands, [connected_status, connected_status, connected_status, connected_status, disabled_status], protocol="rust", helper_state=f.helper_state) as server:
                 result = f.run("--mode", "live", "--dmg", str(f.dmg), "--test-root", str(f.test_root), "--nonce", nonce, "--user-present", USER_PRESENT, env={"HYU_LIVE_MACOS_RUST_NONCE": nonce}, timeout=30)

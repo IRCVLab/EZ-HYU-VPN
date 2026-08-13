@@ -181,6 +181,8 @@ esac
         let helperMain = try String(contentsOf: root.appendingPathComponent("Sources/HYUVPNPrivilegedHelperCLI/main.swift"), encoding: .utf8)
         let wrapperMain = try String(contentsOf: root.appendingPathComponent("Sources/HYUVPNCWrapperD/main.swift"), encoding: .utf8)
         #expect(helperMain.contains("validateCurrentExecutable"))
+        #expect(helperMain.contains("try? FileHandle.standardError.write(contentsOf:"))
+        #expect(!helperMain.contains("FileHandle.standardError.write(data)"))
         #expect(wrapperMain.contains("validateCurrentExecutable"))
         #expect(!helperMain.contains("CommandLine.arguments.first"))
         #expect(!wrapperMain.contains("CommandLine.arguments.first"))

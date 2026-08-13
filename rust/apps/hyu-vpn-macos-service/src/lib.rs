@@ -437,6 +437,16 @@ impl<H: MacHelper + ?Sized + 'static> MacActionExecutor<H> {
         {
             return;
         }
+        if reconcile_helper_at_startup(Arc::clone(&self.helper))
+            .await
+            .is_err()
+        {
+            let _ = self.events.send(EngineEvent::ConnectorError {
+                generation,
+                error_code: ErrorCode::RepairRequired,
+            });
+            return;
+        }
         let blocked_error = *self.repair_blocked.lock().expect("repair lock poisoned");
         if let Some(error_code) = blocked_error {
             match reconcile_helper_at_startup(Arc::clone(&self.helper)).await {

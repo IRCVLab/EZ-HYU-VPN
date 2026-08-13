@@ -571,7 +571,7 @@ async fn connect_waits_for_readiness_then_retains_exactly_one_helper_start_until
             hip_succeeded: true,
         }
     );
-    assert_eq!(helper.calls(), vec!["start_session"]);
+    assert_eq!(helper.calls(), vec!["run:Status", "start_session"]);
     executor
         .execute_stop_for_test(ConnectionGeneration(1))
         .await;
@@ -895,6 +895,55 @@ async fn startup_reconciliation_retries_stop_race_then_repairs_stale_session() {
         *helper.calls.lock().unwrap(),
         ["Status", "Stop", "Status", "Repair"]
     );
+}
+
+#[tokio::test]
+async fn every_connection_attempt_repairs_stale_helper_state_before_starting() {
+    // Catches: session expiry entering backoff while the helper ledger remains
+    // repair-required, causing every automatic retry to fail at helper start.
+    let credentials = Arc::new(MemoryCredentials::default());
+    credentials
+        .replace(
+            Credentials::new("fixture-user", "pass", "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap(),
+        )
+        .unwrap();
+    let helper = Arc::new(FakeHelper {
+        state: Mutex::new(HelperState::RepairRequired),
+        starts: Mutex::new(vec![FakeStartPlan::connected("utun7")]),
+        ..FakeHelper::default()
+    });
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+    let executor = MacActionExecutor::new(
+        credentials,
+        AutomaticPreference::new(tempdir().unwrap().path().join("auto")),
+        helper.clone(),
+        tempdir().unwrap().path().join("counter"),
+        events_tx,
+    );
+
+    executor
+        .execute_start_for_test(ConnectionGeneration(88))
+        .await;
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        EngineEvent::ConnectorConnected {
+            generation: ConnectionGeneration(88),
+            tunnel_interface: Some("utun7".to_owned()),
+            hip_succeeded: true,
+        }
+    );
+    assert_eq!(
+        helper.calls(),
+        vec!["run:Status", "run:Repair", "start_session"]
+    );
+    executor
+        .shutdown_sessions_for_test(Duration::from_secs(1))
+        .await
+        .unwrap();
 }
 
 #[test]

@@ -20,5 +20,5 @@ pub use helper::{
     drop_start_session_cancel_signal_for_test, graceful_cleanup_sequence_for_test,
     helper_invocation_for_test, helper_start_invocation_for_test, parse_helper_action_for_test,
     parse_helper_status_for_test, production_short_overflow_launcher_for_test,
-    run_short_overflow_reap_for_test,
+    production_start_eof_launcher_for_test, run_short_overflow_reap_for_test,
 };
