@@ -187,7 +187,7 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
 
         switch event {
         case .appLaunched:
-            return startControlIfPossible(command: .connect, operation: .connect, timeout: 3, source: .startup)
+            return AppLifecycleTransition(terminationDirective: .none, effects: [])
 
         case .primaryConnectRequested:
             return startPrimary(command: .connect, operation: .connect, source: .primaryConnect)
@@ -218,8 +218,12 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
             guard !terminationPending else {
                 return AppLifecycleTransition(terminationDirective: .none, effects: effects)
             }
-            let transition = startControlIfPossible(command: .disconnect, operation: .credentialSave, timeout: 3, source: .credentialDisconnect)
-            effects.append(contentsOf: transition.effects)
+            guard !terminationResolved, operationGate.begin(.credentialSave) else {
+                return AppLifecycleTransition(terminationDirective: .none, effects: effects)
+            }
+            activeSource = .credentialConnect
+            credentialTransactionRunning = true
+            effects.append(.runCredentialTransaction)
             return AppLifecycleTransition(terminationDirective: .none, effects: effects)
 
         case .credentialTransactionCompleted(let result):
@@ -330,57 +334,32 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
     }
 
     private mutating func handleCredentialControlCompleted(source: ActiveSource?, result: ControlResult) -> AppLifecycleTransition {
-        switch source {
-        case .credentialDisconnect:
-            guard result.status == .ok else {
-                let code = normalizedControlResult(result)
-                finishCredentialReset()
-                if terminationPending {
-                    terminationPending = false
-                    return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(false), .showTerminationFailureAlert(code)])
-                }
-                return AppLifecycleTransition(terminationDirective: .none, effects: [.showCredentialResetError(code)])
-            }
-            if credentialCancelledBeforeTransaction || terminationPending {
-                finishCredentialReset()
-                terminationResolved = true
-                terminationPending = false
-                return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(true)])
-            }
-            credentialTransactionRunning = true
-            return AppLifecycleTransition(terminationDirective: .none, effects: [.runCredentialTransaction])
-        case .credentialConnect:
-            finishCredentialReset()
-            if terminationPending {
-                return startControlIfPossible(command: .disconnect, operation: .quit, timeout: 15, source: .quit)
-            }
-            if result.status == .ok {
-                return AppLifecycleTransition(terminationDirective: .none, effects: [])
-            }
-            return AppLifecycleTransition(terminationDirective: .none, effects: [.showCredentialResetError(normalizedControlResult(result))])
-        default:
-            finishCredentialReset()
+        finishCredentialReset()
+        if terminationPending {
+            terminationResolved = true
+            terminationPending = false
+            return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(result.status == .ok)])
+        }
+        if result.status == .ok {
             return AppLifecycleTransition(terminationDirective: .none, effects: [])
         }
+        return AppLifecycleTransition(terminationDirective: .none, effects: [.showCredentialResetError(normalizedControlResult(result))])
     }
 
     private mutating func handleCredentialTransactionCompleted(_ result: CredentialTransactionResult) -> AppLifecycleTransition {
         guard activeOperation == .credentialSave, credentialTransactionRunning else {
             return AppLifecycleTransition(terminationDirective: .none, effects: [])
         }
-        credentialTransactionRunning = false
+        finishCredentialReset()
         switch result {
         case .success:
             if terminationPending {
-                finishCredentialReset()
                 terminationResolved = true
                 terminationPending = false
                 return AppLifecycleTransition(terminationDirective: .none, effects: [.replyToTermination(true)])
             }
-            activeSource = .credentialConnect
-            return AppLifecycleTransition(terminationDirective: .none, effects: [.runControl(command: .connect, operation: .credentialSave, timeout: 3)])
+            return AppLifecycleTransition(terminationDirective: .none, effects: [])
         case .failure(let code):
-            finishCredentialReset()
             if terminationPending {
                 terminationResolved = true
                 terminationPending = false
@@ -442,7 +421,7 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
     }
 }
 
-public struct CredentialResetInput: Equatable, Sendable {
+public struct CredentialResetInput: Equatable, Sendable, CustomDebugStringConvertible {
     public let username: String
     public let password: String
     public let passwordConfirmation: String
@@ -456,9 +435,11 @@ public struct CredentialResetInput: Equatable, Sendable {
         self.totpSeed = totpSeed
         self.totpSeedConfirmation = totpSeedConfirmation
     }
+
+    public var debugDescription: String { "CredentialResetInput([REDACTED])" }
 }
 
-public struct ValidatedCredentials: Equatable, Sendable {
+public struct ValidatedCredentials: Equatable, Sendable, CustomDebugStringConvertible {
     public static let cleared = ValidatedCredentials(username: "", password: "", normalizedTOTPSeed: nil)
 
     public let username: String
@@ -470,6 +451,8 @@ public struct ValidatedCredentials: Equatable, Sendable {
         self.password = password
         self.normalizedTOTPSeed = normalizedTOTPSeed
     }
+
+    public var debugDescription: String { "ValidatedCredentials([REDACTED])" }
 }
 
 public enum CredentialValidationError: String, Error, Equatable, CustomStringConvertible, Sendable {
@@ -517,7 +500,6 @@ public enum CredentialValidator {
     }
 
     private static func validateTOTPSeed(_ seed: String, confirmation: String) throws -> String? {
-        if seed.isEmpty && confirmation.isEmpty { return nil }
         guard !seed.isEmpty, !confirmation.isEmpty else { throw CredentialValidationError.totpSeedRequired }
         let normalizedSeed = normalizeTOTP(seed)
         let normalizedConfirmation = normalizeTOTP(confirmation)

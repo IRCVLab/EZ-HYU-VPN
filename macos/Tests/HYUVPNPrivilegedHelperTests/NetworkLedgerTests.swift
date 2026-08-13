@@ -6,6 +6,27 @@ import Testing
 private let stableTestBootIdentity: UInt64 = 0x8000_0000_0000_1092
 
 @Suite struct NetworkLedgerModelTests {
+    @Test func missingLedgerAfterConfirmedProcessExitIsAlreadyRepaired() throws {
+        let directory = try temporaryDirectory()
+        let ledger = directory.appendingPathComponent("missing.ledger")
+        let configuration = HelperConfiguration.testFixture()
+        let record = SessionRecord(
+            pid: 2222,
+            processGroupID: 3333,
+            processBirthTime: 77,
+            sessionNonce: "nonceabc123",
+            consoleUID: UInt32(getuid()),
+            portal: configuration.portal,
+            executableIdentity: ExecutableIdentity(path: configuration.openConnectExecutable.path, fileID: "file-1"),
+            launchTime: Date(timeIntervalSince1970: 1),
+            ledger: OpaqueLedger(path: ledger, nonce: "nonceabc123")
+        )
+
+        let coordinator = NetworkSessionLedgerCoordinator()
+        try coordinator.repair(record: record, configuration: configuration)
+        try coordinator.verifyTeardownComplete(record: record)
+    }
+
     @Test func atomicLedgerWriteUsesExactBoundedSchemaAnd0600Mode() throws {
         let directory = try temporaryDirectory()
         let ledgerURL = directory.appendingPathComponent("nonceabc123.ledger")

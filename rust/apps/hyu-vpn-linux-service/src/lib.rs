@@ -255,10 +255,15 @@ impl LinuxActionExecutor {
                 tokio::select! {
                     outcome = &mut runner => break outcome,
                     () = tokio::time::sleep(Duration::from_millis(250)), if !connected => {
-                        if !tunnel_interfaces().is_subset(&baseline) {
+                        let current = tunnel_interfaces();
+                        if let Some(tunnel_interface) = current.difference(&baseline).next().cloned() {
                             connected = true;
                             eprintln!("hyu-vpn-connect-stage: tunnel-detected");
-                            let _ = events.send(EngineEvent::ConnectorConnected { generation });
+                            let _ = events.send(EngineEvent::ConnectorConnected {
+                                generation,
+                                tunnel_interface: Some(tunnel_interface),
+                                hip_succeeded: true,
+                            });
                         }
                     }
                 }
@@ -334,7 +339,7 @@ impl ActionExecutor for LinuxActionExecutor {
                     let _ = sender.send(true);
                 }
             }
-            EngineAction::PublishState(_) => {}
+            EngineAction::PublishState(_) | EngineAction::PublishError(_) => {}
         }
         None
     }

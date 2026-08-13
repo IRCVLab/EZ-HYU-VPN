@@ -17,7 +17,7 @@ Missing credentials are collected in memory before elevation and written after t
 
 ## What the installer does
 
-The native app uses the fixed system Python prerequisite `/usr/bin/python3` to verify `manifest.json`, stages the immutable payload, and then runs the transactional `installer/root-admin.sh` root phase once through the macOS administrator authorization UI. No Terminal installer or uninstaller is packaged.
+The native app verifies `manifest.json`, stages the immutable payload, and then runs the transactional `installer/root-admin.sh` root phase once through the macOS administrator authorization UI. No Terminal installer or uninstaller is packaged.
 
 After the root transaction succeeds, the user phase writes auto-reconnect enabled, bootstraps/kickstarts the per-user service, stops any older menu process with bounded TERM/KILL fallback, opens `/Applications/HYU VPN.app`, and waits for exactly one menu process. Normal connect, reconnect, and disconnect operations use the installed helper/sudoers setup and should not request the Mac administrator password.
 
@@ -34,4 +34,4 @@ Each release includes:
 
 ## Internal implementation notes
 
-Only `installer/root-admin.sh` and `installer/manifest.py` remain as private implementation resources for the native installer.
+Only `installer/root-admin.sh` is packaged as a private root-phase implementation resource. Manifest tooling remains a build-time/release-time verifier and is not shipped or invoked by the production root phase.

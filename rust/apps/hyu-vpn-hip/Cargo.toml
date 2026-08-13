@@ -15,3 +15,10 @@ hyu-vpn-platform-linux = { path = "../../crates/hyu-vpn-platform-linux" }
 
 [target.'cfg(windows)'.dependencies]
 hyu-vpn-platform-windows = { path = "../../crates/hyu-vpn-platform-windows" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

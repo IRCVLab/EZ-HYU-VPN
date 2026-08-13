@@ -178,12 +178,17 @@ where
     }
 
     pub fn apply_event(&self, event: EngineEvent) {
-        let actions = self
-            .engine
-            .lock()
-            .expect("engine lock poisoned")
-            .handle(event);
-        self.publish_actions(actions);
+        let connected_metadata = match &event {
+            EngineEvent::ConnectorConnected {
+                tunnel_interface,
+                hip_succeeded,
+                ..
+            } => Some((tunnel_interface.clone(), *hip_succeeded)),
+            _ => None,
+        };
+        let mut engine = self.engine.lock().expect("engine lock poisoned");
+        let actions = engine.handle(event);
+        self.publish_actions(actions, connected_metadata);
     }
 
     pub fn handle(&self, request: RequestEnvelope) -> ResponseEnvelope {
@@ -256,10 +261,23 @@ where
         }
     }
 
-    fn publish_actions(&self, actions: Vec<EngineAction>) {
+    fn publish_actions(
+        &self,
+        actions: Vec<EngineAction>,
+        connected_metadata: Option<(Option<String>, bool)>,
+    ) {
         for action in actions {
             if let EngineAction::PublishState(state) = action {
-                self.update_status_state(state);
+                if state == VpnState::Connected {
+                    let (tunnel_interface, hip_succeeded) = connected_metadata
+                        .clone()
+                        .expect("connected state requires connector metadata");
+                    self.update_connected_status(tunnel_interface, hip_succeeded);
+                } else {
+                    self.update_status_state(state);
+                }
+            } else if let EngineAction::PublishError(error_code) = action {
+                self.update_status_error(error_code);
             } else if let EngineAction::PersistAutomaticReconnect(enabled) = action {
                 self.status
                     .write()
@@ -278,6 +296,30 @@ where
             }
             let _ = self.action_tx.send(action);
         }
+    }
+
+    fn update_connected_status(&self, tunnel_interface: Option<String>, hip_succeeded: bool) {
+        let now = format_system_time(self.clock.now());
+        let mut status = self.status.write().expect("status lock poisoned");
+        status.state = VpnState::Connected;
+        status.connected_at = Some(now.clone());
+        status.last_successful_hip_at = hip_succeeded.then_some(now.clone());
+        status.tunnel_interface = tunnel_interface;
+        status.next_retry_at = None;
+        status.error_code = None;
+        status.last_transition_at = now;
+    }
+
+    fn update_status_error(&self, error_code: ErrorCode) {
+        let mut status = self.status.write().expect("status lock poisoned");
+        status.state = VpnState::Error;
+        status.error_code = Some(error_code);
+        status.connected_at = None;
+        status.session_expires_at = None;
+        status.last_successful_hip_at = None;
+        status.tunnel_interface = None;
+        status.next_retry_at = None;
+        status.last_transition_at = format_system_time(self.clock.now());
     }
 
     fn update_status_state(&self, state: VpnState) {

@@ -24,7 +24,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_ROOTS = [Path("/"), Path("/Applications"), Path("/Library"), Path("/System"), Path("/usr")]
 SYSTEM_DYLIB_PREFIXES = ("/usr/lib/", "/System/Library/")
 MANIFEST_NAME = "manifest.json"
-PYTHON_PREREQUISITE = "/usr/bin/python3"
 HELPER_CONFIG_KEYS = {
     "openConnectExecutable",
     "vpncScript",
@@ -35,25 +34,27 @@ HELPER_CONFIG_KEYS = {
     "vpncScriptSHA256",
     "hipWrapperSHA256",
 }
-REQUIRED_SOURCE_MODULES = {
-    "src/hyu_vpn/__init__.py",
-    "src/hyu_vpn/connector.py",
-    "src/hyu_vpn/control.py",
-    "src/hyu_vpn/hip_cli.py",
-    "src/hyu_vpn/hip_contract.py",
-    "src/hyu_vpn/hip_xml.py",
-    "src/hyu_vpn/macos_posture.py",
-    "src/hyu_vpn/native_client.py",
-    "src/hyu_vpn/network.py",
-    "src/hyu_vpn/otp.py",
-    "src/hyu_vpn/status.py",
-    "src/hyu_vpn/supervisor.py",
-}
 SOURCE_COMPLIANCE_BUNDLE = "SOURCE-COMPLIANCE-BUNDLE.tar.gz"
 FINAL_RUNTIME_BINDING = "FINAL-RUNTIME-BINDING.json"
 SOURCE_COMPLIANCE_BUNDLE_SEMANTICS = "canonical-pre-rewrite-pre-sign"
 SOURCE_COMPLIANCE_BUNDLE_SCOPE = "third-party-runtime-corresponding-source-only"
 GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
+FORBIDDEN_MOUNTED_TEXT_TOKENS = (
+    "hyu-vpn-service",
+    "hyu-vpn-control",
+    "hyu-vpn-connect",
+    "hyu-vpn-" + "native-client",
+    "src/" + "hyu_vpn",
+    "src/" + "hyu_vpn",
+    "/usr/bin/python3",
+    "PYTHON3_PATH",
+    "thon3",
+    "/usr/bin/py",
+)
+TEXT_SCAN_SUFFIXES = {"", ".json", ".plist", ".in", ".sh", ".py", ".txt", ".md", ".command", ".xml"}
+TEXT_SCAN_NAMES = {MANIFEST_NAME, "root-admin.sh", "manifest.py", "package-macos.sh", "package-release.py"}
+OPAQUE_SCAN_EXCLUDES = {SOURCE_COMPLIANCE_BUNDLE}
 
 INSTALLER_APP_REL = "Install HYU VPN.app"
 INSTALLER_EXEC_REL = "Install HYU VPN.app/Contents/MacOS/HYUVPNInstallerApp"
@@ -68,7 +69,6 @@ REQUIRED_PAYLOAD_FILES = {
     "Install HYU VPN.app/Contents/Resources/AppIcon.icns",
     "README-lab.md",
     "installer/root-admin.sh",
-    "installer/manifest.py",
     "launchd/com.hyu.vpn.service.plist.in",
     "runtime/openconnect/bin/openconnect",
     "runtime/oathtool",
@@ -77,13 +77,10 @@ REQUIRED_PAYLOAD_FILES = {
     "runtime/vpnc/hyu-vpnc-wrapper",
     "runtime/vpnc/hyu-vpnc-wrapperd",
     "com.hyu.vpn.helper",
-    "hyu-vpn-service",
-    "hyu-vpn-control",
-    "hyu-vpn-connect",
-    "hyu-vpn-native-client",
+    "hyu-vpn-macos-service",
     "THIRD_PARTY_NOTICES.txt",
     "SOURCE-OFFER.txt",
-} | REQUIRED_SOURCE_MODULES
+}
 APP_BUNDLE_REL = "HYU VPN.app"
 APP_BUNDLE_RELS = [APP_BUNDLE_REL, INSTALLER_APP_REL]
 OPTIONAL_APP_SIGNATURE_FILES = {
@@ -92,6 +89,7 @@ OPTIONAL_APP_SIGNATURE_FILES = {
 }
 EXECUTABLE_RELATIVE_FILES = {
     "runtime/openconnect/bin/openconnect",
+    "runtime/gp-hip-report",
     "runtime/oathtool",
     "runtime/vpnc/hyu-vpnc-wrapperd",
     "com.hyu.vpn.helper",
@@ -696,9 +694,6 @@ def _validate_payload_contract(source: Path) -> None:
     validate_third_party_notices(source / "THIRD_PARTY_NOTICES.txt", ["OpenConnect", "oath-toolkit", "vpnc-script"])
     if (source / SOURCE_COMPLIANCE_BUNDLE).exists():
         validate_source_compliance_bundle(source / SOURCE_COMPLIANCE_BUNDLE)
-    readme = (source / "README-lab.md").read_text(encoding="utf-8")
-    if PYTHON_PREREQUISITE not in readme:
-        raise PackagingError("README must document fixed /usr/bin/python3 prerequisite")
 
 
 def _copy_payload(source: Path, destination: Path) -> None:
@@ -820,20 +815,14 @@ def _require_regular_file(path: Path) -> Path:
     return path
 
 
-def _validate_python_tree(root: Path) -> None:
-    actual = {path.relative_to(root.parents[1]).as_posix() for path in root.rglob("*.py") if path.is_file()}
-    if actual != REQUIRED_SOURCE_MODULES:
-        raise PackagingError(f"unexpected Python module set: extras={sorted(actual - REQUIRED_SOURCE_MODULES)} missing={sorted(REQUIRED_SOURCE_MODULES - actual)}")
-    if any(part == "__pycache__" for path in root.rglob("*") for part in path.parts):
-        raise PackagingError("__pycache__ is not allowed in release payload source tree")
-
-
 def assemble_payload_from_repo(
     *,
     repo_root: Path,
     payload_root: Path,
     openconnect: Path,
     oathtool: Path,
+    service_executable: Path,
+    hip_executable: Path,
     helper_executable: Path,
     wrapperd_executable: Path,
     menu_app: Path,
@@ -846,37 +835,29 @@ def assemble_payload_from_repo(
     repo_root = Path(repo_root).resolve(strict=True)
     if not _is_under(repo_root, REPO_ROOT.resolve()):
         raise PackagingError(f"untrusted repo root: {repo_root}")
-    _validate_python_tree(repo_root / "src/hyu_vpn")
     payload_root = guard_destination(payload_root, allowed_root=payload_root.parent)
     payload_root.mkdir(parents=True)
-    for required_input in [openconnect, oathtool, helper_executable, wrapperd_executable, vpnc_script]:
+    for required_input in [openconnect, oathtool, service_executable, hip_executable, helper_executable, wrapperd_executable, vpnc_script]:
         _require_regular_file(required_input)
     _prewalk_regular_tree(Path(menu_app), "menu_app")
     _prewalk_regular_tree(Path(installer_app), "installer_app")
-    _prewalk_regular_tree(repo_root / "src/hyu_vpn", "src/hyu_vpn")
     def copy_file_rel(src: Path, rel: str, mode: int) -> None:
         src = _require_regular_file(src)
         dst = payload_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         dst.chmod(mode)
-    for rel in ["root-admin.sh", "manifest.py"]:
-        copy_file_rel(repo_root / "installer" / rel, f"installer/{rel}", 0o755 if rel.endswith(".sh") else 0o644)
+    copy_file_rel(repo_root / "installer/root-admin.sh", "installer/root-admin.sh", 0o755)
     for rel in ["com.hyu.vpn.service.plist.in"]:
         copy_file_rel(repo_root / "launchd" / rel, f"launchd/{rel}", 0o644)
-    for rel in ["hyu-vpn-control", "hyu-vpn-service", "hyu-vpn-connect", "hyu-vpn-native-client"]:
-        copy_file_rel(repo_root / "bin" / rel, rel, 0o755)
-    copy_file_rel(repo_root / "bin/gp-hip-report", "runtime/gp-hip-report", 0o755)
+    copy_file_rel(service_executable, "hyu-vpn-macos-service", 0o755)
+    copy_file_rel(hip_executable, "runtime/gp-hip-report", 0o755)
     copy_file_rel(repo_root / "privileged/hyu-vpnc-wrapper", "runtime/vpnc/hyu-vpnc-wrapper", 0o755)
     copy_file_rel(wrapperd_executable, "runtime/vpnc/hyu-vpnc-wrapperd", 0o755)
     copy_file_rel(vpnc_script, "runtime/vpnc/vpnc-script", 0o755)
     copy_file_rel(helper_executable, "com.hyu.vpn.helper", 0o755)
     shutil.copytree(menu_app, payload_root / APP_BUNDLE_REL, symlinks=False)
     shutil.copytree(installer_app, payload_root / INSTALLER_APP_REL, symlinks=False)
-    shutil.copytree(repo_root / "src/hyu_vpn", payload_root / "src/hyu_vpn", symlinks=False)
-    for item in (payload_root / "src/hyu_vpn").rglob("*"):
-        if item.is_file():
-            item.chmod(0o644)
     closure = RuntimeClosurePlanner(closure_runner).discover([openconnect, oathtool])
     if rebind_source_compliance:
         if source_compliance_bundle is None:
@@ -1066,6 +1047,29 @@ class ReleaseToolchain:
         self._run(self.command_plan("detach", mountpoint))
 
 
+def mounted_text_scan_candidates(root: Path) -> Iterable[Path]:
+    for path in root.rglob("*"):
+        if not path.is_file() or path.name in OPAQUE_SCAN_EXCLUDES:
+            continue
+        rel = path.relative_to(root).as_posix()
+        if "/Contents/MacOS/" in rel or rel.endswith(".icns"):
+            continue
+        if path.name in TEXT_SCAN_NAMES or path.suffix in TEXT_SCAN_SUFFIXES or rel.startswith(("installer/", "launchd/")):
+            yield path
+
+
+def scan_mounted_text_payload(root: Path) -> None:
+    for path in mounted_text_scan_candidates(root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for token in FORBIDDEN_MOUNTED_TEXT_TOKENS:
+            if token in text:
+                rel = path.relative_to(root).as_posix()
+                raise PackagingError(f"mounted text payload contains forbidden legacy token: {token} in {rel}")
+
+
 def mach_o_payload_files(stage_dir: Path) -> List[str]:
     ordered: List[str] = []
     preferred = [
@@ -1074,6 +1078,7 @@ def mach_o_payload_files(stage_dir: Path) -> List[str]:
         "runtime/oathtool",
         "runtime/vpnc/hyu-vpnc-wrapperd",
         "com.hyu.vpn.helper",
+        "hyu-vpn-macos-service",
         "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
         "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader",
         INSTALLER_EXEC_REL,
@@ -1139,9 +1144,6 @@ class ReleaseBuilder:
             "installer_ux": "native-gui-no-terminal",
             "administrator_authorization": "macos-ui-once",
             "manifest": MANIFEST_NAME,
-            "python_runtime_contract": "fixed-system-python-prerequisite",
-            "prerequisites": {"python3": PYTHON_PREREQUISITE},
-            "task7_pre_sudo_requirements": ["verify /usr/bin/python3 exists and is executable", "never use PATH or Homebrew python fallback"],
             "release_blockers": [] if has_source_bundle else ["bundle exact GPL/LGPL source archives or retained written-offer packet before real lab distribution"],
             "git_commit": git_commit,
             "source_compliance_bundle_scope": SOURCE_COMPLIANCE_BUNDLE_SCOPE if has_source_bundle else None,
@@ -1219,6 +1221,11 @@ class ReleaseBuilder:
         metadata = json.loads((mountpoint / "release-metadata.json").read_text(encoding="utf-8"))
         if metadata.get("architecture") != "arm64" or metadata.get("notarized") is not False:
             raise PackagingError("mounted metadata does not match internal arm64 lab release")
+        self.toolchain.validate_architecture(mountpoint, "hyu-vpn-macos-service", "arm64")
+        self.toolchain.verify_signature(mountpoint, "hyu-vpn-macos-service")
+        self.toolchain.validate_architecture(mountpoint, "runtime/gp-hip-report", "arm64")
+        self.toolchain.verify_signature(mountpoint, "runtime/gp-hip-report")
+        scan_mounted_text_payload(mountpoint)
         source_bundle = mountpoint / SOURCE_COMPLIANCE_BUNDLE
         if source_bundle.exists():
             validate_final_runtime_binding(mountpoint / FINAL_RUNTIME_BINDING, source_bundle, mountpoint)

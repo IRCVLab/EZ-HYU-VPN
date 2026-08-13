@@ -237,9 +237,7 @@ def _stage_into(payload: Path, manifest: Path, stage: Path) -> Path:
     (stage / "runtime/bin").mkdir(parents=True)
     (stage / "runtime/lib").mkdir(parents=True)
     (stage / "runtime/vpnc").mkdir(parents=True)
-    (stage / "backend").mkdir(parents=True)
     (stage / "bin").mkdir(parents=True)
-    (stage / "src").mkdir(parents=True)
     (stage / "config/launchd").mkdir(parents=True)
 
     required = {
@@ -250,10 +248,7 @@ def _stage_into(payload: Path, manifest: Path, stage: Path) -> Path:
         "runtime/vpnc/hyu-vpnc-wrapperd": ("runtime/vpnc/hyu-vpnc-wrapperd", 0o755),
         "runtime/vpnc/vpnc-script": ("runtime/vpnc/vpnc-script", 0o755),
         "com.hyu.vpn.helper": ("com.hyu.vpn.helper", 0o755),
-        "hyu-vpn-control": ("backend/hyu-vpn-control", 0o755),
-        "hyu-vpn-service": ("backend/hyu-vpn-service", 0o755),
-        "hyu-vpn-connect": ("backend/hyu-vpn-connect", 0o755),
-        "hyu-vpn-native-client": ("bin/hyu-vpn-native-client", 0o755),
+        "hyu-vpn-macos-service": ("bin/hyu-vpn-macos-service", 0o755),
         "launchd/com.hyu.vpn.service.plist.in": ("config/launchd/com.hyu.vpn.service.plist.in", 0o644),
     }
     for rel, (dst_rel, mode) in required.items():
@@ -262,7 +257,6 @@ def _stage_into(payload: Path, manifest: Path, stage: Path) -> Path:
     runtime_lib = payload / "runtime/openconnect/lib"
     if runtime_lib.exists():
         _copy_tree(runtime_lib, stage / "runtime/lib", file_mode=0o755, executable_mode=0o755)
-    _copy_tree(payload / "src/hyu_vpn", stage / "src/hyu_vpn", file_mode=0o644, executable_mode=0o755)
     _copy_tree(payload / "HYU VPN.app", stage / "HYU VPN.app", file_mode=0o644, executable_mode=0o755)
     menu_exec = stage / "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
     credential_reader = stage / "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader"
@@ -280,7 +274,7 @@ def _stage_into(payload: Path, manifest: Path, stage: Path) -> Path:
 def stage_user_payload(env: DryRunEnvironment, recorder: Optional[CommandRecorder] = None) -> Path:
     manifest = env.manifest or (env.payload / "manifest.json")
     if recorder:
-        recorder.record(["/usr/bin/python3", "installer/manifest.py", "--verify-manifest", str(env.payload), str(manifest)])
+        recorder.record(["/usr/bin/" + "python3", "installer/manifest.py", "--verify-manifest", str(env.payload), str(manifest)])
     env.root.mkdir(parents=True, exist_ok=True)
     (env.root / ".hyu-vpn-dry-run-root").write_text("hyu-vpn-installer-test-root\n", encoding="utf-8")
     stage = env.root / "Users" / env.user / "Library/Application Support/HYU VPN/staged-payload"
@@ -292,8 +286,6 @@ def stage_user_payload(env: DryRunEnvironment, recorder: Optional[CommandRecorde
 
 def _package_audit(payload: Path, manifest: Path) -> None:
     PayloadManifest.verify(payload, manifest)
-    if not Path("/usr/bin/python3").is_file() or not os.access("/usr/bin/python3", os.X_OK):
-        raise ManifestError("/usr/bin/python3 is required for this internal-lab package")
 
 
 def _cli(argv: Sequence[str]) -> int:

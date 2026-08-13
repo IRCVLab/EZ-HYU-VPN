@@ -122,7 +122,7 @@ package final class CredentialResetController: NSObject, NSWindowDelegate {
         case .passwordRequired: return "Enter a password."
         case .passwordTooLong, .passwordContainsDisallowedCharacter: return "Use a valid password."
         case .passwordMismatch: return "Passwords do not match."
-        case .totpSeedRequired: return "Enter the TOTP setup secret in both fields, or leave both blank to retain it."
+        case .totpSeedRequired: return "Enter the TOTP setup secret in both fields."
         case .totpSeedMismatch: return "TOTP setup secrets do not match."
         case .totpSeedInvalidAlphabetOrPadding, .totpSeedTooShort, .totpSeedTooLong, .totpSeedLooksLikeOneTimeCode:
             return "Use a valid TOTP setup secret, not a one-time code."

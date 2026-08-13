@@ -165,6 +165,18 @@ import Testing
         #expect(decoded == running)
     }
 
+    @Test func stoppedStatusJsonPreservesTheExactRustProtocolKeySet() throws {
+        var harness = HelperHarness()
+        let stopped = try #require(try harness.run(command: .status).statusDocument)
+        let line = try stopped.singleLineJSON()
+        let object = try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+
+        #expect(Set(object.keys) == ["schema_version", "state", "pid", "session_nonce", "tunnel_interface"])
+        #expect(object["pid"] is NSNull)
+        #expect(object["session_nonce"] is NSNull)
+        #expect(object["tunnel_interface"] is NSNull)
+    }
+
     @Test func statusFailsClosedToRepairRequiredOnIdentityMismatchAndRepairIsOpaque() throws {
         var harness = HelperHarness()
         try harness.installRecord(pid: 2222, pgid: 3333, birth: 77, nonce: "nonce12345", executable: harness.config.openConnectExecutable.path)

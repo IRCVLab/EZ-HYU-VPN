@@ -8,6 +8,14 @@ use hyu_vpn_platform_linux::{HipContext, LinuxPostureCollector, PostureError};
 use hyu_vpn_platform_windows::{WindowsHipContext, WindowsPostureCollector, WindowsPostureError};
 use thiserror::Error;
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::{
+    Drive, HostInfo, MacPosture, NetworkInterface, Patch, Product,
+    build_macos_hip_with_posture_from_args,
+};
+
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum HipCliError {
     #[error("invalid HIP invocation")]
@@ -141,6 +149,17 @@ pub fn build_windows_hip_from_args(
         })
 }
 
+#[cfg(target_os = "macos")]
+pub fn build_macos_hip_from_args(
+    args: &[String],
+    generated_at: &str,
+    environment_app_version: Option<&str>,
+) -> Result<String, HipCliError> {
+    let invocation = parse_invocation(args, generated_at, environment_app_version)?;
+    let posture = macos::collect_production_posture();
+    macos::build_macos_xml(&invocation, &posture)
+}
+
 fn parse_invocation(
     args: &[String],
     generated_at: &str,
@@ -183,10 +202,17 @@ fn parse_invocation(
         .map(String::as_str)
         .or(environment_app_version)
         .unwrap_or("unknown");
-    for value in [&user, &domain, client_version, generated_at] {
+    for value in [&user, client_version, generated_at] {
         if !bounded_text(value, 256) {
             return Err(HipCliError::InvalidInvocation);
         }
+    }
+    if domain.len() > 256
+        || domain
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
+    {
+        return Err(HipCliError::InvalidInvocation);
     }
     Ok(ParsedInvocation {
         md5: md5.to_ascii_lowercase(),
@@ -286,7 +312,11 @@ fn percent_decode(value: &str) -> Result<String, HipCliError> {
         }
     }
     let decoded = String::from_utf8(decoded).map_err(|_| HipCliError::InvalidInvocation)?;
-    if !bounded_text(&decoded, 1024) {
+    if decoded.len() > 1024
+        || decoded
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
+    {
         return Err(HipCliError::InvalidInvocation);
     }
     Ok(decoded)

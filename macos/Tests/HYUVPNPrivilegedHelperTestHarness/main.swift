@@ -46,10 +46,12 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("stop-ledger-repair-required-preserves-evidence", testStopLedgerRepairRequiredPreservesEvidence),
                 ("stop-mismatch-does-not-signal", testStopMismatchNoSignal),
                 ("status-json", testStatusJSON),
+                ("stopped-status-json-exact-rust-keyset", testStoppedStatusJSONExactRustKeyset),
                 ("status-loads-tunnel-from-recorded-ledger", testStatusLoadsTunnelFromRecordedLedger),
                 ("status-rejects-repair-required-ledger-tunnel", testStatusRejectsRepairRequiredLedgerTunnel),
                 ("status-repair-required-on-mismatch", testStatusRepairRequired),
                 ("repair-invokes-ledger-and-cleans-session", testRepairInvokesLedgerAndCleansSession),
+                ("repair-missing-ledger-after-process-exit-is-clean", testRepairMissingLedgerAfterProcessExitIsClean),
                 ("repair-foreign-mismatch-preserves-evidence", testRepairForeignMismatchPreservesEvidence),
                 ("network-preinit-allows-absent-tundev", testPreInitWithoutTunnelDeviceRecordsBaseline),
                 ("network-connect-expands-preinit-route-intent", testConnectExpandsPreInitRouteIntent),
@@ -270,6 +272,16 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(!line.contains("\n"), "single line")
     }
 
+    static func testStoppedStatusJSONExactRustKeyset() throws {
+        var harness = HelperHarness()
+        let document = try require(try harness.run(command: .status).statusDocument, "stopped status doc")
+        let object = try require(try JSONSerialization.jsonObject(with: Data(document.singleLineJSON().utf8)) as? [String: Any], "stopped status object")
+        try expect(Set(object.keys) == ["schema_version", "state", "pid", "session_nonce", "tunnel_interface"], "stopped status preserves exact Rust protocol keys")
+        try expect(object["pid"] is NSNull, "stopped pid is explicit null")
+        try expect(object["session_nonce"] is NSNull, "stopped nonce is explicit null")
+        try expect(object["tunnel_interface"] is NSNull, "stopped tunnel is explicit null")
+    }
+
     static func testStatusLoadsTunnelFromRecordedLedger() throws {
         var (harness, root) = try helperHarnessWithRecordedLedger(status: "recorded", tunnel: "utun7")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -403,6 +415,26 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
         try expect(result.status == .stopped, "repair completed")
         try expect(harness.ledgerCoordinator.repairedNonces == ["nonce12345"], "actual ledger repair invoked")
         try expect(harness.store.record == nil, "successful repair cleans session")
+    }
+
+    static func testRepairMissingLedgerAfterProcessExitIsClean() throws {
+        let root = try harnessTempDir()
+        let ledger = root.appendingPathComponent("missing.ledger")
+        let configuration = HelperConfiguration.testFixture()
+        let record = SessionRecord(
+            pid: 2222,
+            processGroupID: 3333,
+            processBirthTime: 77,
+            sessionNonce: "nonceabc123",
+            consoleUID: UInt32(getuid()),
+            portal: configuration.portal,
+            executableIdentity: ExecutableIdentity(path: configuration.openConnectExecutable.path, fileID: "file-1"),
+            launchTime: Date(timeIntervalSince1970: 1),
+            ledger: OpaqueLedger(path: ledger, nonce: "nonceabc123")
+        )
+        let coordinator = NetworkSessionLedgerCoordinator()
+        try coordinator.repair(record: record, configuration: configuration)
+        try coordinator.verifyTeardownComplete(record: record)
     }
 
     static func testRepairForeignMismatchPreservesEvidence() throws {

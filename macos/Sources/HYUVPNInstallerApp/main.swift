@@ -163,6 +163,7 @@ struct InstallerController {
     let bundleURL: URL
     let status: (String) -> Void
     private var payloadURL: URL { bundleURL.deletingLastPathComponent() }
+    private var automaticReconnectPreferencePath: String { NSHomeDirectory() + "/Library/Application Support/hyu-openconnect/automatic-reconnect" }
     private let credentialReader = InstallerEncryptedCredentialStore()
 
     func runInstall() throws -> InstallerRunResult {
@@ -171,17 +172,19 @@ struct InstallerController {
         let manifest = payloadURL.appendingPathComponent("manifest.json").path
         let installerDir = payloadURL.appendingPathComponent("installer").path
         try requireFile(manifest, label: "manifest.json")
-        try requireFile("\(installerDir)/manifest.py", label: "installer/manifest.py")
         try requireFile("\(installerDir)/root-admin.sh", label: "installer/root-admin.sh")
         status("Verifying package manifest…")
-        try run(["/usr/bin/python3", "\(installerDir)/manifest.py", "--payload", payload, "--manifest", manifest, "--verify-manifest"], code: "VERIFY_MANIFEST_FAILED")
+        try NativePayloadManifest.verify(payload: URL(fileURLWithPath: payload), manifest: URL(fileURLWithPath: manifest))
         let stageDir = try makeTemporaryDirectory(prefix: "hyu-vpn-stage")
         defer { try? FileManager.default.removeItem(at: stageDir) }
         status("Preparing files for installation…")
-        try run(["/usr/bin/python3", "\(installerDir)/manifest.py", "--payload", payload, "--manifest", manifest, "--stage-user-payload", "--stage-dir", stageDir.path], code: "STAGE_PAYLOAD_FAILED")
+        try NativePayloadManifest.stage(payload: URL(fileURLWithPath: payload), manifest: URL(fileURLWithPath: manifest), stage: stageDir)
         let packageDigest = try sha256(path: manifest)
         let stageManifest = stageDir.appendingPathComponent("manifest.json").path
         let stageDigest = try sha256(path: stageManifest)
+        let existingAutomaticReconnect = try readAutoReconnectPreference(path: automaticReconnectPreferencePath)
+        let desiredAutomaticReconnect = InstallerAutomaticReconnectPolicy.desiredAfterInstall(existingValue: existingAutomaticReconnect)
+        try writeAutoReconnectPreference(enabled: false, path: automaticReconnectPreferencePath)
 
         status("Checking saved HYU VPN credentials…")
         let missingCredentialValues = try collectMissingCredentialsBeforeElevation()
@@ -197,8 +200,13 @@ struct InstallerController {
             epoch: Int(Date().timeIntervalSince1970)
         )
         status("Waiting for macOS administrator authorization…")
-        try RootAdminAuthorizer.authorizeOnce(argv: rootArgv, newlyCreatedKeys: [], store: credentialReader) { argv in
-            try runWithAdministratorPrivileges(argv)
+        do {
+            try RootAdminAuthorizer.authorizeOnce(argv: rootArgv, newlyCreatedKeys: [], store: credentialReader) { argv in
+                try runWithAdministratorPrivileges(argv)
+            }
+        } catch {
+            try? restoreAutoReconnectPreference(existingValue: existingAutomaticReconnect, path: automaticReconnectPreferencePath)
+            throw error
         }
 
         status("Saving HYU VPN credentials…")
@@ -206,7 +214,7 @@ struct InstallerController {
         let writtenKeys = try InstallerCredentialBootstrapper.writeCollectedCredentials(store: credentialWriter, collected: missingCredentialValues)
         do {
             status("Starting HYU VPN menu app…")
-            switch try activateUserSession() {
+            switch try activateUserSession(automaticReconnectEnabled: desiredAutomaticReconnect) {
             case .active:
                 return .installed
             case .menuStartWarning(let code):
@@ -230,12 +238,12 @@ struct InstallerController {
         return try InstallerCredentialBootstrapper.validateCollectedCredentialValues(missingKeys: missingKeys, values: values)
     }
 
-    private func activateUserSession() throws -> UserActivationResult {
+    private func activateUserSession(automaticReconnectEnabled: Bool) throws -> UserActivationResult {
         let uid = String(getuid())
-        let prefPath = NSHomeDirectory() + "/Library/Application Support/hyu-openconnect/auto-reconnect.json"
+        let prefPath = automaticReconnectPreferencePath
         let servicePlist = NSHomeDirectory() + "/Library/LaunchAgents/com.hyu.vpn.service.plist"
         do {
-            try run(["/usr/bin/python3", "-I", "-c", "import sys; sys.path.insert(0,\"/Library/Application Support/HYU VPN/src\"); from hyu_vpn.control import AutoReconnectPreference; AutoReconnectPreference(sys.argv[1], owner_uid=int(sys.argv[2])).write(True)", prefPath, uid], code: "AUTO_RECONNECT_PREF_FAILED")
+            try writeAutoReconnectPreference(enabled: automaticReconnectEnabled, path: prefPath)
             try requireFile(servicePlist, label: "installed service LaunchAgent")
             try run(["/bin/launchctl", "bootstrap", "gui/\(uid)", servicePlist], code: "SERVICE_BOOTSTRAP_FAILED", allowFailure: true)
             try run(["/bin/launchctl", "kickstart", "-k", "gui/\(uid)/com.hyu.vpn.service"], code: "SERVICE_KICKSTART_FAILED")
@@ -265,8 +273,39 @@ struct InstallerController {
     }
 
     private func bestEffortDeactivateUserService(uid: String, prefPath: String, servicePlist: String) {
-        try? run(["/usr/bin/python3", "-I", "-c", "import sys; sys.path.insert(0,\"/Library/Application Support/HYU VPN/src\"); from hyu_vpn.control import AutoReconnectPreference; AutoReconnectPreference(sys.argv[1], owner_uid=int(sys.argv[2])).write(False)", prefPath, uid], code: "AUTO_RECONNECT_RESTORE_FAILED", allowFailure: true)
+        try? writeAutoReconnectPreference(enabled: false, path: prefPath)
         try? run(["/bin/launchctl", "bootout", "gui/\(uid)", servicePlist], code: "SERVICE_BOOTOUT_FAILED", allowFailure: true)
+    }
+
+    private func writeAutoReconnectPreference(enabled: Bool, path: String) throws {
+        let preferenceDirectory = URL(fileURLWithPath: path).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: preferenceDirectory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: preferenceDirectory.path)
+        let data = Data((enabled ? "true\n" : "false\n").utf8)
+        try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    }
+
+    private func readAutoReconnectPreference(path: String) throws -> Bool? {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true, let size = values.fileSize, size <= 8 else {
+            throw InstallerCoreError.commandFailed(code: "AUTOMATIC_PREFERENCE_INVALID")
+        }
+        switch try String(contentsOf: url, encoding: .utf8) {
+        case "true\n": return true
+        case "false\n": return false
+        default: throw InstallerCoreError.commandFailed(code: "AUTOMATIC_PREFERENCE_INVALID")
+        }
+    }
+
+    private func restoreAutoReconnectPreference(existingValue: Bool?, path: String) throws {
+        guard let existingValue else {
+            try? FileManager.default.removeItem(atPath: path)
+            return
+        }
+        try writeAutoReconnectPreference(enabled: existingValue, path: path)
     }
 
     private func stopExistingMenubar(uid: String) throws {

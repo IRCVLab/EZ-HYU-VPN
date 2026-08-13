@@ -6,7 +6,6 @@
   <string>com.hyu.vpn.service</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
     <string>@SERVICE_PATH@</string>
   </array>
   <key>RunAtLoad</key>

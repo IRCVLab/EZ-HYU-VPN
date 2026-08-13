@@ -143,7 +143,11 @@ impl WindowsActionExecutor {
                         let current = active_vpn_interface();
                         if current.is_some() && current != baseline {
                             connected = true;
-                            let _ = events.send(EngineEvent::ConnectorConnected { generation });
+                            let _ = events.send(EngineEvent::ConnectorConnected {
+                                generation,
+                                tunnel_interface: current,
+                                hip_succeeded: true,
+                            });
                         }
                     }
                 }
@@ -219,7 +223,7 @@ impl ActionExecutor for WindowsActionExecutor {
                     let _ = sender.send(true);
                 }
             }
-            EngineAction::PublishState(_) => {}
+            EngineAction::PublishState(_) | EngineAction::PublishError(_) => {}
         }
         None
     }

@@ -820,6 +820,19 @@ public struct HelperStatusDocument: Codable, Equatable {
         self.tunnel_interface = tunnel_interface
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case schema_version, state, pid, session_nonce, tunnel_interface
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schema_version, forKey: .schema_version)
+        try container.encode(state, forKey: .state)
+        if let pid { try container.encode(pid, forKey: .pid) } else { try container.encodeNil(forKey: .pid) }
+        if let session_nonce { try container.encode(session_nonce, forKey: .session_nonce) } else { try container.encodeNil(forKey: .session_nonce) }
+        if let tunnel_interface { try container.encode(tunnel_interface, forKey: .tunnel_interface) } else { try container.encodeNil(forKey: .tunnel_interface) }
+    }
+
     public func singleLineJSON() throws -> String {
         let data = try JSONEncoder().encode(self)
         let line = String(decoding: data, as: UTF8.self)
@@ -960,6 +973,12 @@ public struct NetworkSessionLedgerCoordinator: SessionLedgerCoordinating {
         guard ledger.status == "healed" else { throw HelperError.teardownIncomplete("ledger status \(ledger.status)") }
     }
     public func repair(record: SessionRecord, configuration: HelperConfiguration) throws {
+        var item = stat()
+        if lstat(record.ledger.path.path, &item) != 0 {
+            if errno == ENOENT { return }
+            throw HelperError.insecurePath(record.ledger.path.path)
+        }
+        guard (item.st_mode & S_IFMT) != S_IFLNK else { throw HelperError.insecurePath(record.ledger.path.path) }
         let paths = RuntimePaths(ledgerRoot: configuration.ledgerDirectory, upstream: configuration.vpncScript, route: RuntimePaths.production.route, scutil: RuntimePaths.production.scutil, sysctl: RuntimePaths.production.sysctl, networksetup: RuntimePaths.production.networksetup)
         try NetworkWrapperRunner(paths: paths, expectedOwnerUID: 0).run(reason: "repair", nonce: record.sessionNonce, environment: ["HYU_NONCE": record.sessionNonce, "HYU_SESSION_LEDGER": record.ledger.path.path], suppliedLedgerPath: record.ledger.path)
     }

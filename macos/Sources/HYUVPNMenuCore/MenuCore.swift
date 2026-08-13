@@ -129,6 +129,8 @@ public enum VPNStatusDecoder {
         guard let string = value as? String else { throw StatusProtocolError.invalid("\(name) must be an ISO-8601 timestamp") }
         guard string.hasSuffix("Z") || string.range(of: #"[+-][0-9]{2}:[0-9]{2}$"#, options: .regularExpression) != nil else { throw StatusProtocolError.invalid("\(name) must be timezone-aware") }
         let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = formatter.date(from: string) { return parsed }
         formatter.formatOptions = [.withInternetDateTime]
         if let parsed = formatter.date(from: string) { return parsed }
         throw StatusProtocolError.invalid("\(name) must be an ISO-8601 timestamp")
@@ -161,7 +163,7 @@ public struct VPNStatusFileReader {
     }
 }
 
-private enum StrictTopLevelJSON {
+enum StrictTopLevelJSON {
     static func rejectDuplicateTopLevelKeys(in data: Data, malformedMessage: String, duplicateMessagePrefix: String) throws {
         guard let raw = String(data: data, encoding: .utf8) else { throw StatusProtocolError.invalid(malformedMessage) }
         let keys = try topLevelObjectKeys(in: raw, malformedMessage: malformedMessage)
@@ -332,29 +334,6 @@ public enum VPNControlCommand: Equatable, Sendable {
     case disconnect
     case reconnect
     case setAutomaticReconnect(Bool)
-}
-
-public struct ProcessLaunchRequest: Equatable, Sendable {
-    public let executablePath: String
-    public let arguments: [String]
-    public let usesShell: Bool
-    public init(executablePath: String, arguments: [String], usesShell: Bool) { self.executablePath = executablePath; self.arguments = arguments; self.usesShell = usesShell }
-}
-
-public struct VPNControlClient: Sendable {
-    public static let defaultExecutablePath = "/Library/Application Support/HYU VPN/bin/hyu-vpn-control"
-    public let executablePath: String
-    public init(executablePath: String = defaultExecutablePath) { self.executablePath = executablePath }
-    public func request(for command: VPNControlCommand) -> ProcessLaunchRequest {
-        let argument: String
-        switch command {
-        case .connect: argument = "connect"
-        case .disconnect: argument = "disconnect"
-        case .reconnect: argument = "reconnect"
-        case .setAutomaticReconnect(let enabled): argument = enabled ? "automatic-on" : "automatic-off"
-        }
-        return ProcessLaunchRequest(executablePath: executablePath, arguments: [argument], usesShell: false)
-    }
 }
 
 public enum StatusReadPurpose: Equatable, Sendable { case sanitizedStatusOnly }
@@ -543,299 +522,79 @@ public enum MenuModel {
     }
 }
 
-public enum ControlProcessOutcome: Equatable, Sendable {
-    case success(exitCode: Int32, stdout: String, stderr: String, stdoutOverflowed: Bool)
-    case failure(ControlFailure)
-}
-public enum ControlFailure: Equatable, Sendable { case timeout, launchFailed, insecureExecutable }
-public protocol PipeCreating: AnyObject, Sendable { func makePipe(_ fds: inout [Int32]) -> Int32; func close(_ fd: Int32) }
-public final class SystemPipeFactory: PipeCreating, @unchecked Sendable {
-    public init() {}
-    public func makePipe(_ fds: inout [Int32]) -> Int32 { pipe(&fds) }
-    public func close(_ fd: Int32) { Darwin.close(fd) }
-}
-public protocol ChildProcessWaiting: AnyObject, Sendable { func wait(pid: pid_t, status: inout Int32, options: Int32) -> pid_t }
-public final class SystemChildProcessWaiter: ChildProcessWaiting, @unchecked Sendable {
-    public init() {}
-    public func wait(pid: pid_t, status: inout Int32, options: Int32) -> pid_t { waitpid(pid, &status, options) }
-}
-protocol SpawnSetupManaging: AnyObject, Sendable {
-    func setup(actions: inout posix_spawn_file_actions_t?, attrs: inout posix_spawnattr_t?, stdoutPipe: [Int32], stderrPipe: [Int32]) -> Int32
-    func spawn(pid: inout pid_t, path: String, actions: inout posix_spawn_file_actions_t?, attrs: inout posix_spawnattr_t?, argv: inout [UnsafeMutablePointer<CChar>?], env: inout [UnsafeMutablePointer<CChar>?]) -> Int32
-}
-final class SystemSpawnSetupManager: SpawnSetupManaging, @unchecked Sendable {
-    init() {}
-    func setup(actions: inout posix_spawn_file_actions_t?, attrs: inout posix_spawnattr_t?, stdoutPipe: [Int32], stderrPipe: [Int32]) -> Int32 {
-        let checks = [
-            posix_spawn_file_actions_adddup2(&actions, stdoutPipe[1], STDOUT_FILENO),
-            posix_spawn_file_actions_adddup2(&actions, stderrPipe[1], STDERR_FILENO),
-            posix_spawn_file_actions_addclose(&actions, stdoutPipe[0]),
-            posix_spawn_file_actions_addclose(&actions, stderrPipe[0]),
-            posix_spawnattr_setflags(&attrs, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
-        ]
-        return checks.first { $0 != 0 } ?? 0
-    }
-    func spawn(pid: inout pid_t, path: String, actions: inout posix_spawn_file_actions_t?, attrs: inout posix_spawnattr_t?, argv: inout [UnsafeMutablePointer<CChar>?], env: inout [UnsafeMutablePointer<CChar>?]) -> Int32 {
-        posix_spawn(&pid, path, &actions, &attrs, &argv, &env)
+
+public struct OTPMenuItemModel: Equatable, Sendable {
+    public let title: String
+    public let code: String?
+    public let isEnabled: Bool
+
+    public init(title: String, code: String?, isEnabled: Bool) {
+        self.title = title
+        self.code = code
+        self.isEnabled = isEnabled
     }
 }
+
+public enum OTPMenuPresenter {
+    public static func model(snapshot: TOTPDisplaySnapshot?) -> OTPMenuItemModel {
+        guard let snapshot else {
+            return OTPMenuItemModel(title: "OTP unavailable", code: nil, isEnabled: false)
+        }
+        return OTPMenuItemModel(
+            title: "OTP: \(snapshot.code) · \(snapshot.secondsRemaining)s — Copy",
+            code: snapshot.code,
+            isEnabled: true
+        )
+    }
+}
+
+public struct ServiceRefreshCoordinator: Equatable, Sendable {
+    private var nextGeneration: Int = 0
+    private var activeGeneration: Int?
+    private var queuedReplacement = false
+
+    public init() {}
+
+    public mutating func begin(force: Bool) -> Int? {
+        if activeGeneration != nil {
+            if force {
+                queuedReplacement = true
+            }
+            return nil
+        }
+        nextGeneration += 1
+        activeGeneration = nextGeneration
+        return nextGeneration
+    }
+
+    public func shouldApply(generation: Int) -> Bool {
+        activeGeneration == generation && !queuedReplacement
+    }
+
+    public func shouldContinue(generation: Int) -> Bool {
+        activeGeneration == generation && !queuedReplacement
+    }
+
+    public mutating func finish(generation: Int) -> Int? {
+        guard activeGeneration == generation else { return nil }
+        activeGeneration = nil
+        guard queuedReplacement else { return nil }
+        queuedReplacement = false
+        nextGeneration += 1
+        activeGeneration = nextGeneration
+        return nextGeneration
+    }
+}
+
 public enum ControlStatus: Equatable, Sendable { case ok, failed, timeout }
-public struct ControlResult: Equatable, Sendable { public let status: ControlStatus; public let errorCode: String?; public init(status: ControlStatus, errorCode: String?) { self.status = status; self.errorCode = errorCode } }
-public protocol ControlProcessRunning: AnyObject { func run(_ request: ProcessLaunchRequest, timeout: TimeInterval, maxOutputBytes: Int) throws -> ControlProcessOutcome }
+public struct ControlResult: Equatable, Sendable {
+    public let status: ControlStatus
+    public let errorCode: String?
 
-public struct SecureVPNControlClient: @unchecked Sendable {
-    public static let defaultExecutablePath = "/Library/Application Support/HYU VPN/bin/hyu-vpn-control"
-    public let executablePath: String
-    private let metadata: ExecutableMetadataProviding
-    private let runner: ControlProcessRunning
-    public init(executablePath: String = defaultExecutablePath, metadata: ExecutableMetadataProviding = SystemFileMetadataProvider(), runner: ControlProcessRunning = SystemControlProcessRunner()) {
-        self.executablePath = executablePath; self.metadata = metadata; self.runner = runner
-    }
-    public func request(for command: VPNControlCommand) -> ProcessLaunchRequest { VPNControlClient(executablePath: executablePath).request(for: command) }
-    public func run(_ command: VPNControlCommand, timeout: TimeInterval = 3, maxOutputBytes: Int = 2048) throws -> ControlResult {
-        try validateExecutable()
-        let outcome = try runner.run(request(for: command), timeout: timeout, maxOutputBytes: maxOutputBytes)
-        switch outcome {
-        case .success(let exitCode, let stdout, _, let stdoutOverflowed):
-            if exitCode == 0 { return ControlResult(status: .ok, errorCode: nil) }
-            guard !stdoutOverflowed else { return ControlResult(status: .failed, errorCode: "CONTROL_EXIT_\(exitCode)") }
-            if let normalized = ControlCommandOutput.normalizeFailure(exitCode: exitCode, stdout: stdout) {
-                return ControlResult(status: .failed, errorCode: normalized)
-            }
-            return ControlResult(status: .failed, errorCode: "CONTROL_EXIT_\(exitCode)")
-        case .failure(.timeout): return ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT")
-        case .failure(.launchFailed): return ControlResult(status: .failed, errorCode: "CONTROL_LAUNCH_FAILED")
-        case .failure(.insecureExecutable): throw StatusProtocolError.invalid("insecure control executable")
-        }
-    }
-    private func validateExecutable() throws {
-        let executable = try metadata.metadata(for: executablePath)
-        guard executable.ownerUID == 0, !executable.isSymlink, executable.isRegularFile, executable.isExecutable, (executable.mode & 0o022) == 0 else { throw StatusProtocolError.invalid("insecure control executable") }
-        var path = URL(fileURLWithPath: executablePath).deletingLastPathComponent()
-        while path.path != "/" {
-            let parent = try metadata.metadata(for: path.path)
-            guard parent.ownerUID == 0, !parent.isSymlink, (parent.mode & 0o022) == 0 else { throw StatusProtocolError.invalid("insecure control parent") }
-            path.deleteLastPathComponent()
-        }
+    public init(status: ControlStatus, errorCode: String?) {
+        self.status = status
+        self.errorCode = errorCode
     }
 }
-
-public final class SystemControlProcessRunner: ControlProcessRunning, @unchecked Sendable {
-    private let pipeFactory: PipeCreating
-    private let waiter: ChildProcessWaiting
-    private let spawnSetup: SpawnSetupManaging
-    public convenience init(pipeFactory: PipeCreating = SystemPipeFactory(), waiter: ChildProcessWaiting = SystemChildProcessWaiter()) {
-        self.init(pipeFactory: pipeFactory, waiter: waiter, spawnSetup: SystemSpawnSetupManager())
-    }
-    init(pipeFactory: PipeCreating = SystemPipeFactory(), waiter: ChildProcessWaiting = SystemChildProcessWaiter(), spawnSetup: SpawnSetupManaging) {
-        self.pipeFactory = pipeFactory
-        self.waiter = waiter
-        self.spawnSetup = spawnSetup
-    }
-    public static func fixedEnvironment() -> [String] { ["PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"] }
-
-    public func run(_ request: ProcessLaunchRequest, timeout: TimeInterval, maxOutputBytes: Int) throws -> ControlProcessOutcome {
-        var stdoutPipe = [Int32](repeating: -1, count: 2)
-        var stderrPipe = [Int32](repeating: -1, count: 2)
-        guard pipeFactory.makePipe(&stdoutPipe) == 0 else { return .failure(.launchFailed) }
-        guard setCloseOnExec(stdoutPipe) else { closeAll(&stdoutPipe); return .failure(.launchFailed) }
-        guard pipeFactory.makePipe(&stderrPipe) == 0 else { closeAll(&stdoutPipe); return .failure(.launchFailed) }
-        guard setCloseOnExec(stderrPipe) else { closeAll(&stdoutPipe); closeAll(&stderrPipe); return .failure(.launchFailed) }
-        defer { closeAll(&stdoutPipe); closeAll(&stderrPipe) }
-
-        var actions: posix_spawn_file_actions_t?
-        var attrs: posix_spawnattr_t?
-        var actionsInitialized = false
-        var attrsInitialized = false
-        guard posix_spawn_file_actions_init(&actions) == 0 else { return .failure(.launchFailed) }
-        actionsInitialized = true
-        defer { if actionsInitialized { posix_spawn_file_actions_destroy(&actions) } }
-        guard posix_spawnattr_init(&attrs) == 0 else { return .failure(.launchFailed) }
-        attrsInitialized = true
-        defer { if attrsInitialized { posix_spawnattr_destroy(&attrs) } }
-        guard spawnSetup.setup(actions: &actions, attrs: &attrs, stdoutPipe: stdoutPipe, stderrPipe: stderrPipe) == 0 else { return .failure(.launchFailed) }
-
-        let argvStrings = [request.executablePath] + request.arguments
-        var argv = argvStrings.map { strdup($0) }
-        argv.append(nil)
-        defer { for pointer in argv where pointer != nil { free(pointer) } }
-        var env = Self.fixedEnvironment().map { strdup($0) }
-        env.append(nil)
-        defer { for pointer in env where pointer != nil { free(pointer) } }
-        var pid = pid_t(0)
-        let spawnResult = spawnSetup.spawn(pid: &pid, path: request.executablePath, actions: &actions, attrs: &attrs, argv: &argv, env: &env)
-        closeDescriptor(&stdoutPipe[1])
-        closeDescriptor(&stderrPipe[1])
-        guard spawnResult == 0 else { return .failure(.launchFailed) }
-
-        let outRead = stdoutPipe[0]; stdoutPipe[0] = -1
-        let errRead = stderrPipe[0]; stderrPipe[0] = -1
-        let outputGroup = DispatchGroup()
-        let collectedStdout = CollectedPipeOutput()
-        let drainPipeFactory = pipeFactory
-        outputGroup.enter(); DispatchQueue.global(qos: .utility).async {
-            collectedStdout.store(collectDrain(outRead, closer: drainPipeFactory, maxBytes: maxOutputBytes))
-            outputGroup.leave()
-        }
-        outputGroup.enter(); DispatchQueue.global(qos: .utility).async { discardDrain(errRead, closer: drainPipeFactory); outputGroup.leave() }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        var status: Int32 = 0
-        while Date() < deadline {
-            let waited = waiter.wait(pid: pid, status: &status, options: WNOHANG)
-            if waited == pid {
-                if outputGroup.wait(timeout: .now() + 0.25) == .success, !processGroupExists(pid) { return .success(exitCode: exitCode(from: status), stdout: collectedStdout.stringValue, stderr: "", stdoutOverflowed: collectedStdout.overflowed) }
-                cleanupProcessGroup(pid, outputGroup: outputGroup)
-                return .failure(.timeout)
-            }
-            if waited == -1 && errno == ECHILD {
-                cleanupProcessGroup(pid, outputGroup: outputGroup)
-                return .failure(.launchFailed)
-            }
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-
-        cleanupProcessGroup(pid, outputGroup: outputGroup)
-        return .failure(.timeout)
-    }
-
-    private func closeAll(_ fds: inout [Int32]) { for index in fds.indices { closeDescriptor(&fds[index]) } }
-    private func closeDescriptor(_ fd: inout Int32) { if fd >= 0 { pipeFactory.close(fd); fd = -1 } }
-    private func cleanupProcessGroup(_ pid: pid_t, outputGroup: DispatchGroup) {
-        kill(-pid, SIGTERM)
-        boundedReap(pid, until: Date().addingTimeInterval(0.5))
-        let pipesClosedAfterTerm = outputGroup.wait(timeout: .now() + 0.25) == .success
-        if !pipesClosedAfterTerm || processGroupExists(pid) { kill(-pid, SIGKILL) }
-        boundedReap(pid, until: Date().addingTimeInterval(0.5))
-        _ = outputGroup.wait(timeout: .now() + 1)
-    }
-
-    private func boundedReap(_ pid: pid_t, until deadline: Date) {
-        var status: Int32 = 0
-        while Date() < deadline {
-            let waited = waiter.wait(pid: pid, status: &status, options: WNOHANG)
-            if waited == pid || (waited == -1 && errno == ECHILD) { return }
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-    }
-}
-
-private func setCloseOnExec(_ fds: [Int32]) -> Bool {
-    for fd in fds where fd >= 0 { guard fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 else { return false } }
-    return true
-}
-
-private func processGroupExists(_ pid: pid_t) -> Bool {
-    if kill(-pid, 0) == 0 { return true }
-    return errno == EPERM
-}
-
-private func discardDrain(_ fd: Int32, closer: PipeCreating) {
-    var buffer = [UInt8](repeating: 0, count: 8192)
-    while true {
-        let count = read(fd, &buffer, buffer.count)
-        if count <= 0 { closer.close(fd); return }
-    }
-}
-
-private func collectDrain(_ fd: Int32, closer: PipeCreating, maxBytes: Int) -> (data: Data, overflowed: Bool) {
-    var collected = Data()
-    let bound = max(0, maxBytes)
-    var overflowed = false
-    var buffer = [UInt8](repeating: 0, count: 8192)
-    while true {
-        let count = read(fd, &buffer, buffer.count)
-        if count <= 0 {
-            closer.close(fd)
-            return (collected, overflowed)
-        }
-        let remaining = max(0, bound - collected.count)
-        if remaining > 0 {
-            collected.append(buffer, count: min(remaining, count))
-        }
-        if count > remaining {
-            overflowed = true
-        }
-    }
-}
-
-private final class CollectedPipeOutput: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
-    private var didOverflow = false
-
-    var stringValue: String {
-        lock.lock()
-        defer { lock.unlock() }
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    var overflowed: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return didOverflow
-    }
-
-    func store(_ value: (data: Data, overflowed: Bool)) {
-        lock.lock()
-        data = value.data
-        didOverflow = value.overflowed
-        lock.unlock()
-    }
-}
-
-private func exitCode(from status: Int32) -> Int32 {
-    let signal = status & 0x7f
-    if signal == 0 { return (status >> 8) & 0xff }
-    if signal != 0x7f { return 128 + signal }
-    return status
-}
-
-private enum ControlCommandOutput {
-    private static let allowedKeys: Set<String> = ["schema_version", "ok", "error_code"]
-    private static let allowedFailureCodes: Set<String> = ["BAD_REQUEST", "INTERNAL_ERROR", "REPAIR_REQUIRED", "CONTROL_UNAVAILABLE"]
-
-    static func normalizeFailure(exitCode: Int32, stdout: String) -> String? {
-        guard exitCode != 0 else { return nil }
-        guard let decoded = try? decode(stdout), decoded.ok == false else { return nil }
-        return decoded.errorCode
-    }
-
-    private static func decode(_ raw: String) throws -> (ok: Bool, errorCode: String?) {
-        let data = Data(raw.utf8)
-        try StrictTopLevelJSON.rejectDuplicateTopLevelKeys(in: data, malformedMessage: "malformed control output", duplicateMessagePrefix: "duplicate control output field: ")
-        let typedSchema = try StrictTopLevelJSON.decodeRequiredIntegerToken(in: data, key: "schema_version", invalidMessage: "control output schema_version must be an integer")
-        let object = try JSONSerialization.jsonObject(with: data, options: [])
-        guard let document = object as? [String: Any] else { throw StatusProtocolError.invalid("control output must be an object") }
-        let keys = Set(document.keys)
-        for key in keys.subtracting(allowedKeys).sorted() {
-            throw StatusProtocolError.invalid("unknown control output field: \(key)")
-        }
-        for key in allowedKeys.subtracting(keys).sorted() {
-            throw StatusProtocolError.invalid("missing control output field: \(key)")
-        }
-        guard typedSchema == 1 else { throw StatusProtocolError.invalid("unsupported control output schema_version") }
-        guard let okValue = document["ok"] as? NSNumber, CFGetTypeID(okValue) == CFBooleanGetTypeID() else {
-            throw StatusProtocolError.invalid("control output ok must be a bool")
-        }
-        let ok = okValue.boolValue
-        let errorCode = try optionalString("error_code", document["error_code"])
-        if ok {
-            guard errorCode == nil else { throw StatusProtocolError.invalid("successful control output must not include an error_code") }
-        } else {
-            guard let errorCode, allowedFailureCodes.contains(errorCode) else {
-                throw StatusProtocolError.invalid("control output error_code is not allowlisted")
-            }
-        }
-        return (ok, errorCode)
-    }
-
-    private static func optionalString(_ name: String, _ value: Any?) throws -> String? {
-        if value == nil || value is NSNull { return nil }
-        guard let string = value as? String else { throw StatusProtocolError.invalid("\(name) must be a string") }
-        return string
-    }
-}
-
 
 public protocol StatusValueSink: AnyObject { func applyStatusValue(_ status: VPNStatus?) }

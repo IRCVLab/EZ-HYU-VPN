@@ -107,6 +107,8 @@ fn session_expiry_stops_owned_generation_and_retries_after_exit() {
     engine.handle(EngineEvent::NetworkReady(wifi("en0")));
     engine.handle(EngineEvent::ConnectorConnected {
         generation: ConnectionGeneration(1),
+        tunnel_interface: None,
+        hip_succeeded: false,
     });
 
     assert_eq!(
@@ -147,6 +149,8 @@ fn stale_generation_events_cannot_change_current_connection() {
         engine
             .handle(EngineEvent::ConnectorConnected {
                 generation: ConnectionGeneration(1),
+                tunnel_interface: None,
+                hip_succeeded: false,
             })
             .is_empty()
     );
@@ -166,7 +170,11 @@ fn changed_physical_network_restarts_an_active_generation() {
             _ => None,
         })
         .unwrap();
-    engine.handle(EngineEvent::ConnectorConnected { generation });
+    engine.handle(EngineEvent::ConnectorConnected {
+        generation,
+        tunnel_interface: None,
+        hip_succeeded: false,
+    });
 
     let changed = engine.handle(EngineEvent::NetworkReady(second));
     assert_eq!(
@@ -186,4 +194,28 @@ fn changed_physical_network_restarts_an_active_generation() {
             EngineAction::StartConnection { .. }
         ]
     ));
+}
+
+#[test]
+fn connection_timeout_enters_backoff_and_schedules_retry() {
+    let mut engine = Engine::new(true);
+    let started = engine.handle(EngineEvent::NetworkReady(NetworkIdentity::new(
+        "en0",
+        "192.0.2.1",
+    )));
+    let generation = started
+        .iter()
+        .find_map(|action| match action {
+            EngineAction::StartConnection { generation } => Some(*generation),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        engine.handle(EngineEvent::ConnectTimedOut { generation }),
+        vec![
+            EngineAction::PublishState(VpnState::Backoff),
+            EngineAction::ScheduleRetry { delay_seconds: 10 },
+        ]
+    );
 }
