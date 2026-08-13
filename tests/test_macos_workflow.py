@@ -1,10 +1,19 @@
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import tempfile
 import unittest
+from typing import Optional
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "macos.yml"
 RELEASE = ROOT / ".github" / "workflows" / "release.yml"
 PACKAGE = ROOT / "scripts" / "package-macos.sh"
+DMG_ACCEPTANCE = ROOT / "scripts" / "macos-dmg-acceptance.sh"
 README = ROOT / "README.md"
 
 
@@ -80,6 +89,276 @@ class MacOSWorkflowTests(unittest.TestCase):
         self.assertIn('/opt/homebrew/bin/brew', text)
         self.assertIn('/usr/local/bin/brew', text)
         self.assertNotIn('BREW="${BREW:-', text)
+
+    def test_macos_workflow_builds_and_tests_rust_backend(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("cargo fmt --all -- --check", text)
+        self.assertIn("cargo build --package hyu-vpn-platform-macos --package hyu-vpn-macos-service --package hyu-vpn-hip --release", text)
+        self.assertIn("cargo test --package hyu-vpn-platform-macos --package hyu-vpn-macos-service --package hyu-vpn-hip", text)
+        self.assertIn("cargo clippy --package hyu-vpn-platform-macos --package hyu-vpn-macos-service --package hyu-vpn-hip", text)
+        self.assertIn("hyu-vpn-platform-macos", text)
+        self.assertIn("hyu-vpn-macos-service", text)
+        self.assertIn("test -x target/release/hyu-vpn-macos-service", text)
+        self.assertIn('test -x "$mountpoint/hyu-vpn-macos-service"', text)
+        self.assertIn('lipo -archs "$mountpoint/hyu-vpn-macos-service"', text)
+        self.assertIn('codesign --verify --strict "$mountpoint/hyu-vpn-macos-service"', text)
+        self.assertIn('hyu-vpn-native-client', text)
+        self.assertIn("find \"$mountpoint\"", text)
+        self.assertIn("while IFS= read -r -d '' candidate", text)
+        self.assertIn('src/hyu_vpn', text)
+        self.assertIn('/usr/bin/py', text)
+        self.assertIn('thon3', text)
+        self.assertIn('PYTHON3_PATH', text)
+
+
+    def test_macos_dmg_acceptance_script_is_read_only_and_bounded(self):
+        self.assertTrue(DMG_ACCEPTANCE.exists(), "Task 8 requires a reusable DMG acceptance script")
+        self.assertTrue(DMG_ACCEPTANCE.stat().st_mode & 0o111, "acceptance script must be executable")
+        text = DMG_ACCEPTANCE.read_text(encoding="utf-8")
+
+        for required in [
+            "set -euo pipefail",
+            "hdiutil verify",
+            "hdiutil attach -readonly -nobrowse -mountpoint",
+            "hdiutil detach",
+            "mktemp -d /private/tmp/hyu-vpn-dmg-acceptance.XXXXXX",
+            "trap cleanup EXIT HUP INT TERM",
+            "codesign --verify --deep --strict",
+            "lipo -archs",
+            "manifest.json",
+            "shasum -a 256",
+            "stat -f",
+            "ProgramArguments",
+            "/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service",
+            "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+            "Install HYU VPN.app/Contents/MacOS/HYUVPNInstallerApp",
+            "hyu-vpn-macos-service",
+            "com.hyu.vpn.helper",
+            "runtime/gp-hip-report",
+            "hyu-vpn-service",
+            "hyu-vpn-control",
+            "hyu-vpn-connect",
+            "src/hyu_vpn",
+            "/usr/bin/python3",
+            "PYTHON3_PATH",
+        ]:
+            with self.subTest(required=required):
+                self.assertIn(required, text)
+
+        for forbidden in [
+            "open \"$mountpoint/Install HYU VPN.app\"",
+            "open $mountpoint/Install",
+            "launchctl bootstrap",
+            "launchctl bootout",
+            "launchctl kickstart",
+            "sudo ",
+            "networksetup",
+            "scutil --nc",
+            "route add",
+            "ifconfig",
+        ]:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+
+    def test_macos_dmg_acceptance_script_checks_exact_manifested_payload(self):
+        self.assertTrue(DMG_ACCEPTANCE.exists(), "Task 8 requires a reusable DMG acceptance script")
+        text = DMG_ACCEPTANCE.read_text(encoding="utf-8")
+        for rel in [
+            "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+            "Install HYU VPN.app/Contents/MacOS/HYUVPNInstallerApp",
+            "hyu-vpn-macos-service",
+            "com.hyu.vpn.helper",
+            "runtime/gp-hip-report",
+            "launchd/com.hyu.vpn.service.plist.in",
+        ]:
+            with self.subTest(rel=rel):
+                self.assertIn(rel, text)
+        self.assertIn('"sha256"', text)
+        self.assertIn('"size"', text)
+        self.assertIn('"mode"', text)
+        self.assertIn('actual_manifest != expected_manifest', text)
+        self.assertIn('expected_files != actual_files', text)
+
+
+    def _write_dmg_acceptance_fixture(self, root: Path, *, legacy_path: Optional[str] = None, forbidden_content: Optional[bytes] = None, large_file_size: Optional[int] = None) -> None:
+        required_files = {
+            "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp": b"menu",
+            "Install HYU VPN.app/Contents/MacOS/HYUVPNInstallerApp": b"installer",
+            "hyu-vpn-macos-service": b"service",
+            "com.hyu.vpn.helper": b"helper",
+            "runtime/gp-hip-report": b"hip",
+            "launchd/com.hyu.vpn.service.plist.in": b'<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>ProgramArguments</key><array><string>@SERVICE_PATH@</string></array></dict></plist>\n',
+        }
+        if legacy_path is not None:
+            required_files[legacy_path] = b"legacy binary path without content token"
+        if forbidden_content is not None:
+            required_files["README-lab.md"] = forbidden_content
+        if large_file_size is not None:
+            required_files["large-safe-text.txt"] = b"A" * large_file_size
+        for rel, data in required_files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            if rel in {
+                "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+                "Install HYU VPN.app/Contents/MacOS/HYUVPNInstallerApp",
+                "hyu-vpn-macos-service",
+                "com.hyu.vpn.helper",
+                "runtime/gp-hip-report",
+            }:
+                path.chmod(0o755)
+            else:
+                path.chmod(0o644)
+        manifest = {"schema": 1, "name": "HYU VPN", "manifest": "manifest.json", "files": {}}
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and not path.is_symlink():
+                rel = path.relative_to(root).as_posix()
+                data = path.read_bytes()
+                manifest["files"][rel] = {
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size": len(data),
+                    "mode": f"{stat.S_IMODE(path.stat().st_mode):04o}",
+                }
+        (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+    def _write_fake_dmg_tools(self, bin_dir: Path) -> None:
+        hdiutil = bin_dir / "hdiutil"
+        hdiutil.write_text(
+            "#!/bin/bash\n"
+            "set -euo pipefail\n"
+            "case \"${1:-}\" in\n"
+            "  verify) exit 0 ;;\n"
+            "  attach)\n"
+            "    mount=\"\"\n"
+            "    while [[ $# -gt 0 ]]; do\n"
+            "      if [[ \"$1\" = -mountpoint ]]; then shift; mount=\"$1\"; fi\n"
+            "      shift || true\n"
+            "    done\n"
+            "    python3 - \"$HYU_TEST_MOUNT_SOURCE\" \"$mount\" <<'PY'\n"
+            "import os, shutil, sys\n"
+            "src, dst = sys.argv[1], sys.argv[2]\n"
+            "shutil.copytree(src, dst, dirs_exist_ok=True, symlinks=True)\n"
+            "special = os.environ.get('HYU_TEST_SPECIAL')\n"
+            "if special == 'symlink':\n"
+            "    os.symlink('/tmp/legacy-target', os.path.join(dst, 'unmanifested-link'))\n"
+            "elif special == 'fifo':\n"
+            "    os.mkfifo(os.path.join(dst, 'unmanifested-fifo'))\n"
+            "PY\n"
+            "    exit 0 ;;\n"
+            "  detach)\n"
+            "    if [[ \"${HYU_TEST_DETACH_FAIL:-}\" = 1 ]]; then echo 'simulated busy mount with /Users/example/password-secret' >&2; exit 88; fi\n"
+            "    find \"$2\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            "exit 64\n",
+            encoding="utf-8",
+        )
+        hdiutil.chmod(0o755)
+        for name, body in {
+            "codesign": "#!/bin/bash\nexit 0\n",
+            "lipo": "#!/bin/bash\necho arm64\n",
+            "file": "#!/bin/bash\necho \"$1: ASCII text\"\n",
+        }.items():
+            path = bin_dir / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o755)
+
+    def _run_dmg_acceptance_fixture(self, fixture: Path, *, special: Optional[str] = None, detach_fail: bool = False, max_file_bytes: Optional[int] = None) -> subprocess.CompletedProcess[str]:
+        bin_dir = fixture.parent / "fake-bin"
+        bin_dir.mkdir(exist_ok=True)
+        self._write_fake_dmg_tools(bin_dir)
+        dmg = fixture.parent / "fixture.dmg"
+        dmg.write_text("fake dmg", encoding="utf-8")
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env["HYU_TEST_MOUNT_SOURCE"] = str(fixture)
+        if special is not None:
+            env["HYU_TEST_SPECIAL"] = special
+        if detach_fail:
+            env["HYU_TEST_DETACH_FAIL"] = "1"
+        if max_file_bytes is not None:
+            env["HYU_DMG_ACCEPTANCE_MAX_FILE_BYTES"] = str(max_file_bytes)
+        return subprocess.run([str(DMG_ACCEPTANCE), str(dmg)], text=True, capture_output=True, env=env, timeout=20)
+
+    def test_macos_dmg_acceptance_rejects_unmanifested_symlink_or_special_entries(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as td:
+            fixture = Path(td) / "payload"
+            fixture.mkdir()
+            self._write_dmg_acceptance_fixture(fixture)
+            for special in ("symlink", "fifo"):
+                with self.subTest(special=special):
+                    result = self._run_dmg_acceptance_fixture(fixture, special=special)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("special-entry", result.stderr)
+                    self.assertNotIn("legacy-target", result.stderr)
+
+    def test_macos_dmg_acceptance_rejects_legacy_tokens_in_every_path_before_binary_exemption(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as td:
+            fixture = Path(td) / "payload"
+            fixture.mkdir()
+            self._write_dmg_acceptance_fixture(fixture, legacy_path="HYU VPN.app/Contents/MacOS/hyu-vpn-control")
+            result = self._run_dmg_acceptance_fixture(fixture)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("forbidden-token:path", result.stderr)
+            self.assertIn("legacy-backend", result.stderr)
+
+    def test_macos_dmg_acceptance_preserves_primary_error_while_reporting_cleanup_failure(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as td:
+            fixture = Path(td) / "payload"
+            fixture.mkdir()
+            self._write_dmg_acceptance_fixture(fixture)
+            result = self._run_dmg_acceptance_fixture(fixture, special="symlink", detach_fail=True)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("special-entry", result.stderr)
+            self.assertIn("cleanup-failed:detach", result.stderr)
+            self.assertNotIn("password-secret", result.stderr)
+            self.assertNotIn("PASS", result.stdout)
+
+    def test_macos_dmg_acceptance_success_leaves_no_temp_acceptance_dirs(self):
+        before = {path.resolve(strict=False) for path in Path("/private/tmp").glob("hyu-vpn-dmg-acceptance.*")}
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as td:
+            fixture = Path(td) / "payload"
+            fixture.mkdir()
+            self._write_dmg_acceptance_fixture(fixture)
+            result = self._run_dmg_acceptance_fixture(fixture)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("PASS", result.stdout)
+        after = {path.resolve(strict=False) for path in Path("/private/tmp").glob("hyu-vpn-dmg-acceptance.*")}
+        new_paths = sorted(str(path) for path in after - before)
+        for path in new_paths:
+            shutil.rmtree(path, ignore_errors=True)
+        self.assertEqual(new_paths, [])
+
+    def test_macos_dmg_acceptance_requires_clean_detach_before_pass(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as td:
+            fixture = Path(td) / "payload"
+            fixture.mkdir()
+            self._write_dmg_acceptance_fixture(fixture)
+            result = self._run_dmg_acceptance_fixture(fixture, detach_fail=True)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("PASS", result.stdout)
+            self.assertIn("cleanup-failed:detach", result.stderr)
+            self.assertNotIn("password-secret", result.stderr)
+
+    def test_macos_dmg_acceptance_bounds_file_reads_and_sanitizes_forbidden_content(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as td:
+            fixture = Path(td) / "payload"
+            fixture.mkdir()
+            self._write_dmg_acceptance_fixture(fixture, forbidden_content=b"password=SECRET-RAW-LINE\n/usr/bin/python3\n")
+            result = self._run_dmg_acceptance_fixture(fixture)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("forbidden-token:content", result.stderr)
+            self.assertIn("python-runtime", result.stderr)
+            self.assertNotIn("SECRET-RAW-LINE", result.stdout + result.stderr)
+            self.assertNotIn("/usr/bin/python3", result.stdout + result.stderr)
+
+            fixture = Path(td) / "large-payload"
+            fixture.mkdir()
+            self._write_dmg_acceptance_fixture(fixture, large_file_size=64)
+            result = self._run_dmg_acceptance_fixture(fixture, max_file_bytes=32)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("size-limit:file", result.stderr)
 
     def test_readme_windows_uses_exact_three_field_credential_form(self):
         text = README.read_text(encoding="utf-8")

@@ -26,6 +26,14 @@ jobs:
           test "$(sw_vers -productVersion | cut -d. -f1)" = 26
       - name: Install pinned runtime formulas
         run: brew install openconnect oath-toolkit
+      - name: Validate Rust backend toolchain
+        run: |
+          cargo fmt --all -- --check
+          cargo build --package hyu-vpn-platform-macos --package hyu-vpn-macos-service --package hyu-vpn-hip --release
+          cargo test --package hyu-vpn-platform-macos --package hyu-vpn-macos-service --package hyu-vpn-hip
+          cargo clippy --package hyu-vpn-platform-macos --package hyu-vpn-macos-service --package hyu-vpn-hip
+          test -x target/release/hyu-vpn-macos-service
+          test -x target/release/hyu-vpn-hip
       - name: Swift package tests
         timeout-minutes: 10
         run: swift test --package-path macos --no-parallel </dev/null
@@ -55,7 +63,7 @@ jobs:
             target/macos-input/SOURCE-COMPLIANCE-BUNDLE.tar.gz | shasum -a 256 -c -
       - name: Build and validate macOS DMG
         run: |
-          version=0.2.0
+          version=0.2.2
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then version="${GITHUB_REF_NAME#v}"; fi
           VERSION="$version" \
           SOURCE_COMPLIANCE_BUNDLE="$GITHUB_WORKSPACE/target/macos-input/SOURCE-COMPLIANCE-BUNDLE.tar.gz" \
@@ -74,6 +82,20 @@ jobs:
           codesign --verify --deep --strict "$mountpoint/Install HYU VPN.app"
           test "$(lipo -archs "$mountpoint/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp")" = arm64
           test "$(lipo -archs "$mountpoint/com.hyu.vpn.helper")" = arm64
+          test -x "$mountpoint/hyu-vpn-macos-service"
+          test "$(lipo -archs "$mountpoint/hyu-vpn-macos-service")" = arm64
+          codesign --verify --strict "$mountpoint/hyu-vpn-macos-service"
+          test -x "$mountpoint/runtime/gp-hip-report"
+          test "$(lipo -archs "$mountpoint/runtime/gp-hip-report")" = arm64
+          codesign --verify --strict "$mountpoint/runtime/gp-hip-report"
+          while IFS= read -r -d '' candidate; do
+            case "$candidate" in
+              */SOURCE-COMPLIANCE-BUNDLE.tar.gz|*/HYU\ VPN.app/Contents/MacOS/*|*/Install\ HYU\ VPN.app/Contents/MacOS/*) continue ;;
+            esac
+            if file "$candidate" | grep -Eq 'text|JSON|XML|script|property list'; then
+              ! grep -E 'hyu-vpn-service|hyu-vpn-control|hyu-vpn-connect|hyu-vpn-native-client|src/hyu_vpn|/usr/bin/python3|/usr/bin/py|thon3|PYTHON3_PATH' "$candidate"
+            fi
+          done < <(find "$mountpoint" -type f -print0)
           test -f "$mountpoint/SOURCE-COMPLIANCE-BUNDLE.tar.gz"
           test -f "$mountpoint/FINAL-RUNTIME-BINDING.json"
       - uses: actions/upload-artifact@v4

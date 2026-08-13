@@ -1,4 +1,4 @@
-use hyu_vpn_protocol::VpnState;
+use hyu_vpn_protocol::{ErrorCode, VpnState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionGeneration(pub u64);
@@ -32,6 +32,7 @@ impl NetworkIdentity {
 pub enum EngineAction {
     PersistAutomaticReconnect(bool),
     PublishState(VpnState),
+    PublishError(ErrorCode),
     StartConnection { generation: ConnectionGeneration },
     StopConnection { generation: ConnectionGeneration },
     ScheduleRetry { delay_seconds: u64 },
@@ -47,11 +48,17 @@ pub enum EngineEvent {
     NetworkReady(NetworkIdentity),
     ConnectorConnected {
         generation: ConnectionGeneration,
+        tunnel_interface: Option<String>,
+        hip_succeeded: bool,
     },
     ConnectorExited {
         generation: ConnectionGeneration,
         return_code: i32,
         runtime_seconds: u64,
+    },
+    ConnectorError {
+        generation: ConnectionGeneration,
+        error_code: ErrorCode,
     },
     RetryElapsed,
     SessionExpired,
@@ -146,12 +153,18 @@ impl Engine {
                 self.network_unavailable()
             }
             EngineEvent::NetworkReady(identity) => self.network_ready(identity),
-            EngineEvent::ConnectorConnected { generation } => self.connector_connected(generation),
+            EngineEvent::ConnectorConnected { generation, .. } => {
+                self.connector_connected(generation)
+            }
             EngineEvent::ConnectorExited {
                 generation,
                 return_code,
                 runtime_seconds,
             } => self.connector_exited(generation, return_code, runtime_seconds),
+            EngineEvent::ConnectorError {
+                generation,
+                error_code,
+            } => self.connector_error(generation, error_code),
             EngineEvent::RetryElapsed => self.retry_elapsed(),
             EngineEvent::SessionExpired => self.session_expired(),
             EngineEvent::ConnectTimedOut { generation } => self.connector_exited(generation, 1, 0),
@@ -293,6 +306,20 @@ impl Engine {
             self.publish(VpnState::Backoff),
             EngineAction::ScheduleRetry { delay_seconds },
         ]
+    }
+
+    fn connector_error(
+        &mut self,
+        generation: ConnectionGeneration,
+        error_code: ErrorCode,
+    ) -> Vec<EngineAction> {
+        if self.active_generation != Some(generation) {
+            return Vec::new();
+        }
+        self.active_generation = None;
+        self.pending_retry_seconds = None;
+        self.reconnect_immediately_after_stop = false;
+        vec![EngineAction::PublishError(error_code)]
     }
 
     fn retry_elapsed(&mut self) -> Vec<EngineAction> {

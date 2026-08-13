@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.2.0',
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.2.2',
     [string]$OutputDirectory = '',
     [string]$OpenConnectArtifactZip = '',
     [string]$PatchedOpenConnectDirectory = '',

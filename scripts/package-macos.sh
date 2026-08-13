@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
-VERSION="${VERSION:-0.2.0}"
+VERSION="${VERSION:-0.2.2}"
 SOURCE_COMPLIANCE_BUNDLE="${SOURCE_COMPLIANCE_BUNDLE:-}"
 BUILD_ROOT="$(mktemp -d /private/tmp/hyu-vpn-macos-build.XXXXXX)"
 RELEASE_OUTPUT_ROOT="$(mktemp -d /private/tmp/hyu-vpn-macos-output.XXXXXX)"
@@ -71,6 +71,26 @@ for executable in \
   fi
 done
 
+cargo build --release --package hyu-vpn-macos-service --package hyu-vpn-hip
+SERVICE_BIN="$ROOT/target/release/hyu-vpn-macos-service"
+HIP_BIN="$ROOT/target/release/hyu-vpn-hip"
+if [[ ! -f "$SERVICE_BIN" || ! -x "$SERVICE_BIN" ]]; then
+  echo "package-macos: missing Rust service binary $SERVICE_BIN" >&2
+  exit 2
+fi
+if [[ ! -f "$HIP_BIN" || ! -x "$HIP_BIN" ]]; then
+  echo "package-macos: missing Rust HIP binary $HIP_BIN" >&2
+  exit 2
+fi
+if [[ "$(lipo -archs "$SERVICE_BIN")" != "arm64" ]]; then
+  echo "package-macos: service binary must be arm64" >&2
+  exit 2
+fi
+if [[ "$(lipo -archs "$HIP_BIN")" != "arm64" ]]; then
+  echo "package-macos: HIP binary must be arm64" >&2
+  exit 2
+fi
+
 "$ROOT/macos/Scripts/assemble-menu-app.sh" \
   "$RELEASE_BIN/HYUVPNMenuApp" "$BUILD_ROOT/menu" "$VERSION" >/dev/null
 "$ROOT/macos/Scripts/assemble-installer-app.sh" \
@@ -82,6 +102,8 @@ python3 "$ROOT/scripts/package-release.py" \
   --openconnect "$OPENCONNECT" \
   --oathtool "$OATHTOOL" \
   --vpnc-script "$VPNC_SCRIPT" \
+  --service-executable "$SERVICE_BIN" \
+  --hip-executable "$HIP_BIN" \
   --helper-executable "$RELEASE_BIN/hyu-vpn-privileged-helper" \
   --wrapperd-executable "$RELEASE_BIN/hyu-vpnc-wrapperd" \
   --menu-app "$BUILD_ROOT/menu/HYU VPN.app" \

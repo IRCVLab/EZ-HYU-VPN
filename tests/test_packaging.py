@@ -144,9 +144,8 @@ class PackagingTestCase(unittest.TestCase):
         (src / "Install HYU VPN.app" / "Contents" / "Resources").mkdir()
         (src / "Install HYU VPN.app" / "Contents" / "Resources" / "AppIcon.icns").write_bytes(b"installer icon")
         (src / "installer").mkdir()
-        (src / "README-lab.md").write_text("HYU VPN lab package requires /usr/bin/python3 before sudo.\n", encoding="utf-8")
-        for name in ["root-admin.sh", "manifest.py"]:
-            (src / "installer" / name).write_text(name, encoding="utf-8")
+        (src / "README-lab.md").write_text("HYU VPN lab package uses native GUI authorization before root commit.\n", encoding="utf-8")
+        (src / "installer" / "root-admin.sh").write_text("root-admin.sh", encoding="utf-8")
         runtime = src / "runtime"
         for rel in [
             "openconnect/bin/openconnect",
@@ -162,10 +161,8 @@ class PackagingTestCase(unittest.TestCase):
             path.write_text(rel, encoding="utf-8")
             path.chmod(0o755)
         for rel in [
-            "hyu-vpn-control", "hyu-vpn-service", "hyu-vpn-connect", "hyu-vpn-native-client", "com.hyu.vpn.helper",
-            "src/hyu_vpn/__init__.py", "src/hyu_vpn/connector.py", "src/hyu_vpn/control.py", "src/hyu_vpn/hip_cli.py",
-            "src/hyu_vpn/hip_contract.py", "src/hyu_vpn/hip_xml.py", "src/hyu_vpn/macos_posture.py",
-            "src/hyu_vpn/native_client.py", "src/hyu_vpn/network.py", "src/hyu_vpn/otp.py", "src/hyu_vpn/status.py", "src/hyu_vpn/supervisor.py",
+            "hyu-vpn-macos-service",
+            "com.hyu.vpn.helper",
         ]:
             path = src / rel
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,8 +232,8 @@ class NativeAppAssemblyTests(PackagingTestCase):
         feed = json.loads((REPO / "update.json").read_text(encoding="utf-8"))
         self.assertEqual(set(feed), {"schema_version", "version", "release_url"})
         self.assertEqual(feed["schema_version"], 1)
-        self.assertEqual(feed["version"], "0.2.0")
-        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.2.0")
+        self.assertEqual(feed["version"], "0.2.2")
+        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.2.2")
 
 
 class FakeOtoolRunner:
@@ -420,7 +417,7 @@ class NoticeTests(PackagingTestCase):
         self.assertNotIn("starts idle", text)
         self.assertIn("native GUI distribution", text)
         self.assertIn("auto-reconnect enabled", text)
-        self.assertIn("/usr/bin/python3", text)
+        self.assertNotIn("hyu-vpn-native-client", text)
         self.assertIn("FINAL-RUNTIME-BINDING.json", text)
         self.assertIn("canonical pre-rewrite/pre-sign", text)
 
@@ -477,8 +474,8 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertIn("do shell script (item 1 of argv) with administrator privileges", core_source)
         self.assertIn("RootAdminAuthorizationScript.makeOSAScriptArgv", source)
         self.assertIn("root-admin.sh", source)
-        self.assertIn("--verify-manifest", source)
-        self.assertIn("--stage-user-payload", source)
+        self.assertIn("NativePayloadManifest.verify", source)
+        self.assertIn("NativePayloadManifest.stage", source)
         self.assertIn("EncryptedCredentialStore", source)
         self.assertIn("InstallerCredentialBootstrapper", source)
         self.assertIn("RootAdminInvocation.makeInstallArgv", source)
@@ -714,8 +711,8 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertEqual(result.metadata["architecture"], "arm64")
         self.assertFalse(result.metadata["notarized"])
         self.assertEqual(result.metadata["signing"], "ad-hoc")
-        self.assertEqual(result.metadata["prerequisites"]["python3"], "/usr/bin/python3")
-        self.assertEqual(result.metadata["python_runtime_contract"], "fixed-system-python-prerequisite")
+        self.assertNotIn("prerequisites", result.metadata)
+        self.assertNotIn("python_runtime_contract", result.metadata)
         self.assertIn("bundle exact GPL/LGPL source archives", result.metadata["release_blockers"][0])
         self.assertEqual(result.manifest["schema"], 1)
         self.assertEqual(result.manifest_path.name, "manifest.json")
@@ -730,7 +727,6 @@ class ReleaseBuilderTests(PackagingTestCase):
             "Install HYU VPN.app/Contents/Resources/AppIcon.icns",
             "README-lab.md",
             "installer/root-admin.sh",
-            "installer/manifest.py",
             "runtime/openconnect/bin/openconnect",
             "runtime/oathtool",
             "runtime/openconnect/lib/libopenconnect.5.dylib",
@@ -738,22 +734,7 @@ class ReleaseBuilderTests(PackagingTestCase):
             "runtime/vpnc/vpnc-script",
             "runtime/vpnc/hyu-vpnc-wrapper",
             "runtime/vpnc/hyu-vpnc-wrapperd",
-            "hyu-vpn-service",
-            "hyu-vpn-control",
-            "hyu-vpn-connect",
-            "hyu-vpn-native-client",
-            "src/hyu_vpn/__init__.py",
-            "src/hyu_vpn/connector.py",
-            "src/hyu_vpn/control.py",
-            "src/hyu_vpn/hip_cli.py",
-            "src/hyu_vpn/hip_contract.py",
-            "src/hyu_vpn/hip_xml.py",
-            "src/hyu_vpn/macos_posture.py",
-            "src/hyu_vpn/native_client.py",
-            "src/hyu_vpn/network.py",
-            "src/hyu_vpn/otp.py",
-            "src/hyu_vpn/status.py",
-            "src/hyu_vpn/supervisor.py",
+            "hyu-vpn-macos-service",
             "com.hyu.vpn.helper",
             "launchd/com.hyu.vpn.service.plist.in",
             "THIRD_PARTY_NOTICES.txt",
@@ -784,6 +765,27 @@ class ReleaseBuilderTests(PackagingTestCase):
         self.assertNotIn("payload-manifest.json", result.manifest["files"])
 
 
+
+    def test_macos_release_payload_contains_rust_service_and_no_python_backend(self):
+        src = self.make_payload_source()
+        result = ReleaseBuilder(ReleaseToolchain(fake=True)).build(
+            source_payload=src,
+            build_root=self.build_root,
+            output_root=self.output_root,
+            version="0.1.0-test",
+            arch="arm64",
+        )
+
+        files = set(result.manifest["files"])
+        self.assertIn("hyu-vpn-macos-service", files)
+        for forbidden in [
+            "hyu-vpn-service",
+            "hyu-vpn-control",
+            "hyu-vpn-connect",
+        ]:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, files)
+        self.assertFalse(any(rel == "src/hyu_vpn" or rel.startswith("src/hyu_vpn/") for rel in files))
 
     def test_release_payload_exposes_native_installer_app_and_no_terminal_launchers(self):
         src = self.make_payload_source()
@@ -891,13 +893,15 @@ class ReleaseBuilderTests(PackagingTestCase):
         oc = self.root / "runtime-inputs/openconnect"
         oath = self.root / "runtime-inputs/oathtool"
         vpnc = self.root / "runtime-inputs/vpnc-script"
+        service = self.root / "build-products/hyu-vpn-macos-service"
+        hip = self.root / "build-products/hyu-vpn-hip"
         helper = self.root / "build-products/com.hyu.vpn.helper"
         wrapperd = self.root / "build-products/hyu-vpnc-wrapperd"
         app = self.root / "build-products/HYU VPN.app"
         installer_app = self.root / "build-products/Install HYU VPN.app"
         outside = self.root / "outside-secret.txt"
         outside.write_text("secret", encoding="utf-8")
-        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
+        for path in [oc, oath, vpnc, service, hip, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(path.name, encoding="utf-8")
             path.chmod(0o755)
@@ -906,7 +910,7 @@ class ReleaseBuilderTests(PackagingTestCase):
         outputs = {str(oc.resolve()): f"{oc}:\n", str(oath.resolve()): f"{oath}:\n"}
         with self.assertRaisesRegex(PackagingError, "symlink"):
             assemble_payload_from_repo(
-                repo_root=REPO, payload_root=self.build_root / "repo-payload", openconnect=oc, oathtool=oath,
+                repo_root=REPO, payload_root=self.build_root / "repo-payload", openconnect=oc, oathtool=oath, service_executable=service, hip_executable=hip,
                 vpnc_script=vpnc, helper_executable=helper, wrapperd_executable=wrapperd, menu_app=app, installer_app=installer_app, closure_runner=FakeOtoolRunner(outputs),
             )
         self.assertFalse((self.build_root / "repo-payload/HYU VPN.app/Contents/Resources/outside-link").exists())
@@ -955,18 +959,20 @@ class ReleaseCliTests(PackagingTestCase):
         oc = self.root / "runtime-inputs/openconnect"
         oath = self.root / "runtime-inputs/oathtool"
         vpnc = self.root / "runtime-inputs/vpnc-script"
+        service = self.root / "build-products/hyu-vpn-macos-service"
+        hip = self.root / "build-products/hyu-vpn-hip"
         helper = self.root / "build-products/com.hyu.vpn.helper"
         wrapperd = self.root / "build-products/hyu-vpnc-wrapperd"
         app = self.root / "build-products/HYU VPN.app"
         installer_app = self.root / "build-products/Install HYU VPN.app"
-        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
+        for path in [oc, oath, vpnc, service, hip, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(path.name, encoding="utf-8")
             path.chmod(0o755)
         bundle = self.make_source_bundle()
         payload = assemble_payload_from_repo(
             repo_root=REPO, payload_root=self.build_root / "repo-payload-with-source",
-            openconnect=oc, oathtool=oath, vpnc_script=vpnc, helper_executable=helper, wrapperd_executable=wrapperd, menu_app=app, installer_app=installer_app,
+            openconnect=oc, oathtool=oath, service_executable=service, hip_executable=hip, vpnc_script=vpnc, helper_executable=helper, wrapperd_executable=wrapperd, menu_app=app, installer_app=installer_app,
             source_compliance_bundle=bundle, closure_runner=FakeOtoolRunner({str(oc.resolve()): f"{oc}:\n", str(oath.resolve()): f"{oath}:\n"}),
         )
         self.assertEqual((payload / "SOURCE-COMPLIANCE-BUNDLE.tar.gz").read_bytes(), bundle.read_bytes())
@@ -1094,11 +1100,13 @@ class ReleaseCliTests(PackagingTestCase):
         oc = self.root / "runtime-inputs/openconnect"
         oath = self.root / "runtime-inputs/oathtool"
         vpnc = self.root / "runtime-inputs/vpnc-script"
+        service = self.root / "build-products/hyu-vpn-macos-service"
+        hip = self.root / "build-products/hyu-vpn-hip"
         helper = self.root / "build-products/com.hyu.vpn.helper"
         wrapperd = self.root / "build-products/hyu-vpnc-wrapperd"
         app = self.root / "build-products/HYU VPN.app"
         installer_app = self.root / "build-products/Install HYU VPN.app"
-        for path in [oc, oath, vpnc, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
+        for path in [oc, oath, vpnc, service, hip, helper, wrapperd, app / "Contents/MacOS/HYUVPNMenuApp", app / "Contents/MacOS/HYUVPNCredentialReader", app / "Contents/Info.plist", app / "Contents/Resources/AppIcon.icns", installer_app / "Contents/MacOS/HYUVPNInstallerApp", installer_app / "Contents/Info.plist", installer_app / "Contents/Resources/AppIcon.icns"]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(path.name, encoding="utf-8")
             path.chmod(0o755)
@@ -1115,6 +1123,8 @@ class ReleaseCliTests(PackagingTestCase):
             "--openconnect", str(oc),
             "--oathtool", str(oath),
             "--vpnc-script", str(vpnc),
+            "--service-executable", str(service),
+            "--hip-executable", str(hip),
             "--helper-executable", str(helper),
             "--wrapperd-executable", str(wrapperd),
             "--menu-app", str(app),
@@ -1137,6 +1147,47 @@ class ReleaseCliTests(PackagingTestCase):
         binding = json.loads((stage / "FINAL-RUNTIME-BINDING.json").read_text(encoding="utf-8"))
         self.assertEqual(binding["source_compliance_bundle"]["scope"], "third-party-runtime-corresponding-source-only")
 
+
+
+    def test_mounted_validation_scans_recursive_text_payload_not_only_manifest_and_launchd(self):
+        payload = self.make_payload_source()
+        root_admin = payload / "installer" / "root-admin.sh"
+        root_admin.write_text("#!/bin/sh\necho hyu-vpn-native-client\n", encoding="utf-8")
+        root_admin.chmod(0o755)
+        with self.assertRaisesRegex(PackagingError, "mounted text payload contains forbidden legacy token"):
+            ReleaseBuilder(ReleaseToolchain(fake=True)).build(
+                source_payload=payload,
+                build_root=self.root / "mounted recursive build",
+                output_root=self.root / "mounted recursive dist",
+                version="1.2.3",
+                arch="arm64",
+                git_commit="a" * 40,
+            )
+
+    def test_mounted_validation_rejects_split_python_path_evasions_in_payload_text(self):
+        payload = self.make_payload_source()
+        root_admin = payload / "installer" / "root-admin.sh"
+        root_admin.write_text('PYTHON3_PATH="/usr/bin/py"; PYTHON3_PATH="${PYTHON3_PATH}thon3"\nexec "$PYTHON3_PATH"\n', encoding="utf-8")
+        root_admin.chmod(0o755)
+        with self.assertRaisesRegex(PackagingError, "forbidden legacy token"):
+            ReleaseBuilder(ReleaseToolchain(fake=True)).build(
+                source_payload=payload,
+                build_root=self.root / "mounted split python build",
+                output_root=self.root / "mounted split python dist",
+                version="1.2.5",
+                arch="arm64",
+                git_commit="c" * 40,
+            )
+
+class Task7ReviewRegressionTests(unittest.TestCase):
+    def test_release_builder_treats_rust_service_as_macho_signed_artifact(self):
+        text = (REPO / "scripts/release_packaging.py").read_text(encoding="utf-8")
+        self.assertIn('"hyu-vpn-macos-service"', text[text.index('def mach_o_payload_files'):text.index('class ReleaseBuilder')])
+
+    def test_release_assembly_forbids_legacy_native_client_payload(self):
+        text = (REPO / "scripts/release_packaging.py").read_text(encoding="utf-8")
+        for forbidden in ["hyu-vpn-native-client", "src/hyu_vpn"]:
+            self.assertNotIn(forbidden, text)
 
 if __name__ == "__main__":
     unittest.main()

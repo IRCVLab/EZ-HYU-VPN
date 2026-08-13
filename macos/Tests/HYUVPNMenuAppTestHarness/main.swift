@@ -19,6 +19,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
             if ProcessInfo.processInfo.environment["HYU_MENU_HARNESS_FORCE_FAILURE"] == "1" { throw HarnessFailure(description: "forced failure") }
             let tests: [(String, () throws -> Void)] = [
                 ("strict-status-all-states-and-corrupt", strictStatusAllStates),
+                ("rust-status-fractional-seconds", rustStatusFractionalSeconds),
                 ("status-file-security", statusFileSecurity),
                 ("presentation-symbols-and-title-rule", presentationSymbolsAndTitleRule),
                 ("dynamic-menu-actions-and-checks", dynamicMenuActionsAndChecks),
@@ -28,8 +29,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("login-item-runtime-truth-after-operation-failure", loginItemRuntimeTruthAfterOperationFailure),
                 ("login-item-first-launch-policy", loginItemFirstLaunchPolicy),
                 ("live-menu-includes-native-login-item-control", liveMenuIncludesNativeLoginItemControl),
-                ("control-security-timeout-and-normalized-errors", controlSecurityTimeoutAndErrors),
-                ("bootstrap-splits-appkit-and-argument-gate", bootstrapSplitsAppKitAndArgumentGate),
+                                ("bootstrap-splits-appkit-and-argument-gate", bootstrapSplitsAppKitAndArgumentGate),
                 ("control-tower-menu-copy-and-icon-contract", controlTowerMenuCopyAndIconContract),
                 ("lifecycle-coordinator-runtime", lifecycleCoordinatorRuntime),
                 ("safe-quit-without-diagnostics-contract", safeQuitWithoutDiagnosticsContract),
@@ -37,23 +37,12 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("bundle-assembler-produces-lsuielement-app", bundleAssembler),
                 ("canonical-production-status-path", canonicalProductionStatusPath),
                 ("schema-float-integers-rejected", schemaFloatIntegersRejected),
-                ("system-runner-drains-large-output-and-timeouts", systemRunnerDrainsLargeOutputAndTimeouts),
-                ("real-dispatch-watcher-atomic-replace-and-tick", realDispatchWatcherAtomicReplaceAndTick),
+                                ("real-dispatch-watcher-atomic-replace-and-tick", realDispatchWatcherAtomicReplaceAndTick),
                 ("json-decoder-int-token-proof", jsonDecoderIntTokenProof),
-                ("process-group-timeout-kills-descendant-and-discards-output", processGroupTimeoutKillsDescendantAndDiscardsOutput),
-                ("duplicate-json-keys-rejected-before-collapse", duplicateJSONKeysRejectedBeforeCollapse),
+                                ("duplicate-json-keys-rejected-before-collapse", duplicateJSONKeysRejectedBeforeCollapse),
                 ("unavailable-status-clears-stale-countdown", unavailableStatusClearsStaleCountdown),
-                ("direct-child-success-with-open-descendant-pipe-fails", directChildSuccessWithOpenDescendantPipeFails),
-                ("term-ignoring-descendant-is-killed", termIgnoringDescendantIsKilled),
-                ("synthetic-echild-is-never-success", syntheticECHILDIsNeverSuccess),
-                ("second-pipe-failure-closes-first-pipe", secondPipeFailureClosesFirstPipe),
-                ("control-runner-uses-fixed-minimal-environment", controlRunnerUsesFixedMinimalEnvironment),
-                ("sentinel-parent-fd-is-not-inherited", sentinelParentFDIsNotInherited),
-                ("term-ignoring-descendant-closes-fds-still-killed", termIgnoringDescendantClosesFDsStillKilled),
-                ("cleanup-reap-is-bounded", cleanupReapIsBounded),
-                ("menu-core-has-no-direct-foundation-process-run-surface", menuCoreHasNoDirectFoundationProcessRunSurface),
-                ("spawn-setup-seam-is-not-public-production-api", spawnSetupSeamIsNotPublicProductionAPI),
-                ("control-tower-credential-validation", controlTowerCredentialValidation),
+                                                                                                                                                ("menu-core-has-no-direct-foundation-process-run-surface", menuCoreHasNoDirectFoundationProcessRunSurface),
+                                ("control-tower-credential-validation", controlTowerCredentialValidation),
                 ("control-tower-transaction-policy-gate", controlTowerTransactionPolicyGate),
                 ("native-credential-reset-source-contract", nativeCredentialResetSourceContract),
                 ("encrypted-credential-and-totp-source-contract", encryptedCredentialAndTOTPSourceContract),
@@ -62,6 +51,9 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
                 ("totp-resetter-runtime-flock-coordination", totpResetterRuntimeFlockCoordination),
                 ("encrypted-credential-store-runtime", encryptedCredentialStoreRuntime),
                 ("menu-totp-provider-and-clipboard-policy-runtime", menuTOTPProviderAndClipboardPolicyRuntime),
+                ("rust-ipc-client-runtime-fixtures-and-request-ids", rustIPCClientRuntimeFixturesAndRequestIDs),
+                ("passive-otp-preview-polling-preserves-snapshot-countdown-copy", passiveOTPPreviewPollingPreservesSnapshotCountdownCopy),
+                ("service-refresh-coordinator-drops-stale-forced-results", serviceRefreshCoordinatorDropsStaleForcedResults),
                 ("native-credential-reader-closed-command-surface", nativeCredentialReaderClosedCommandSurface),
                 ("credential-reset-controller-runtime-behavior", credentialResetControllerRuntimeBehavior),
                 ("credential-reset-lifecycle-runtime", credentialResetLifecycleRuntime),
@@ -136,6 +128,14 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expect(maxWidth.tunnelInterface == "utun12345678", "shared maximum-width utun accepted")
         try expectThrows("over-width utun") { _ = try VPNStatusDecoder.decode(statusData(tunnel: "utun123456789")) }
         for bad in [Data("{not-json".utf8), Data(repeating: 0x78, count: VPNStatusDecoder.maxBytes + 1), Data("{\"schema_version\":true}".utf8), Data("{\"schema_version\":1,\"password\":\"CANARY\"}".utf8)] { try expectThrows("bad status") { _ = try VPNStatusDecoder.decode(bad) } }
+    }
+
+    static func rustStatusFractionalSeconds() throws {
+        let productionTimestamp = "2026-08-13T05:20:45.063847Z"
+        var raw = String(decoding: statusData(state: .disabled, expiry: nil, connectedAt: nil, automatic: false), as: UTF8.self)
+        raw = raw.replacingOccurrences(of: "2026-08-04T12:00:01Z", with: productionTimestamp)
+        let decoded = try VPNStatusDecoder.decode(Data(raw.utf8))
+        try expect(decoded.state == .disabled, "Rust status with fractional seconds is accepted")
     }
 
     static func statusFileSecurity() throws {
@@ -413,17 +413,19 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
 
     static func controlTowerMenuCopyAndIconContract() throws {
         let root = packageRoot().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
-        try expect(!source.contains("import UserNotifications"), "control tower removes UserNotifications")
+        let appSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/AppDelegate.swift"))
+        let coreSource = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuCore/MenuCore.swift"))
+        try expect(!appSource.contains("import UserNotifications"), "control tower removes UserNotifications")
         for forbidden in ["countdown", "duration", "expiresAt", "sessionExpiresAt"] {
-            try expect(!source.contains(forbidden), "no legacy expiry UI token \(forbidden)")
+            try expect(!appSource.contains(forbidden), "no legacy expiry UI token \(forbidden)")
         }
-        for required in ["HYU VPN: Status Unavailable", "OTP:", "NSPasteboard.general", "forMode: .common", "Quit HYU VPN", "button.title = \"\"", "button.toolTip = textualState", "accessibilityDescription: textualState", "button.setAccessibilityLabel(textualState)", "button.setAccessibilityHelp(textualState)", "\"Connecting…\"", "\"Disconnecting…\"", "\"Waiting for Network\""] {
-            try expect(source.contains(required), "menu/icon contract contains \(required)")
+        for required in ["HYU VPN: Status Unavailable", "NSPasteboard.general", "forMode: .common", "Quit HYU VPN", "button.title = \"\"", "button.toolTip = textualState", "accessibilityDescription: textualState", "button.setAccessibilityLabel(textualState)", "button.setAccessibilityHelp(textualState)", "\"Connecting…\"", "\"Disconnecting…\"", "\"Waiting for Network\""] {
+            try expect(appSource.contains(required), "menu/icon contract contains \(required)")
         }
-        let rebuildStart = try requireIndex(of: "private func rebuildMenu()", in: source, message: "rebuildMenu exists")
-        let rebuildEnd = try requireIndex(of: "    private func addPrimaryAction", in: source, message: "rebuildMenu end")
-        let rebuild = String(source[rebuildStart..<rebuildEnd])
+        try expect(coreSource.contains("OTP:"), "menu/icon contract contains OTP:")
+        let rebuildStart = try requireIndex(of: "private func rebuildMenu()", in: appSource, message: "rebuildMenu exists")
+        let rebuildEnd = try requireIndex(of: "    private func addOTPAction", in: appSource, message: "rebuildMenu end")
+        let rebuild = String(appSource[rebuildStart..<rebuildEnd])
         try expect(rebuild.components(separatedBy: "NSMenuItem.separator()").count - 1 == 2, "menu has exactly two separators")
         let expectedOrder = [
             "menu.addItem(disabledItem(title: statusLineText()))",
@@ -433,6 +435,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
             "menu.addItem(NSMenuItem.separator())",
             "addResetAction(to: menu)",
             "addLaunchAtLoginAction(to: menu)",
+            "addUpdateAction(to: menu)",
             "menu.addItem(NSMenuItem.separator())",
             "addQuitAction(to: menu)",
         ]
@@ -441,30 +444,22 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
             guard let range = rebuild.range(of: token, range: searchStart..<rebuild.endIndex) else { throw HarnessFailure(description: "menu order missing \(token)") }
             searchStart = range.upperBound
         }
-        try expect(source.contains("addPrimaryAction"), "single dynamic primary action helper")
-        try expect(source.contains("Disconnect"), "disconnect row present")
+        try expect(appSource.contains("addPrimaryAction"), "single dynamic primary action helper")
+        try expect(appSource.contains("Disconnect"), "disconnect row present")
     }
 
     static func lifecycleCoordinatorRuntime() throws {
         var coordinator = AppLifecycleCoordinator()
-        try expect(coordinator.handle(.appLaunched).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)], "launch starts startup connect")
-        try expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE"))).effects == [.scheduleStartupRetry(after: 1)], "transient startup failure schedules retry")
-        try expect(coordinator.handle(.startupRetryTimerFired).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)], "scheduled retry fires once")
+        try expect(coordinator.handle(.appLaunched).effects.isEmpty, "launch leaves backend automatic-reconnect preference unchanged")
+        try expect(coordinator.handle(.primaryConnectRequested).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)], "explicit connect starts once")
+        try expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))).effects.isEmpty, "explicit connect completion is absorbed")
 
-        var paused = AppLifecycleCoordinator()
-        _ = paused.handle(.appLaunched)
-        try expect(paused.handle(.disconnectRequested).effects.isEmpty, "disconnect during startup connect waits for in-flight result")
-        try expect(paused.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))).effects == [.runControl(command: .disconnect, operation: .disconnect, timeout: 3)], "explicit disconnect handoff runs after startup connect")
-
-        var cancelled = AppLifecycleCoordinator()
-        _ = cancelled.handle(.appLaunched)
-        _ = cancelled.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE")))
-        try expect(cancelled.handle(.disconnectRequested).effects == [.cancelStartupRetry, .runControl(command: .disconnect, operation: .disconnect, timeout: 3)], "disconnect cancels scheduled retry then runs disconnect")
-        try expect(cancelled.handle(.startupRetryTimerFired).effects.isEmpty, "cancelled retry firing is absorbed")
+        var disconnect = AppLifecycleCoordinator()
+        _ = disconnect.handle(.appLaunched)
+        try expect(disconnect.handle(.disconnectRequested).effects == [.runControl(command: .disconnect, operation: .disconnect, timeout: 3)], "explicit disconnect starts while idle")
 
         var terminateIdle = AppLifecycleCoordinator()
         _ = terminateIdle.handle(.appLaunched)
-        _ = terminateIdle.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
         try expect(terminateIdle.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]), "idle terminate starts one quit disconnect")
         try expect(terminateIdle.handle(.controlCompleted(operation: .quit, result: ControlResult(status: .ok, errorCode: nil))).effects == [.replyToTermination(true)], "quit success replies true")
         try expect(terminateIdle.handle(.terminateRequested) == .init(terminationDirective: .terminateNow, effects: []), "post-success terminate returns terminateNow")
@@ -472,12 +467,14 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
 
         var terminateConnect = AppLifecycleCoordinator()
         _ = terminateConnect.handle(.appLaunched)
+        _ = terminateConnect.handle(.primaryConnectRequested)
         try expect(terminateConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "terminate during connect waits")
         try expect(terminateConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "duplicate terminate adds nothing")
         try expect(terminateConnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))).effects == [.runControl(command: .disconnect, operation: .quit, timeout: 15)], "post-connect terminate starts one quit disconnect")
 
         var terminateDisconnect = AppLifecycleCoordinator()
         _ = terminateDisconnect.handle(.appLaunched)
+        _ = terminateDisconnect.handle(.primaryConnectRequested)
         _ = terminateDisconnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
         _ = terminateDisconnect.handle(.disconnectRequested)
         try expect(terminateDisconnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "terminate attaches to existing disconnect")
@@ -513,36 +510,6 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expect(watcher.configuration.usesDirectoryFileEvents && watcher.configuration.pollInterval >= 15 && watcher.configuration.timerLeeway >= 5, "directory events coarse timer")
     }
 
-    static func controlSecurityTimeoutAndErrors() throws {
-        let metadata = FakeExecutableMetadata(ownerUID: 0, mode: 0o755, symlink: false, executable: true, parentModes: ["/Library": 0o755, "/Library/Application Support": 0o755, "/Library/Application Support/HYU VPN": 0o755, "/Library/Application Support/HYU VPN/bin": 0o755])
-        let runner = FakeProcessRunner(results: [
-            .success(exitCode: 0, stdout: #"{"schema_version":1,"ok":true,"error_code":null}"#, stderr: "", stdoutOverflowed: false),
-            .failure(.timeout),
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE"}"#, stderr: "raw error", stdoutOverflowed: false),
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"REPAIR_REQUIRED"}"#, stderr: "", stdoutOverflowed: false),
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"BROKEN"}"#, stderr: "", stdoutOverflowed: false),
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE"}"#, stderr: "", stdoutOverflowed: true),
-            .success(exitCode: 7, stdout: "not-json", stderr: "", stdoutOverflowed: false)
-        ])
-        let client = SecureVPNControlClient(metadata: metadata, runner: runner)
-        let okResult = try client.run(.connect)
-        try expect(okResult.status == .ok, "ok")
-        let timeoutResult = try client.run(.disconnect)
-        try expect(timeoutResult.status == .timeout, "timeout normalized")
-        let unavailableResult = try client.run(.reconnect)
-        try expect(unavailableResult.errorCode == "CONTROL_UNAVAILABLE", "control unavailable normalized")
-        let repairRequiredResult = try client.run(.connect)
-        try expect(repairRequiredResult.errorCode == "REPAIR_REQUIRED", "repair required normalized")
-        let unknownJSONResult = try client.run(.disconnect)
-        try expect(unknownJSONResult.errorCode == "CONTROL_EXIT_1", "unknown json code falls back to exit")
-        let overflowedJSONResult = try client.run(.reconnect)
-        try expect(overflowedJSONResult.errorCode == "CONTROL_EXIT_1", "overflowed json falls back to exit")
-        let malformedResult = try client.run(.reconnect)
-        try expect(malformedResult.errorCode == "CONTROL_EXIT_7", "malformed output falls back to exit")
-        try expect(runner.requests.allSatisfy { !$0.usesShell && $0.executablePath == SecureVPNControlClient.defaultExecutablePath }, "fixed no shell")
-        var bad = metadata; bad.symlink = true
-        try expectThrows("symlink executable") { _ = try SecureVPNControlClient(metadata: bad, runner: runner).run(.connect) }
-    }
 
     static func bundleAssembler() throws {
         let root = packageRoot()
@@ -590,20 +557,6 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expectThrows("schema 1e0 rejected") { _ = try VPNStatusDecoder.decode(Data(String(decoding: statusData(), as: UTF8.self).replacingOccurrences(of: "\"schema_version\":1", with: "\"schema_version\":1e0").utf8)) }
     }
 
-    static func systemRunnerDrainsLargeOutputAndTimeouts() throws {
-        let runner = SystemControlProcessRunner()
-        let py = "/usr/bin/python3"
-        if !FileManager.default.isExecutableFile(atPath: py) { return }
-        let big = "import sys; sys.stdout.write('A'*200000); sys.stderr.write('cookie=CANARY\\n' + 'B'*200000)"
-        let large = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", big], usesShell: false), timeout: 5, maxOutputBytes: 256)
-        guard case .success(let exitCode, let stdout, let stderr, let stdoutOverflowed) = large else { throw HarnessFailure(description: "large output timed out") }
-        try expect(exitCode == 0, "large output child exits")
-        try expect(stdout.utf8.count <= 256, "bounded stdout")
-        try expect(stdoutOverflowed, "stdout overflow tracked")
-        try expect(stderr.isEmpty, "stderr discarded")
-        let sleepy = try runner.run(ProcessLaunchRequest(executablePath: "/bin/sleep", arguments: ["5"], usesShell: false), timeout: 0.2, maxOutputBytes: 128)
-        try expect(sleepy == .failure(.timeout), "timeout killed/reaped")
-    }
 
     static func realDispatchWatcherAtomicReplaceAndTick() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-real-watch-\(UUID().uuidString)")
@@ -640,21 +593,6 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expectThrows("escaped float rejected") { _ = try VPNStatusDecoder.decode(Data(String(decoding: statusData(), as: UTF8.self).replacingOccurrences(of: "\"schema_version\":1", with: "\"schema_versio\\u006e\":1.0").utf8)) }
     }
 
-    static func processGroupTimeoutKillsDescendantAndDiscardsOutput() throws {
-        let py = "/usr/bin/python3"; if !FileManager.default.isExecutableFile(atPath: py) { return }
-        let pidFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-child-\(UUID().uuidString).pid")
-        let script = "import subprocess,sys,time,os; c=subprocess.Popen(['/bin/sleep','20']); open('\(pidFile.path)','w').write(str(c.pid)); sys.stdout.write('pass'); sys.stdout.flush(); sys.stdout.write('word=CANARY\\n'+'A'*200000); sys.stderr.write('cook'); sys.stderr.flush(); sys.stderr.write('ie=CANARY\\n'+'B'*200000); time.sleep(20)"
-        let runner = SystemControlProcessRunner()
-        let result = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", script], usesShell: false), timeout: 0.5, maxOutputBytes: 256)
-        try expect(result == .failure(.timeout), "process group timeout")
-        let childPID = Int32((try? String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)).flatMap(Int.init) ?? -1)
-        if childPID > 0 { Thread.sleep(forTimeInterval: 0.3); try expect(kill(childPID, 0) == -1 && errno == ESRCH, "descendant killed/reaped") }
-        let output = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", "import sys; sys.stdout.write('{\\\"schema_version\\\":1,\\\"ok\\\":false,\\\"error_code\\\":\\\"CONTROL_UNAVAILABLE\\\"}'); sys.stderr.write('cookie=CANARY')"], usesShell: false), timeout: 5, maxOutputBytes: 256)
-        guard case .success(_, let stdout, let stderr, let stdoutOverflowed) = output else { throw HarnessFailure(description: "output child failed") }
-        try expect(stdout.contains("CONTROL_UNAVAILABLE"), "stdout retained for strict JSON decoding")
-        try expect(!stdoutOverflowed, "small json does not overflow")
-        try expect(stderr.isEmpty, "stderr discarded")
-    }
 
     static func duplicateJSONKeysRejectedBeforeCollapse() throws {
         let base = String(decoding: statusData(), as: UTF8.self)
@@ -679,155 +617,35 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try expect(events.presentations[2].statusItemTitle.isEmpty, "no stale countdown title")
     }
 
-    static func directChildSuccessWithOpenDescendantPipeFails() throws {
-        let py = "/usr/bin/python3"; if !FileManager.default.isExecutableFile(atPath: py) { return }
-        let pidFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-orphan-\(UUID().uuidString).pid")
-        let script = #"""
-import os,sys,time
-pid=os.fork()
-if pid:
-    open('\#(pidFile.path)','w').write(str(pid))
-    sys.exit(0)
-time.sleep(20)
-"""#
-        let runner = SystemControlProcessRunner()
-        let result = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", script], usesShell: false), timeout: 3, maxOutputBytes: 128)
-        let childPID = Int32((try? String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)).flatMap(Int.init) ?? -1)
-        if childPID > 0, result != .failure(.timeout) { kill(childPID, SIGKILL) }
-        try expect(result == .failure(.timeout), "open descendant pipe cannot be success")
-        if childPID > 0 { Thread.sleep(forTimeInterval: 0.3); try expect(kill(childPID, 0) == -1 && errno == ESRCH, "orphan descendant killed") }
-    }
 
-    static func termIgnoringDescendantIsKilled() throws {
-        let py = "/usr/bin/python3"; if !FileManager.default.isExecutableFile(atPath: py) { return }
-        let pidFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-ignore-\(UUID().uuidString).pid")
-        let script = #"""
-import os,signal,sys,time
-pid=os.fork()
-if pid:
-    open('\#(pidFile.path)','w').write(str(pid))
-    sys.exit(0)
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-time.sleep(20)
-"""#
-        let runner = SystemControlProcessRunner()
-        let result = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", script], usesShell: false), timeout: 3, maxOutputBytes: 128)
-        try expect(result == .failure(.timeout), "TERM-ignoring descendant escalated")
-        let childPID = Int32((try? String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)).flatMap(Int.init) ?? -1)
-        if childPID > 0 { Thread.sleep(forTimeInterval: 0.3); try expect(kill(childPID, 0) == -1 && errno == ESRCH, "SIGKILL removed descendant") }
-    }
 
-    static func syntheticECHILDIsNeverSuccess() throws {
-        let runner = SystemControlProcessRunner(waiter: SyntheticECHILDWaiter())
-        let result = try runner.run(ProcessLaunchRequest(executablePath: "/bin/true", arguments: [], usesShell: false), timeout: 1, maxOutputBytes: 128)
-        try expect(result == .failure(.launchFailed), "ECHILD normalized failure")
-    }
 
-    static func secondPipeFailureClosesFirstPipe() throws {
-        let pipeFactory = CountingPipeFactory(failOnCall: 2)
-        let runner = SystemControlProcessRunner(pipeFactory: pipeFactory)
-        let result = try runner.run(ProcessLaunchRequest(executablePath: "/bin/true", arguments: [], usesShell: false), timeout: 1, maxOutputBytes: 128)
-        try expect(result == .failure(.launchFailed), "second pipe failure is launch failure")
-        try expect(pipeFactory.openDescriptors.isEmpty, "first pipe descriptors closed on partial failure")
-    }
 
-    static func controlRunnerUsesFixedMinimalEnvironment() throws {
-        let env = SystemControlProcessRunner.fixedEnvironment()
-        try expect(env.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"), "minimal path")
-        try expect(env.contains("LC_ALL=C"), "stable locale")
-        try expect(!env.contains { $0.contains("CANARY") || $0.hasPrefix("HOME=") || $0.hasPrefix("USER=") || $0.hasPrefix("SSH_AUTH_SOCK=") }, "no inherited or secret env")
-    }
 
-    static func sentinelParentFDIsNotInherited() throws {
-        let py = "/usr/bin/python3"; if !FileManager.default.isExecutableFile(atPath: py) { return }
-        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-fd-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let sentinel = root.appendingPathComponent("sentinel")
-        let marker = root.appendingPathComponent("leaked")
-        let fd = open(sentinel.path, O_CREAT | O_RDWR, 0o600)
-        try expect(fd >= 0, "sentinel fd opened")
-        defer { Darwin.close(fd) }
-        let script = """
-import os,sys
-fd=int(sys.argv[1])
-marker=sys.argv[2]
-try:
-    os.fstat(fd)
-    open(marker, 'w').write('leaked')
-except OSError:
-    pass
-"""
-        let runner = SystemControlProcessRunner()
-        let result = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", script, "\(fd)", marker.path], usesShell: false), timeout: 3, maxOutputBytes: 128)
-        guard case .success(let code, _, _, _) = result, code == 0 else { throw HarnessFailure(description: "fd sentinel child failed") }
-        try expect(!FileManager.default.fileExists(atPath: marker.path), "unrelated parent fd was not inherited")
-    }
 
-    static func termIgnoringDescendantClosesFDsStillKilled() throws {
-        let py = "/usr/bin/python3"; if !FileManager.default.isExecutableFile(atPath: py) { return }
-        let pidFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("hyu-closefds-\(UUID().uuidString).pid")
-        let script = #"""
-import os,signal,sys,time
-pid=os.fork()
-if pid:
-    open('\#(pidFile.path)','w').write(str(pid))
-    sys.exit(0)
-os.close(1)
-os.close(2)
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-time.sleep(20)
-"""#
-        let runner = SystemControlProcessRunner()
-        let result = try runner.run(ProcessLaunchRequest(executablePath: py, arguments: ["-c", script], usesShell: false), timeout: 3, maxOutputBytes: 128)
-        let childPID = Int32((try? String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)).flatMap(Int.init) ?? -1)
-        if childPID > 0, result != .failure(.timeout) { kill(childPID, SIGKILL) }
-        try expect(result == .failure(.timeout), "closed-fd TERM-ignoring descendant cannot be success")
-        if childPID > 0 { Thread.sleep(forTimeInterval: 0.3); try expect(kill(childPID, 0) == -1 && errno == ESRCH, "closed-fd descendant killed") }
-    }
 
-    static func cleanupReapIsBounded() throws {
-        let waiter = BlockingOptionsZeroWaiter()
-        let runner = SystemControlProcessRunner(waiter: waiter)
-        let start = Date()
-        let result = try runner.run(ProcessLaunchRequest(executablePath: "/bin/sleep", arguments: ["20"], usesShell: false), timeout: 0.05, maxOutputBytes: 128)
-        let elapsed = Date().timeIntervalSince(start)
-        try expect(result == .failure(.timeout), "timeout returned")
-        try expect(elapsed < 1.5, "cleanup reap bounded")
-        try expect(waiter.blockingWaitCalls == 0, "no unbounded waitpid options 0")
-    }
 
     static func menuCoreHasNoDirectFoundationProcessRunSurface() throws {
         let root = packageRoot().deletingLastPathComponent()
         let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuCore/MenuCore.swift"))
         try expect(!source.contains("Process()"), "MenuCore must not create Foundation.Process")
-        try expect(!source.contains("process.run()"), "MenuCore must not expose direct Process.run bypass")
+        try expect(!source.contains("hyu-vpn-control"), "MenuCore must not reference legacy hyu-vpn-control")
+        try expect(!source.contains("usesShell"), "MenuCore must not expose shell fallback")
     }
 
-    static func spawnSetupSeamIsNotPublicProductionAPI() throws {
-        let root = packageRoot().deletingLastPathComponent()
-        let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuCore/MenuCore.swift"))
-        try expect(!source.contains("public protocol SpawnSetupManaging"), "spawn setup seam is not public")
-        try expect(!source.contains("public final class SystemSpawnSetupManager"), "spawn setup manager is not public")
-        try expect(!source.contains("public init(pipeFactory: PipeCreating = SystemPipeFactory(), waiter: ChildProcessWaiting = SystemChildProcessWaiter(), spawnSetup:"), "public runner init cannot accept spawn setup")
-        try expect(source.contains("public convenience init(pipeFactory: PipeCreating = SystemPipeFactory(), waiter: ChildProcessWaiting = SystemChildProcessWaiter())"), "public runner init uses fixed system setup")
-        try expect(source.contains("defer { if actionsInitialized { posix_spawn_file_actions_destroy(&actions) } }"), "actions cleanup registered independently")
-        try expect(source.contains("defer { if attrsInitialized { posix_spawnattr_destroy(&attrs) } }"), "attrs cleanup registered independently")
-    }
 
     static func controlTowerCredentialValidation() throws {
         let valid = CredentialResetInput(username: "shchoi00", password: "correct horse", passwordConfirmation: "correct horse", totpSeed: "jbsw y3dp-ehpk3pxp", totpSeedConfirmation: "JBSWY3DPEHPK3PXP")
         let normalized = try CredentialValidator.validate(valid)
         try expect(normalized.normalizedTOTPSeed == "JBSWY3DPEHPK3PXP", "normalized seed")
-        let retained = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: "", totpSeedConfirmation: ""))
-        try expect(retained.normalizedTOTPSeed == nil, "blank seed retention")
+        try expectThrows("blank seed rejected") { _ = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: "", totpSeedConfirmation: "")) }
         try expectThrows("password mismatch") { _ = try CredentialValidator.validate(CredentialResetInput(username: "canary-user", password: "canary-pass", passwordConfirmation: "different", totpSeed: "", totpSeedConfirmation: "")) }
         let padded = String(repeating: "A", count: 10) + "======"
         let validatedPadded = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: padded, totpSeedConfirmation: padded))
         try expect(validatedPadded.normalizedTOTPSeed == padded, "valid strict padded seed")
         try expectThrows("invalid base32 residue") { _ = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: String(repeating: "A", count: 17), totpSeedConfirmation: String(repeating: "A", count: 17))) }
         try expectThrows("invalid base32 padding") { _ = try CredentialValidator.validate(CredentialResetInput(username: "shchoi00", password: "pw", passwordConfirmation: "pw", totpSeed: String(repeating: "A", count: 14) + "==", totpSeedConfirmation: String(repeating: "A", count: 14) + "==")) }
-        let errors: [CredentialValidationError] = [.passwordMismatch, .totpSeedMismatch, .totpSeedInvalidAlphabetOrPadding]
+        let errors: [CredentialValidationError] = [.passwordMismatch, .totpSeedRequired, .totpSeedMismatch, .totpSeedInvalidAlphabetOrPadding]
         try expect(errors.allSatisfy { !$0.description.contains("canary") && !$0.code.contains("canary") }, "stable redacted validation errors")
     }
 
@@ -1057,6 +875,82 @@ time.sleep(20)
         try expect(OTPClipboardPolicy.copyableCode("GEZDGNBVGY3TQOJQ") == nil, "clipboard rejects setup seed")
     }
 
+    static func rustIPCClientRuntimeFixturesAndRequestIDs() throws {
+        let cases: [(String, String, VPNCommand, String)] = [
+            ("connect-request-v1.frame", "swift-connect-1", .connect, "connect-ack-response-v1.frame"),
+            ("disconnect-request-v1.frame", "swift-disconnect-1", .disconnect, "disconnect-ack-response-v1.frame"),
+            ("reconnect-request-v1.frame", "swift-reconnect-1", .reconnect, "reconnect-ack-response-v1.frame"),
+            ("automatic-on-request-v1.frame", "swift-automatic-on-1", .automaticReconnect(true), "automatic-on-ack-response-v1.frame"),
+            ("automatic-off-request-v1.frame", "swift-automatic-off-1", .automaticReconnect(false), "automatic-off-ack-response-v1.frame"),
+        ]
+        for (requestFixture, requestID, command, responseFixture) in cases {
+            let operations = HarnessSocketOperations(responseFrame: try fixtureData(responseFixture), peerEffectiveUID: getuid())
+            let client = RustIPCClient(
+                socketPath: URL(fileURLWithPath: "/tmp/hyu-vpn.sock"),
+                metadata: HarnessSocketMetadataProvider(),
+                requestIDGenerator: { requestID },
+                timeouts: .init(connect: 0.2, write: 0.2, read: 0.2, total: 0.5),
+                operations: operations,
+                monotonicClock: HarnessMonotonicClock()
+            )
+            let outcome = client.requestSynchronouslyForTest(command)
+            try expect(outcome == Result<VPNResponse, VPNServiceError>.success(.ack), "fixture ack request \(requestID): \(outcome)")
+            let expectedFrame = try fixtureData(requestFixture)
+            try expect(operations.writtenFrame == expectedFrame, "exact framed request \(requestFixture)")
+        }
+
+        let mismatchClient = RustIPCClient(
+            socketPath: URL(fileURLWithPath: "/tmp/hyu-vpn.sock"),
+            metadata: HarnessSocketMetadataProvider(),
+            requestIDGenerator: { "swift-connect-1" },
+            timeouts: .init(connect: 0.2, write: 0.2, read: 0.2, total: 0.5),
+            operations: HarnessSocketOperations(responseFrame: framed(json: #"{"schema_version":1,"request_id":"other-id","result":"ack"}"#), peerEffectiveUID: getuid()),
+            monotonicClock: HarnessMonotonicClock()
+        )
+        try expect(mismatchClient.requestSynchronouslyForTest(.connect) == Result<VPNResponse, VPNServiceError>.failure(.protocolViolation), "mismatched request id is rejected")
+    }
+
+    static func passiveOTPPreviewPollingPreservesSnapshotCountdownCopy() throws {
+        let firstClient = RustIPCClient(
+            socketPath: URL(fileURLWithPath: "/tmp/hyu-vpn.sock"),
+            metadata: HarnessSocketMetadataProvider(),
+            requestIDGenerator: { "swift-current-otp-1" },
+            timeouts: .init(connect: 0.2, write: 0.2, read: 0.2, total: 0.5),
+            operations: HarnessSocketOperations(responseFrame: framed(json: #"{"schema_version":1,"request_id":"swift-current-otp-1","result":"current_otp","code":"123456","remaining_seconds":17}"#), peerEffectiveUID: getuid()),
+            monotonicClock: HarnessMonotonicClock()
+        )
+        let secondClient = RustIPCClient(
+            socketPath: URL(fileURLWithPath: "/tmp/hyu-vpn.sock"),
+            metadata: HarnessSocketMetadataProvider(),
+            requestIDGenerator: { "swift-current-otp-1" },
+            timeouts: .init(connect: 0.2, write: 0.2, read: 0.2, total: 0.5),
+            operations: HarnessSocketOperations(responseFrame: framed(json: #"{"schema_version":1,"request_id":"swift-current-otp-1","result":"current_otp","code":"123456","remaining_seconds":16}"#), peerEffectiveUID: getuid()),
+            monotonicClock: HarnessMonotonicClock()
+        )
+        guard case .success(.currentOTP(let firstSnapshot)) = firstClient.requestSynchronouslyForTest(.currentOTP) else {
+            throw HarnessFailure(description: "first preview succeeded")
+        }
+        guard case .success(.currentOTP(let secondSnapshot)) = secondClient.requestSynchronouslyForTest(.currentOTP) else {
+            throw HarnessFailure(description: "second preview succeeded")
+        }
+        let firstModel = OTPMenuPresenter.model(snapshot: firstSnapshot)
+        let secondModel = OTPMenuPresenter.model(snapshot: secondSnapshot)
+        try expect(firstSnapshot.code == secondSnapshot.code, "passive preview preserves same code across one-second polling")
+        try expect(firstSnapshot.secondsRemaining == 17 && secondSnapshot.secondsRemaining == 16, "countdown advances without consuming preview")
+        try expect(firstModel.code == "123456" && secondModel.code == "123456", "menu model preserves copyable code across polling")
+        try expect(OTPClipboardPolicy.copyableCode(firstModel.code ?? "") == "123456", "copied otp remains valid")
+        try expect(OTPClipboardPolicy.copyableCode(secondModel.code ?? "") == "123456", "copied otp remains valid after second poll")
+    }
+
+    static func serviceRefreshCoordinatorDropsStaleForcedResults() throws {
+        var coordinator = ServiceRefreshCoordinator()
+        try expect(coordinator.begin(force: true) == 1, "first refresh generation starts")
+        try expect(coordinator.begin(force: true) == nil, "forced refresh while active stays single-flight")
+        try expect(!coordinator.shouldApply(generation: 1), "stale generation is rejected once forced replacement is queued")
+        try expect(coordinator.finish(generation: 1) == 2, "queued forced replacement starts next generation")
+        try expect(coordinator.shouldApply(generation: 2), "latest generation applies")
+    }
+
     static func nativeCredentialReaderClosedCommandSurface() throws {
         let store = HarnessCredentialStore(initial: [.username: "reader-user", .password: "reader-password", .totpSeed: "JBSWY3DPEHPK3PXP"])
         var output = ""
@@ -1135,7 +1029,7 @@ time.sleep(20)
         var submitReturnedValue = false
         let submit = CredentialResetController(prefillUsername: "prefilled") { _, value in submitReturnedValue = value != nil }
         submit.present()
-        submit.harnessSetValues(first: "one", firstConfirmation: "one", second: "", secondConfirmation: "")
+        submit.harnessSetValues(first: "one", firstConfirmation: "one", second: "JBSWY3DPEHPK3PXP", secondConfirmation: "JBSWY3DPEHPK3PXP")
         submit.harnessSubmit()
         let submitCleared = fieldsCleared(submit)
         mismatch.dismissWithoutSaving()
@@ -1195,31 +1089,19 @@ time.sleep(20)
 
     static func credentialResetLifecycleRuntime() throws {
         var coordinator = AppLifecycleCoordinator()
-        try expect(coordinator.handle(.credentialResetRequested).effects == [.runControl(command: .disconnect, operation: .credentialSave, timeout: 3)], "reset starts verified disconnect")
+        try expect(coordinator.handle(.credentialResetRequested).effects == [.runCredentialTransaction], "reset starts one service transaction")
         try expect(coordinator.handle(.credentialResetRequested).effects.isEmpty, "duplicate reset suppressed")
         try expect(coordinator.handle(.disconnectRequested).effects.isEmpty, "disconnect suppressed during reset")
-        try expect(coordinator.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))).effects == [.runCredentialTransaction], "transaction follows disconnect success")
-        try expect(coordinator.handle(.credentialTransactionCompleted(.success)).effects == [.runControl(command: .connect, operation: .credentialSave, timeout: 3)], "connect follows transaction success")
-        try expect(coordinator.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))).effects.isEmpty, "reset completes after one connect")
-
-        var failedDisconnect = AppLifecycleCoordinator()
-        _ = failedDisconnect.handle(.credentialResetRequested)
-        try expect(failedDisconnect.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT"))).effects == [.showCredentialResetError("CONTROL_TIMEOUT")], "disconnect failure reports no transaction")
+        try expect(coordinator.handle(.credentialTransactionCompleted(.success)).effects.isEmpty, "successful service replacement completes without reconnect effect")
 
         var failedTransaction = AppLifecycleCoordinator()
         _ = failedTransaction.handle(.credentialResetRequested)
-        _ = failedTransaction.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil)))
-        try expect(failedTransaction.handle(.credentialTransactionCompleted(.failure(code: .totpResetFailed))).effects == [.showCredentialResetError("TOTP_RESET_FAILED")], "transaction failure reports no connect")
+        try expect(failedTransaction.handle(.credentialTransactionCompleted(.failure(code: .totpResetFailed))).effects == [.showCredentialResetError("TOTP_RESET_FAILED")], "transaction failure reports one error")
 
         var terminating = AppLifecycleCoordinator()
         _ = terminating.handle(.credentialResetRequested)
-        try expect(terminating.handle(.terminateRequested).effects == [.dismissCredentialReset], "termination dismisses reset UI before writes")
-        try expect(terminating.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .ok, errorCode: nil))).effects == [.replyToTermination(true)], "termination before writes skips mutation and replies")
-
-        var terminatingFailedDisconnect = AppLifecycleCoordinator()
-        _ = terminatingFailedDisconnect.handle(.credentialResetRequested)
-        _ = terminatingFailedDisconnect.handle(.terminateRequested)
-        try expect(terminatingFailedDisconnect.handle(.controlCompleted(operation: .credentialSave, result: ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT"))).effects == [.replyToTermination(false), .showTerminationFailureAlert("CONTROL_TIMEOUT")], "quit during reset disconnect preserves safe-quit failure")
+        try expect(terminating.handle(.terminateRequested).effects == [.dismissCredentialReset], "termination dismisses reset UI while request is active")
+        try expect(terminating.handle(.credentialTransactionCompleted(.success)).effects == [.replyToTermination(true)], "termination waits for transaction completion before replying")
     }
 
 }
@@ -1246,48 +1128,93 @@ struct FakeMetadata: FileMetadataProviding {
 }
 final class RecordingStatusSink: StatusUpdateSink { var presentations: [MenuPresentation] = []; func apply(_ presentation: MenuPresentation) { presentations.append(presentation) } }
 final class SequenceStatusReader: StatusReading { var results: [Result<VPNStatus, Error>]; init(_ results: [Result<VPNStatus, Error>]) { self.results = results }; func readStatus() throws -> VPNStatus { try results.removeFirst().get() } }
-struct FakeExecutableMetadata: ExecutableMetadataProviding { var ownerUID: uid_t; var mode: mode_t; var symlink: Bool; var executable: Bool; var parentModes: [String: mode_t]; func metadata(for path: String) throws -> FileMetadata { FileMetadata(ownerUID: path == SecureVPNControlClient.defaultExecutablePath ? ownerUID : uid_t(0), mode: parentModes[path] ?? mode, isSymlink: symlink, isRegularFile: true, isExecutable: executable) } }
-final class FakeProcessRunner: ControlProcessRunning { var results: [ControlProcessOutcome]; var requests: [ProcessLaunchRequest] = []; init(results: [ControlProcessOutcome]) { self.results = results }; func run(_ request: ProcessLaunchRequest, timeout: TimeInterval, maxOutputBytes: Int) throws -> ControlProcessOutcome { requests.append(request); return results.removeFirst() } }
 
 final class SemaphoreStatusSink: StatusUpdateSink {
-    private let lock = NSLock(); private let semaphore: DispatchSemaphore; private let expected: Int; private(set) var presentations: [MenuPresentation] = []
-    init(expected: Int) { self.expected = expected; self.semaphore = DispatchSemaphore(value: 0) }
-    func apply(_ presentation: MenuPresentation) { lock.lock(); presentations.append(presentation); let shouldSignal = presentations.count >= expected; lock.unlock(); if shouldSignal { semaphore.signal() } }
-    func wait(seconds: TimeInterval) -> Bool { semaphore.wait(timeout: .now() + seconds) == .success }
-}
-
-
-final class SyntheticECHILDWaiter: ChildProcessWaiting, @unchecked Sendable {
-    private var reaped = false
-    func wait(pid: pid_t, status: inout Int32, options: Int32) -> pid_t {
-        if !reaped { var realStatus: Int32 = 0; _ = Darwin.waitpid(pid, &realStatus, 0); reaped = true }
-        errno = ECHILD
-        return -1
-    }
-}
-
-final class CountingPipeFactory: PipeCreating, @unchecked Sendable {
-    let failOnCall: Int
-    private(set) var calls = 0
-    private(set) var openDescriptors: Set<Int32> = []
-    init(failOnCall: Int) { self.failOnCall = failOnCall }
-    func makePipe(_ fds: inout [Int32]) -> Int32 {
-        calls += 1
-        if calls == failOnCall { errno = EMFILE; return -1 }
-        let result = pipe(&fds)
-        if result == 0 { openDescriptors.insert(fds[0]); openDescriptors.insert(fds[1]) }
-        return result
-    }
-    func close(_ fd: Int32) { openDescriptors.remove(fd); Darwin.close(fd) }
-}
-
-
-final class BlockingOptionsZeroWaiter: ChildProcessWaiting, @unchecked Sendable {
     private let lock = NSLock()
-    private var _blockingWaitCalls = 0
-    var blockingWaitCalls: Int { lock.lock(); defer { lock.unlock() }; return _blockingWaitCalls }
-    func wait(pid: pid_t, status: inout Int32, options: Int32) -> pid_t {
-        if options == 0 { lock.lock(); _blockingWaitCalls += 1; lock.unlock(); Thread.sleep(forTimeInterval: 2.0) }
-        return Darwin.waitpid(pid, &status, options)
+    private let semaphore: DispatchSemaphore
+    private let expected: Int
+    private(set) var presentations: [MenuPresentation] = []
+
+    init(expected: Int) {
+        self.expected = expected
+        self.semaphore = DispatchSemaphore(value: 0)
     }
+
+    func apply(_ presentation: MenuPresentation) {
+        lock.lock()
+        presentations.append(presentation)
+        let shouldSignal = presentations.count >= expected
+        lock.unlock()
+        if shouldSignal { semaphore.signal() }
+    }
+
+    func wait(seconds: TimeInterval) -> Bool {
+        semaphore.wait(timeout: .now() + seconds) == .success
+    }
+}
+
+private func harnessFixtureDirectory() -> URL {
+    Harness.packageRoot()
+        .deletingLastPathComponent()
+        .appendingPathComponent("tests/fixtures/protocol", isDirectory: true)
+}
+
+private func fixtureData(_ name: String) throws -> Data {
+    try Data(contentsOf: harnessFixtureDirectory().appendingPathComponent(name))
+}
+
+private func framed(json: String) -> Data {
+    let payload = Data(json.utf8)
+    var frame = Data()
+    var length = UInt32(payload.count).bigEndian
+    withUnsafeBytes(of: &length) { frame.append(contentsOf: $0) }
+    frame.append(payload)
+    return frame
+}
+
+private struct HarnessMonotonicClock: RustIPCMonotonicClock {
+    func nowNanoseconds() -> UInt64 { 0 }
+}
+
+private struct HarnessSocketMetadataProvider: SocketMetadataProviding {
+    func metadata(for path: String) throws -> SocketFileMetadata {
+        if path.hasSuffix(".sock") {
+            return SocketFileMetadata(ownerUID: getuid(), mode: 0o600, isSymlink: false, isDirectory: false, isSocket: true, deviceID: 1, inode: 2)
+        }
+        return SocketFileMetadata(ownerUID: getuid(), mode: 0o700, isSymlink: false, isDirectory: true, isSocket: false, deviceID: 1, inode: 1)
+    }
+}
+
+private final class HarnessSocketOperations: RustIPCSocketOperations, @unchecked Sendable {
+    private var unreadResponse: Data
+    private(set) var writtenFrame = Data()
+    private let peerEffectiveUID: uid_t
+
+    init(responseFrame: Data, peerEffectiveUID: uid_t) {
+        self.unreadResponse = responseFrame
+        self.peerEffectiveUID = peerEffectiveUID
+    }
+
+    func socket() -> Int32 { 42 }
+    func setNoSigPipe(_ descriptor: Int32) {}
+    func setNonBlocking(_ descriptor: Int32) throws {}
+    func connect(_ descriptor: Int32, _ address: UnsafePointer<sockaddr>, _ length: socklen_t) -> Int32 { 0 }
+    func poll(_ fds: UnsafeMutablePointer<pollfd>, _ count: nfds_t, _ timeout: Int32) -> Int32 {
+        fds.pointee.revents = fds.pointee.events
+        return 1
+    }
+    func read(_ descriptor: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int) -> Int {
+        guard !unreadResponse.isEmpty else { return 0 }
+        let amount = min(count, unreadResponse.count)
+        unreadResponse.copyBytes(to: buffer.assumingMemoryBound(to: UInt8.self), count: amount)
+        unreadResponse.removeFirst(amount)
+        return amount
+    }
+    func write(_ descriptor: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int {
+        writtenFrame.append(buffer.assumingMemoryBound(to: UInt8.self), count: count)
+        return count
+    }
+    func socketError(_ descriptor: Int32) throws -> Int32 { 0 }
+    func peerEffectiveUID(_ descriptor: Int32) throws -> uid_t { peerEffectiveUID }
+    func close(_ descriptor: Int32) {}
 }

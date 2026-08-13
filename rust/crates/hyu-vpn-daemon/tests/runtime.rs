@@ -84,6 +84,38 @@ fn connect_and_network_events_publish_status_and_actions() {
 }
 
 #[test]
+fn connected_event_publishes_verified_session_metadata() {
+    let (plane, mut actions) = ControlPlane::new(false, MemoryCredentials::default(), FixedClock);
+    plane.handle(request("connected-metadata-connect", Request::Connect));
+    let _ = actions.try_recv().unwrap();
+    let _ = actions.try_recv().unwrap();
+    plane.apply_event(EngineEvent::NetworkReady(NetworkIdentity::new(
+        "en0",
+        "192.0.2.1",
+    )));
+    let _ = actions.try_recv().unwrap();
+    let generation = match actions.try_recv().unwrap() {
+        EngineAction::StartConnection { generation } => generation,
+        action => panic!("unexpected action: {action:?}"),
+    };
+
+    plane.apply_event(EngineEvent::ConnectorConnected {
+        generation,
+        tunnel_interface: Some("utun7".to_owned()),
+        hip_succeeded: true,
+    });
+
+    let status = plane.status();
+    assert_eq!(status.state, VpnState::Connected);
+    assert_eq!(status.connected_at.as_deref(), Some("1970-01-01T00:00:59Z"));
+    assert_eq!(
+        status.last_successful_hip_at.as_deref(),
+        Some("1970-01-01T00:00:59Z")
+    );
+    assert_eq!(status.tunnel_interface.as_deref(), Some("utun7"));
+}
+
+#[test]
 fn credential_replacement_and_current_otp_are_served_without_status_secrets() {
     let (plane, _actions) = ControlPlane::new(false, MemoryCredentials::default(), FixedClock);
     let credentials = Credentials::new(
@@ -192,9 +224,11 @@ impl ActionExecutor for FakeExecutor {
     async fn execute(&self, action: EngineAction) -> Option<EngineEvent> {
         self.actions.lock().unwrap().push(action.clone());
         match action {
-            EngineAction::StartConnection { generation } => {
-                Some(EngineEvent::ConnectorConnected { generation })
-            }
+            EngineAction::StartConnection { generation } => Some(EngineEvent::ConnectorConnected {
+                generation,
+                tunnel_interface: None,
+                hip_succeeded: false,
+            }),
             _ => None,
         }
     }
@@ -257,6 +291,8 @@ async fn daemon_runtime_applies_asynchronous_connector_events() {
     event_tx
         .send(EngineEvent::ConnectorConnected {
             generation: hyu_vpn_core::state::ConnectionGeneration(1),
+            tunnel_interface: None,
+            hip_succeeded: false,
         })
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {

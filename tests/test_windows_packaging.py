@@ -80,7 +80,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIsNone(state.find("w:RemoveFolder", ns))
         workflow = WINDOWS_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("upgrade-preservation-canary", workflow)
-        self.assertIn("-Version '0.2.1'", workflow)
+        self.assertIn("-Version '0.2.2'", workflow)
         self.assertIn("Encrypted state was not preserved across MSI major upgrade", workflow)
 
     def test_script_pins_hashes_and_copies_exact_runtime(self):

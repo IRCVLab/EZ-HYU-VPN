@@ -3,25 +3,21 @@ import Foundation
 import HYUVPNMenuCore
 import HYUVPNMenuAppSupport
 
-final class ResetPayloadBox: @unchecked Sendable {
-    var value: ValidatedCredentials?
-    init(_ value: ValidatedCredentials) { self.value = value }
-}
-
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, StatusValueSink {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var watcher: StatusWatcher?
     private var currentStatus: VPNStatus?
     private var currentPresentation = MenuPresentation(statusItemTitle: "", primaryText: "Status Unavailable", detailText: "", symbolName: "exclamationmark.shield.fill")
-    private let control = SecureVPNControlClient()
+    private let service: any VPNServiceRequesting
     private var lifecycle = AppLifecycleCoordinator()
     private var startupRetryWorkItem: DispatchWorkItem?
     private var resetController: CredentialResetController?
     private var pendingResetPayload: ValidatedCredentials?
-    private let totpProvider = MenuTOTPProvider()
+    private var currentOTPSnapshot: TOTPDisplaySnapshot?
     private var otpMenuItem: NSMenuItem?
-    private var otpTimer: Timer?
+    private var serviceRefreshTimer: Timer?
+    private var serviceRefreshInFlight = false
+    private var serviceRefreshCoordinator = ServiceRefreshCoordinator()
     private var loginItemController = SystemLoginItemController()
     private var loginItemState: LoginItemState = .disabled
     private var lastLoginItemResult = "LOGIN_ITEM_UNAVAILABLE"
@@ -33,27 +29,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     private var updateOffer: UpdateOffer?
     private var updateCheckTimer: Timer?
 
+    init(service: any VPNServiceRequesting = RustIPCClient()) {
+        self.service = service
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
         refreshLoginItemState()
         applyFirstLaunchLoginItemDefault()
         rebuildMenu()
-        startWatcher()
         apply(lifecycle.handle(.appLaunched))
-        startOTPTimer()
+        startServiceRefreshTimer()
         configureUpdateChecker()
         startUpdateChecks()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        otpTimer?.invalidate()
-        otpTimer = nil
+        serviceRefreshTimer?.invalidate()
+        serviceRefreshTimer = nil
         updateCheckTimer?.invalidate()
         updateCheckTimer = nil
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshLoginItemState()
+        refreshServiceSnapshot(force: true)
         rebuildMenu()
     }
 
@@ -70,41 +71,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         }
     }
 
-    nonisolated func applyStatusValue(_ status: VPNStatus?) {
-        DispatchQueue.main.async { [weak self] in
-            self?.currentStatus = status
-            self?.refreshStatusButton()
-            self?.rebuildMenu()
-        }
-    }
-
-    nonisolated func apply(_ presentation: MenuPresentation) {
-        DispatchQueue.main.async { [weak self] in
-            self?.currentPresentation = presentation
-            self?.refreshStatusButton()
-            self?.rebuildMenu()
-        }
-    }
-
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem = item
         refreshStatusButton()
         item.menu = NSMenu(title: "HYU VPN")
-    }
-
-    private func startWatcher() {
-        let configuration = StatusWatcherConfiguration.production()
-        let statusReader = FileStatusReader(url: configuration.statusPath)
-        let statusWatcher = StatusWatcher(configuration: configuration, reader: statusReader, sink: self)
-        watcher = statusWatcher
-        do {
-            try statusWatcher.start()
-        } catch {
-            currentStatus = nil
-            refreshStatusButton()
-            rebuildMenu()
-        }
     }
 
     private func refreshStatusButton() {
@@ -142,28 +113,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
         menu.addItem(item)
     }
 
-    private func startOTPTimer() {
-        otpTimer?.invalidate()
-        let timer = Timer(timeInterval: 1, target: self, selector: #selector(refreshOTPFromTimer), userInfo: nil, repeats: true)
+    private func startServiceRefreshTimer() {
+        serviceRefreshTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, target: self, selector: #selector(refreshServiceFromTimer), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
-        otpTimer = timer
-        refreshOTPItem()
+        serviceRefreshTimer = timer
+        refreshServiceSnapshot(force: true)
     }
 
-    @objc private func refreshOTPFromTimer() {
-        refreshOTPItem()
+    @objc private func refreshServiceFromTimer() {
+        refreshServiceSnapshot()
     }
 
-    private func refreshOTPItem(now: Date = Date()) {
-        guard let item = otpMenuItem, let snapshot = totpProvider.snapshot(at: now) else {
-            otpMenuItem?.title = "OTP unavailable"
-            otpMenuItem?.representedObject = nil
-            otpMenuItem?.isEnabled = false
+    private func refreshOTPItem() {
+        guard let item = otpMenuItem else { return }
+        let model = OTPMenuPresenter.model(snapshot: currentOTPSnapshot)
+        item.title = model.title
+        item.representedObject = model.code
+        item.isEnabled = model.isEnabled
+    }
+
+    private func refreshServiceSnapshot(force: Bool = false) {
+        guard let generation = serviceRefreshCoordinator.begin(force: force) else { return }
+        serviceRefreshInFlight = true
+        performRefresh(generation: generation)
+    }
+
+    private func performRefresh(generation: Int) {
+        service.request(.status) { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.serviceRefreshCoordinator.shouldApply(generation: generation) {
+                    self.applyStatusSnapshot(result)
+                }
+                guard self.serviceRefreshCoordinator.shouldContinue(generation: generation) else {
+                    self.completeRefresh(generation: generation)
+                    return
+                }
+                self.service.request(.currentOTP) { [weak self] otpResult in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        if self.serviceRefreshCoordinator.shouldApply(generation: generation) {
+                            self.applyOTPSnapshot(otpResult)
+                        }
+                        self.completeRefresh(generation: generation)
+                    }
+                }
+            }
+        }
+    }
+
+    private func completeRefresh(generation: Int) {
+        if let nextGeneration = serviceRefreshCoordinator.finish(generation: generation) {
+            performRefresh(generation: nextGeneration)
             return
         }
-        item.title = "OTP: \(snapshot.code) · \(snapshot.secondsRemaining)s — Copy"
-        item.representedObject = snapshot.code
-        item.isEnabled = true
+        serviceRefreshInFlight = false
+    }
+
+    private func applyStatusSnapshot(_ result: Result<VPNResponse, VPNServiceError>) {
+        switch result {
+        case .success(.status(let status)):
+            currentStatus = status
+            currentPresentation = MenuPresenter.present(status)
+        default:
+            currentStatus = nil
+            currentPresentation = MenuPresentation(statusItemTitle: "", primaryText: "Status unavailable", detailText: "CONTROL_STATUS_UNAVAILABLE", symbolName: "exclamationmark.shield.fill")
+        }
+        refreshStatusButton()
+        rebuildMenu()
+    }
+
+    private func applyOTPSnapshot(_ result: Result<VPNResponse, VPNServiceError>) {
+        switch result {
+        case .success(.currentOTP(let snapshot)):
+            currentOTPSnapshot = snapshot
+        default:
+            currentOTPSnapshot = nil
+        }
+        refreshOTPItem()
     }
 
     @objc private func copyOTP(_ sender: NSMenuItem) {
@@ -277,7 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
 
     @objc private func resetLoginInformation() {
         guard resetController == nil, !lifecycle.controlsDisabled else { return }
-        let controller = CredentialResetController(prefillUsername: SystemCredentialBootstrap.currentID()) { [weak self] controller, value in
+        let controller = CredentialResetController(prefillUsername: nil) { [weak self] controller, value in
             guard let self else { return }
             self.resetController = nil
             guard let value else { return }
@@ -420,39 +448,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
     }
 
     private func runControl(command: VPNControlCommand, operation: ControlTowerOperation, timeout: TimeInterval) {
-        let client = control
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let result: ControlResult
-            do {
-                result = try client.run(command, timeout: timeout)
-            } catch {
-                result = ControlResult(status: .failed, errorCode: "CONTROL_INSECURE")
-            }
-            DispatchQueue.main.async { [weak self] in
+        let serviceCommand: VPNCommand
+        switch command {
+        case .connect: serviceCommand = .connect
+        case .disconnect: serviceCommand = .disconnect
+        case .reconnect: serviceCommand = .reconnect
+        case .setAutomaticReconnect(let enabled): serviceCommand = .automaticReconnect(enabled)
+        }
+        service.request(serviceCommand) { [weak self] result in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.apply(self.lifecycle.handle(.controlCompleted(operation: operation, result: result)))
+                let controlResult: ControlResult
+                switch result {
+            case .success(.ack):
+                controlResult = ControlResult(status: .ok, errorCode: nil)
+            case .success(.error(let code)):
+                controlResult = ControlResult(status: .failed, errorCode: code.rawValue)
+            case .success:
+                controlResult = ControlResult(status: .failed, errorCode: "CONTROL_PROTOCOL")
+            case .failure(.timeout):
+                controlResult = ControlResult(status: .timeout, errorCode: "CONTROL_TIMEOUT")
+            case .failure(.unavailable):
+                controlResult = ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE")
+            case .failure(.backend(let code)):
+                controlResult = ControlResult(status: .failed, errorCode: code.rawValue)
+            case .failure:
+                controlResult = ControlResult(status: .failed, errorCode: "CONTROL_INSECURE")
+            }
+                self.apply(self.lifecycle.handle(.controlCompleted(operation: operation, result: controlResult)))
+                self.refreshServiceSnapshot(force: true)
+                _ = timeout
             }
         }
     }
 
     private func runCredentialTransaction() {
-        guard let payload = pendingResetPayload else {
-            apply(lifecycle.handle(.credentialTransactionCompleted(.failure(code: .readFailed))))
+        guard let payload = pendingResetPayload,
+              let seed = payload.normalizedTOTPSeed else {
+            apply(lifecycle.handle(.credentialTransactionCompleted(.failure(code: .writeFailed))))
             return
         }
         pendingResetPayload = nil
-        let box = ResetPayloadBox(payload)
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let transaction = SystemCredentialTransactionFactory.make()
-            let result: CredentialTransactionResult
-            if let value = box.value {
-                result = transaction.apply(value)
-            } else {
-                result = .failure(code: .readFailed)
+        service.replaceCredentials(CredentialInput(username: payload.username, password: payload.password, totpSeed: seed)) { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let transactionResult: CredentialTransactionResult
+                switch result {
+            case .success:
+                transactionResult = .success
+            case .failure:
+                transactionResult = .failure(code: .writeFailed)
             }
-            box.value = nil
-            DispatchQueue.main.async { [weak self] in
-                self?.apply(self?.lifecycle.handle(.credentialTransactionCompleted(result)) ?? AppLifecycleTransition(terminationDirective: .none, effects: []))
+                self.apply(self.lifecycle.handle(.credentialTransactionCompleted(transactionResult)))
+                self.refreshServiceSnapshot(force: true)
             }
         }
     }
@@ -529,5 +577,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusUpdateSink, Stat
             return MenuItemModel(title: "Launch at Login Unavailable", isEnabled: false, isChecked: false, command: nil)
         }
     }
-
 }

@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--openconnect", type=Path)
     parser.add_argument("--oathtool", type=Path)
     parser.add_argument("--vpnc-script", type=Path)
+    parser.add_argument("--service-executable", type=Path)
+    parser.add_argument("--hip-executable", type=Path)
     parser.add_argument("--helper-executable", type=Path)
     parser.add_argument("--wrapperd-executable", type=Path)
     parser.add_argument("--menu-app", type=Path)
@@ -57,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         source_payload = args.source_payload
         if args.assemble_from_repo:
-            missing = [name for name in ["openconnect", "oathtool", "vpnc_script", "helper_executable", "wrapperd_executable", "menu_app", "installer_app"] if getattr(args, name) is None]
+            missing = [name for name in ["openconnect", "oathtool", "vpnc_script", "service_executable", "hip_executable", "helper_executable", "wrapperd_executable", "menu_app", "installer_app"] if getattr(args, name) is None]
             if missing:
                 raise PackagingError(f"missing assemble inputs: {', '.join(missing)}")
             source_payload = assemble_payload_from_repo(
@@ -66,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
                 openconnect=args.openconnect,
                 oathtool=args.oathtool,
                 vpnc_script=args.vpnc_script,
+                service_executable=args.service_executable,
+                hip_executable=args.hip_executable,
                 helper_executable=args.helper_executable,
                 wrapperd_executable=args.wrapperd_executable,
                 menu_app=args.menu_app,

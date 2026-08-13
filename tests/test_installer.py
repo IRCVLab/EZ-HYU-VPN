@@ -13,8 +13,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
-from hyu_vpn.native_client import AutoLaunchMechanism, NativeAutoLaunchManager
-
 from installer.manifest import CommandRecorder, DryRunEnvironment, ManifestError, PayloadManifest, safe_join, stage_user_payload, _write_stage_manifest
 
 
@@ -30,7 +28,7 @@ class InstallerTestCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _script(self, rel: str, text: str = "#!/usr/bin/env python3\nprint('ok')\n") -> Path:
+    def _script(self, rel: str, text: str = '#!/bin/sh\nif [ "${1:-}" = root-util ] && [ "${2:-}" = fsync ]; then exit 0; fi\nif [ "${1:-}" = root-util ] && [ "${2:-}" = helper-state ]; then\n  raw=$(cat)\n  case "$raw" in\n    *\'"schema_version":1\'*\'"state":"stopped"\'*\'"pid":null\'*\'"session_nonce":null\'*\'"tunnel_interface":null\'*) printf \'%s\\n\' stopped; exit 0 ;;\n    *\'"schema_version":1\'*\'"state":"running"\'*\'"pid":\'*\'"session_nonce":"\'*\'"tunnel_interface":"utun\'*) printf \'%s\\n\' running; exit 0 ;;\n    *\'"schema_version":1\'*\'"state":"repair-required"\'*\'"pid":null\'*\'"session_nonce":"\'*\'"tunnel_interface":null\'*) printf \'%s\\n\' repair-required; exit 0 ;;\n  esac\n  exit 70\nfi\nif [ "${1:-}" = root-util ] && [ "${2:-}" = helper-repair-nonce ]; then sed -n \'s/.*"session_nonce":"\\([A-Za-z0-9_-][A-Za-z0-9_-]*\\)".*/\\1/p\' | head -n 1; exit 0; fi\nif [ "${1:-}" = status ]; then printf \'%s\\n\' \'{"schema_version":1,"state":"stopped","pid":null,"session_nonce":null,"tunnel_interface":null}\'; else printf ok; fi\n') -> Path:
         p = self.payload / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
@@ -45,10 +43,7 @@ class InstallerTestCase(unittest.TestCase):
             "runtime/vpnc/hyu-vpnc-wrapper",
             "runtime/vpnc/hyu-vpnc-wrapperd",
             "runtime/vpnc/vpnc-script",
-            "hyu-vpn-control",
-            "hyu-vpn-service",
-            "hyu-vpn-connect",
-            "hyu-vpn-native-client",
+            "hyu-vpn-macos-service",
         ]:
             self._script(rel)
         (self.payload / "runtime/openconnect/lib").mkdir(parents=True)
@@ -63,9 +58,9 @@ current=$(cat "$state" 2>/dev/null || printf stopped)
 case "${1:-}" in
   status)
     case "$current" in
-      stopped) printf '%s\\n' '{"schema_version":1,"state":"stopped"}' ;;
-      running) printf '%s\\n' '{"schema_version":1,"state":"running","pid":123,"session_nonce":"fake","tunnel_interface":"utun7"}' ;;
-      repair-required) printf '%s\\n' '{"schema_version":1,"state":"repair-required","session_nonce":"fake"}' ;;
+      stopped) printf '%s\\n' '{"schema_version":1,"state":"stopped","pid":null,"session_nonce":null,"tunnel_interface":null}' ;;
+      running) printf '%s\\n' '{"schema_version":1,"state":"running","pid":123,"session_nonce":"fake12345","tunnel_interface":"utun7"}' ;;
+      repair-required) printf '%s\\n' '{"schema_version":1,"state":"repair-required","pid":null,"session_nonce":"fake12345","tunnel_interface":null}' ;;
       *) exit 65 ;;
     esac
     ;;
@@ -85,7 +80,6 @@ esac
         (self.payload / "installer").mkdir()
         shutil.copy2(REPO / "installer" / "manifest.py", self.payload / "installer" / "manifest.py")
         (self.payload / "installer" / "manifest.py").chmod(0o755)
-        shutil.copytree(REPO / "src" / "hyu_vpn", self.payload / "src" / "hyu_vpn", dirs_exist_ok=True)
         (self.payload / "launchd").mkdir()
         for template in ["com.hyu.vpn.service.plist.in"]:
             shutil.copy2(REPO / "launchd" / template, self.payload / "launchd" / template)
@@ -103,12 +97,12 @@ esac
 
 class PayloadManifestTests(InstallerTestCase):
     def test_manifest_verify_rejects_hash_mode_extra_and_symlink(self):
-        (self.payload / "hyu-vpn-control").write_text("tampered", encoding="utf-8")
+        (self.payload / "hyu-vpn-macos-service").write_text("tampered", encoding="utf-8")
         with self.assertRaisesRegex(ManifestError, "hash mismatch"):
             PayloadManifest.verify(self.payload, self.manifest_path)
-        self._script("hyu-vpn-control")
+        self._script("hyu-vpn-macos-service")
         data = json.loads(self.manifest_path.read_text())
-        data["files"]["hyu-vpn-control"]["mode"] = "0600"
+        data["files"]["hyu-vpn-macos-service"]["mode"] = "0600"
         bad = self.payload / "bad-mode.json"
         bad.write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(ManifestError, "mode mismatch"):
@@ -165,8 +159,7 @@ class StageAndCliTests(InstallerTestCase):
             "runtime/bin/oathtool",
             "runtime/gp-hip-report",
             "runtime/vpnc/hyu-vpnc-wrapper",
-            "bin/hyu-vpn-native-client",
-            "src/hyu_vpn/__init__.py",
+            "bin/hyu-vpn-macos-service",
             "HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
             "HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader",
             "manifest.json",
@@ -179,7 +172,7 @@ class StageAndCliTests(InstallerTestCase):
         self.assertEqual(recorded[0][:3], ["/usr/bin/python3", "installer/manifest.py", "--verify-manifest"])
         self.assertFalse(any("/usr/bin/sudo" in cell for row in recorded[:-1] for cell in row))
 
-    def test_cli_stage_is_exact_unique_stage_dir_and_package_audit_checks_python_runtime(self):
+    def test_cli_stage_is_exact_unique_stage_dir_and_package_audit_checks_runtime_artifacts(self):
         base = self.root / "cli"
         stage1 = base / "stage-one"
         stage2 = base / "stage-two"
@@ -235,7 +228,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
 
     def make_fake_tools_for(self, env, failing_tool=None, route_output="", dns_output=""):
         tools = env.root / "Users" / ".fake-tools"
-        for tool in ["/usr/sbin/visudo", "/usr/sbin/chown", "/usr/bin/pgrep", "/usr/sbin/netstat", "/usr/sbin/scutil", "/usr/bin/env", "/bin/launchctl", "/bin/mv"]:
+        for tool in ["/usr/sbin/visudo", "/usr/sbin/chown", "/usr/bin/pgrep", "/usr/sbin/netstat", "/usr/sbin/scutil", "/usr/bin/env", "/usr/bin/sudo", "/bin/launchctl", "/bin/mv"]:
             path = tools / tool.lstrip("/")
             path.parent.mkdir(parents=True, exist_ok=True)
             name = path.name
@@ -248,7 +241,9 @@ class RootAdminShellHarnessTests(InstallerTestCase):
             elif name == "scutil" and dns_output:
                 body = f"#!/bin/sh\nprintf '%s\\n' {dns_output!r}\n"
             elif name == "env":
-                body = '#!/bin/sh\nroot=""\nfor arg in "$@"; do\n  case "$arg" in */Library/Application\\ Support/HYU\\ VPN/*) root=${arg%%/Library/Application\\ Support/HYU\\ VPN/*};; esac\ndone\nstate="$root/private/var/db/hyu-vpn"\nmkdir -p "$state"\ncase " $* " in\n  *" verify-suppressed "*) exit 0 ;;\n  *" suppress-auto-launch "*) printf \'%s\n\' \'{"schema_version":1,"console_uid":501,"mechanisms":[{"identifier":"com.paloaltonetworks.gp.pangps","kind":"launchd-gui","enabled":true,"exact_target":"/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist","running":false}]}\' > "$state/native-suppression.json"; chmod 600 "$state/native-suppression.json"; exit 0 ;;\n  *" restore-auto-launch "*) rm -f "$state/native-suppression.json"; exit 0 ;;\nesac\nexit 99\n'
+                body = '#!/bin/sh\nexit 99\n'
+            elif name == "sudo":
+                body = '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\n[ "$1" = "--" ] && shift\nexec "$@"\n'
             else:
                 body = "#!/bin/sh\nexit 0\n"
             path.write_text(body, encoding="utf-8")
@@ -258,45 +253,170 @@ class RootAdminShellHarnessTests(InstallerTestCase):
     def make_fake_tools(self, failing_tool=None, route_output="", dns_output=""):
         return self.make_fake_tools_for(self.env(), failing_tool=failing_tool, route_output=route_output, dns_output=dns_output)
 
-    def test_root_admin_installs_complete_payload_without_bootstrap_or_autostart(self):
+    def test_macos_manifest_rejects_legacy_backend_entries(self):
+        self.maxDiff = None
+        env = self.env()
+        stage = stage_user_payload(env)
+        proc = self.run_root_admin(env, stage)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+
+        stage_manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
+        stage_files = set(stage_manifest["files"])
+        app_support = env.root / "Library/Application Support/HYU VPN"
+        installed_legacy = [
+            rel
+            for rel in [
+                "bin/hyu-vpn-service",
+                "bin/hyu-vpn-control",
+                "bin/hyu-vpn-connect",
+                "src/hyu_vpn",
+            ]
+            if (app_support / rel).exists()
+        ]
+        rendered_service = plistlib.loads((env.root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist").read_bytes())
+        violations = {}
+        stage_legacy = sorted(
+            rel
+            for rel in stage_files
+            if rel in {"backend/hyu-vpn-service", "backend/hyu-vpn-control", "backend/hyu-vpn-connect"}
+            or rel == "src/hyu_vpn"
+            or rel.startswith("src/hyu_vpn/")
+        )
+        if stage_legacy:
+            violations["stage_manifest_legacy_backend_entries"] = stage_legacy
+        if installed_legacy:
+            violations["installed_legacy_backend_entries"] = sorted(installed_legacy)
+        if rendered_service["ProgramArguments"] != ["/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"]:
+            violations["rendered_service_program_arguments"] = rendered_service["ProgramArguments"]
+
+        rust_service_stage_entries = [rel for rel in stage_files if Path(rel).name == "hyu-vpn-macos-service"]
+
+        self.assertEqual(violations, {})
+        self.assertTrue(rust_service_stage_entries)
+        self.assertTrue((app_support / "bin/hyu-vpn-macos-service").exists())
+
+    def test_root_admin_bootstraps_with_exact_admin_health_cli_then_commits_before_menu_boundary(self):
         env = self.env()
         stage = stage_user_payload(env)
         proc = self.run_root_admin(env, stage)
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         root = env.root
-        self.assertTrue((root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper").exists())
-        wrapper = root / "Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"
-        self.assertTrue(wrapper.exists())
         app_support = root / "Library/Application Support/HYU VPN"
-        self.assertTrue((app_support / "helper-config.json").exists())
-        helper_config = json.loads((app_support / "helper-config.json").read_text(encoding="utf-8"))
-        self.assertEqual(helper_config["vpncScript"], "/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper")
-        self.assertNotIn(" ", helper_config["vpncScript"])
-        self.assertEqual(helper_config["vpncScriptSHA256"], hashlib.sha256(wrapper.read_bytes()).hexdigest())
-        self.assertTrue((app_support / "runtime/current/bin/openconnect").exists())
-        self.assertTrue((app_support / "runtime/vpnc/hyu-vpnc-wrapperd.sha256").exists())
-        self.assertTrue((app_support / "bin/hyu-vpn-service").exists())
-        self.assertTrue((root / "etc/sudoers.d/hyu-vpn").exists())
-        self.assertFalse((root / "etc/sudoers.d/com.hyu.vpn").exists())
-        service = plistlib.loads((root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist").read_bytes())
-        self.assertFalse((root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.menubar.plist").exists())
-        self.assertEqual(service["ProgramArguments"], ["/usr/bin/python3", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service"])
-        self.assertTrue(service["RunAtLoad"])
-        self.assertFalse(service["KeepAlive"])
+        self.assertTrue((app_support / "bin/hyu-vpn-macos-service").exists())
         commands = (root / "private/var/db/hyu-vpn/command-log.jsonl").read_text()
-        self.assertIn("launchctl disable gui/501/local.hyu-openconnect", commands)
-        self.assertNotIn("launchctl bootstrap", commands)
+        journal = (root / "private/var/db/hyu-vpn/install-transaction.log").read_text()
+        expected_health = (
+            "/usr/bin/sudo -H -u tester -- "
+            f"{app_support}/bin/hyu-vpn-macos-service health --uid 501 --home /Users/tester --timeout-ms 2500"
+        )
+        self.assertIn("launchctl bootstrap gui/501", commands)
+        self.assertIn("launchctl kickstart -k gui/501/com.hyu.vpn.service", commands)
+        self.assertIn(expected_health, commands)
+        self.assertNotIn("hyu-vpn-macos-service status", commands)
+        self.assertLess(commands.index("launchctl bootstrap"), commands.index(expected_health))
+        self.assertLess(commands.index(expected_health), journal.index("install-commit"))
+        self.assertEqual((root / "private/var/db/hyu-vpn/transaction-state").read_text().strip(), "complete")
+        self.assertNotIn("hyu-vpn-native-client", commands)
         self.assertNotIn("install_name_tool", commands)
         self.assertNotIn("codesign", commands)
 
-    def test_root_admin_ignores_user_stage_contents_and_rolls_back_exact_paths(self):
+    def test_root_admin_real_health_cli_failure_rolls_back_and_recover_is_idempotent(self):
+        env = DryRunEnvironment(root=self.root / "dry real health rollback", payload=self.payload, home=self.root / "home real health rollback", manifest=self.manifest_path)
+        old_service = env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"
+        old_service.parent.mkdir(parents=True, exist_ok=True)
+        old_service.write_text("old-service", encoding="utf-8")
+        old_service.chmod(0o755)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        sudo = tools / "usr/bin/sudo"
+        sudo.parent.mkdir(parents=True, exist_ok=True)
+        sudo.write_text("#!/bin/sh\necho health failed >&2\nexit 70\n", encoding="utf-8")
+        sudo.chmod(0o755)
+        proc = self.run_root_admin(env, stage, tools_root=tools)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("health failed", proc.stderr)
+        self.assertEqual(old_service.read_text(encoding="utf-8"), "old-service")
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        self.assertIn("rollback-complete", journal)
+        recover = self.run_root_admin(env, stage, recover=True, tools_root=tools)
+        self.assertEqual(recover.returncode, 0, recover.stderr + recover.stdout)
+
+    def test_root_admin_health_failure_boots_out_new_service_before_rollback_completes(self):
+        env = DryRunEnvironment(root=self.root / "dry health bootout rollback", payload=self.payload, home=self.root / "home health bootout rollback", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        sudo = tools / "usr/bin/sudo"
+        sudo.write_text("#!/bin/sh\necho health failed >&2\nexit 70\n", encoding="utf-8")
+        sudo.chmod(0o755)
+        proc = self.run_root_admin(env, stage, tools_root=tools)
+        self.assertNotEqual(proc.returncode, 0)
+        commands = (env.root / "private/var/db/hyu-vpn/command-log.jsonl").read_text(encoding="utf-8")
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        service_bootout = "launchctl bootout gui/501/com.hyu.vpn.service"
+        self.assertGreaterEqual(commands.count(service_bootout), 2, commands)
+        self.assertLess(commands.index("launchctl kickstart -k gui/501/com.hyu.vpn.service"), commands.rindex(service_bootout))
+        self.assertLess(journal.index("rollback-start"), journal.index("rollback-complete"))
+        self.assertEqual((env.root / "private/var/db/hyu-vpn/transaction-state").read_text().strip(), "complete")
+
+    def test_root_admin_bootout_failure_during_rollback_surfaces_incomplete_repair(self):
+        env = DryRunEnvironment(root=self.root / "dry health bootout rollback failure", payload=self.payload, home=self.root / "home health bootout rollback failure", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        sudo = tools / "usr/bin/sudo"
+        sudo.write_text("#!/bin/sh\necho health failed >&2\nexit 70\n", encoding="utf-8")
+        sudo.chmod(0o755)
+        launchctl = tools / "bin/launchctl"
+        launchctl.write_text(
+            '#!/bin/sh\n'
+            'state="$0.bootstrapped"\n'
+            'if [ "$1" = kickstart ]; then : > "$state"; exit 0; fi\n'
+            'if [ "$1" = bootout ] && [ -f "$state" ] && [ "$2" = gui/501/com.hyu.vpn.service ]; then echo bootout failed >&2; exit 55; fi\n'
+            'exit 0\n',
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+        proc = self.run_root_admin(env, stage, tools_root=tools)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("bootout failed", proc.stderr)
+        state = env.root / "private/var/db/hyu-vpn"
+        self.assertNotIn("rollback-complete", (state / "install-transaction.log").read_text(encoding="utf-8"))
+        self.assertNotEqual((state / "transaction-state").read_text().strip(), "complete")
+
+    def test_root_admin_health_failure_rolls_back_previous_binary_plist_helper_sudoers_app_state(self):
+        env = DryRunEnvironment(root=self.root / "dry health rollback", payload=self.payload, home=self.root / "home health rollback", manifest=self.manifest_path)
+        old_paths = {
+            "service": env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service",
+            "plist": env.root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist",
+            "helper": env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper",
+            "sudoers": env.root / "etc/sudoers.d/hyu-vpn",
+            "app": env.root / "Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp",
+            "state": env.root / "private/var/db/hyu-vpn/installed-paths.tsv",
+        }
+        for name, path in old_paths.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"old-{name}", encoding="utf-8")
+            if name in {"service", "helper", "app"}:
+                path.chmod(0o755)
+        stage = stage_user_payload(env)
+        proc = self.run_root_admin(env, stage, extra_env={"HYU_VPN_FAIL_AFTER": "health"})
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("injected failure after health", proc.stderr)
+        for name, path in old_paths.items():
+            self.assertTrue(path.exists(), name)
+            self.assertEqual(path.read_text(encoding="utf-8"), f"old-{name}")
+        state = env.root / "private/var/db/hyu-vpn"
+        self.assertEqual((state / "transaction-state").read_text().strip(), "complete")
+        self.assertIn("rollback-complete", (state / "install-transaction.log").read_text(encoding="utf-8"))
+        self.assertFalse((state / "backups.tsv").exists())
+
+    def test_root_admin_rejects_user_stage_tamper_and_rolls_back_exact_paths(self):
         env = self.env()
         stage = stage_user_payload(env)
         (stage / "runtime/bin/openconnect").write_text("tampered", encoding="utf-8")
         proc = self.run_root_admin(env, stage)
-        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        installed = env.root / "Library/Application Support/HYU VPN/runtime/current/bin/openconnect"
-        self.assertEqual(installed.read_text(encoding="utf-8"), (env.payload / "runtime/openconnect/bin/openconnect").read_text(encoding="utf-8"))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("hash mismatch: runtime/bin/openconnect", proc.stderr)
+        self.assertFalse((env.root / "Library/Application Support/HYU VPN/runtime/current/bin/openconnect").exists())
         env2 = DryRunEnvironment(root=self.root / "dry rollback", payload=self.payload, home=self.root / "home rollback", manifest=self.manifest_path)
         stage2 = stage_user_payload(env2)
         proc = self.run_root_admin(env2, stage2, extra_env={"HYU_VPN_FAIL_AFTER": "sudoers"})
@@ -304,11 +424,23 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertFalse((env2.root / "etc/sudoers.d/hyu-vpn").exists())
         self.assertIn("rollback-complete", (env2.root / "private/var/db/hyu-vpn/install-transaction.log").read_text())
 
+    def test_root_admin_accepts_valid_stage_manifest_with_swift_json_spacing(self):
+        env = self.env()
+        stage = stage_user_payload(env)
+        manifest = json.loads((stage / "manifest.json").read_text(encoding="utf-8"))
+        swift_json = (json.dumps(manifest, indent=2, separators=(",", " : ")) + "\n").replace("/", r"\/")
+        (stage / "manifest.json").write_text(swift_json, encoding="utf-8")
+
+        proc = self.run_root_admin(env, stage)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertEqual((env.root / "private/var/db/hyu-vpn/transaction-state").read_text().strip(), "complete")
+
     def test_successful_upgrade_rollback_is_idempotent_under_explicit_recovery(self):
         env = DryRunEnvironment(root=self.root / "dry idempotent rollback", payload=self.payload, home=self.root / "home idempotent rollback", manifest=self.manifest_path)
         old_app = env.root / "Applications/HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"
         old_helper = env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper"
-        old_service = env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-service"
+        old_service = env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"
         old_state = env.root / "private/var/db/hyu-vpn/installed-paths.tsv"
         old_app.parent.mkdir(parents=True, exist_ok=True)
         old_helper.parent.mkdir(parents=True, exist_ok=True)
@@ -346,6 +478,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         legacy = env.root / "etc/sudoers.d/com.hyu.vpn"
         launchctl.write_text(
             "#!/bin/sh\n"
+            'case " $* " in *" local.hyu-openconnect "*) ;; *) exit 0 ;; esac\n'
             f"mkdir -p {str(legacy.parent)!r}\n"
             f"printf '%s\\n' legacy-rule > {str(legacy)!r}\n"
             "exit 0\n",
@@ -379,7 +512,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertTrue(service.exists())
         service_plist = plistlib.loads(service.read_bytes())
         self.assertEqual(service_plist["Label"], "com.hyu.vpn.service")
-        self.assertEqual(service_plist["ProgramArguments"], ["/usr/bin/python3", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service"])
+        self.assertEqual(service_plist["ProgramArguments"], ["/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"])
         commands = (env.root / "private/var/db/hyu-vpn/command-log.jsonl").read_text(encoding="utf-8")
         service_bootout = "launchctl bootout gui/501/com.hyu.vpn.service"
         legacy_probe = "launchctl print gui/501/local.hyu-openconnect"
@@ -390,30 +523,6 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         installed_paths = (env.root / "private/var/db/hyu-vpn/installed-paths.tsv").read_text(encoding="utf-8")
         self.assertNotIn("com.hyu.vpn.menubar.plist", installed_paths)
         self.assertIn("Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist", installed_paths)
-
-    def test_upgrade_preserves_existing_native_suppression_snapshot(self):
-        env = DryRunEnvironment(root=self.root / "dry native upgrade", payload=self.payload, home=self.root / "home native upgrade", manifest=self.manifest_path)
-        stage = stage_user_payload(env)
-        state = env.root / "private/var/db/hyu-vpn"
-        state.mkdir(parents=True, exist_ok=True)
-        record = state / "native-suppression.json"
-        original = (
-            '{"schema_version":1,"console_uid":501,"mechanisms":['
-            '{"identifier":"com.paloaltonetworks.gp.pangps","kind":"launchd-gui",'
-            '"enabled":true,"exact_target":"/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist","running":false}'
-            ']}\n'
-        )
-        record.write_text(original, encoding="utf-8")
-        record.chmod(0o600)
-
-        proc = self.run_root_admin(env, stage, tools_root=self.make_fake_tools_for(env))
-
-        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
-        self.assertEqual(record.read_text(encoding="utf-8"), original)
-        commands = (state / "command-log.jsonl").read_text(encoding="utf-8")
-        self.assertNotIn("suppress-auto-launch", commands)
-        self.assertIn("verify-suppressed", commands)
-        self.assertIn("native-suppression-preserved", (state / "install-transaction.log").read_text(encoding="utf-8"))
 
     def _inject_stale_old_helper_during_quarantine(self, env, tools):
         helper = env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper"
@@ -430,7 +539,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
             "#!/bin/sh\n"
             f"state={str(state)!r}\n"
             "case \"${1:-}\" in\n"
-            "  status) printf '%s\\n' '{\"schema_version\":1,\"state\":\"repair-required\",\"session_nonce\":\"oldsession1\"}' ;;\n"
+            '  status) printf \'%s\\n\' \'{"schema_version":1,"state":"repair-required","pid":null,"session_nonce":"oldsession1","tunnel_interface":null}\' ;;\n'
             "  repair) exit 42 ;;\n"
             "  stop) exit 42 ;;\n"
             "  *) exit 64 ;;\n"
@@ -480,10 +589,77 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
         self.assertIn("rollback-complete", journal)
 
-    def test_malicious_stage_with_regenerated_digest_cannot_override_verified_package(self):
+    def test_upgrade_accepts_nonzero_stop_that_transitions_to_repair_required(self):
+        env = DryRunEnvironment(root=self.root / "dry stop repair upgrade", payload=self.payload, home=self.root / "home stop repair upgrade", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        tools = self.make_fake_tools_for(env)
+        helper = env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.helper"
+        state = env.root / "private/var/db/hyu-vpn/fake-helper-state"
+        ledger = env.root / "private/var/db/hyu-vpn/ledger"
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        state.parent.mkdir(parents=True, exist_ok=True)
+        ledger.mkdir(parents=True, exist_ok=True)
+        ledger.chmod(0o700)
+        state.write_text("running", encoding="utf-8")
+        helper.write_text(
+            "#!/bin/sh\n"
+            f"state={str(state)!r}\n"
+            "case \"${1:-}\" in\n"
+            "  status)\n"
+            "    current=$(cat \"$state\")\n"
+            "    if [ \"$current\" = running ]; then printf '%s\\n' '{\"schema_version\":1,\"state\":\"running\",\"pid\":123,\"session_nonce\":\"stopfail1\",\"tunnel_interface\":\"utun7\"}'; else printf '%s\\n' '{\"schema_version\":1,\"state\":\"repair-required\",\"pid\":null,\"session_nonce\":\"stopfail1\",\"tunnel_interface\":null}'; fi ;;\n"
+            "  stop) printf repair-required > \"$state\"; exit 42 ;;\n"
+            "  repair) exit 42 ;;\n"
+            "  *) exit 64 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+
+        proc = self.run_root_admin(env, stage, tools_root=tools)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        self.assertIn("old-helper-stop-repair-deferred", journal)
+        self.assertIn("inactive-repair-state-cleared", journal)
+
+    def test_failed_upgrade_restarts_service_after_rollback(self):
+        env = DryRunEnvironment(root=self.root / "dry rollback restart", payload=self.payload, home=self.root / "home rollback restart", manifest=self.manifest_path)
+        stage = stage_user_payload(env)
+        service = env.root / "Users/tester/Library/LaunchAgents/com.hyu.vpn.service.plist"
+        service.parent.mkdir(parents=True, exist_ok=True)
+        service.write_text("old-service-plist", encoding="utf-8")
+
+        proc = self.run_root_admin(env, stage, extra_env={"HYU_VPN_FAIL_AFTER": "helper"})
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(service.read_text(encoding="utf-8"), "old-service-plist")
+        commands = (env.root / "private/var/db/hyu-vpn/command-log.jsonl").read_text(encoding="utf-8")
+        self.assertIn("launchctl bootstrap gui/501", commands)
+        self.assertIn("launchctl kickstart -k gui/501/com.hyu.vpn.service", commands)
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        self.assertIn("rollback-existing-service-restarted", journal)
+
+    def test_tampered_stage_service_cannot_execute_root_util_before_rejection(self):
         env = self.env()
         stage = stage_user_payload(env)
-        (stage / "backend/hyu-vpn-service").write_text("evil", encoding="utf-8")
+        marker = self.root / "stage-root-util-executed"
+        (stage / "bin/hyu-vpn-macos-service").write_text(
+            f"#!/bin/sh\nif [ \"${{1:-}}\" = root-util ] && [ \"${{2:-}}\" = fsync ]; then printf owned > {str(marker)!r}; exit 0; fi\nexit 70\n",
+            encoding="utf-8",
+        )
+        (stage / "bin/hyu-vpn-macos-service").chmod(0o755)
+
+        proc = self.run_root_admin(env, stage)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("hash mismatch", proc.stderr + proc.stdout)
+        self.assertFalse(marker.exists(), "root executed mutable user-stage service before trust verification")
+
+    def test_regenerated_stage_manifest_is_rejected_by_locked_package_payload(self):
+        env = self.env()
+        stage = stage_user_payload(env)
+        (stage / "bin/hyu-vpn-macos-service").write_text("#!/bin/sh\nif [ \"${1:-}\" = root-util ] && [ \"${2:-}\" = fsync ]; then exit 0; fi\nprintf preverified-replacement-service\n", encoding="utf-8")
         _write_stage_manifest(stage)
         args = [
             "--dry-run-root", str(env.root),
@@ -498,29 +674,17 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         ]
         proc = self.run_root_admin_raw(args)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("staged manifest digest mismatch", proc.stderr)
-        self.assertFalse((env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-service").exists())
+        self.assertIn("hash mismatch", proc.stderr + proc.stdout)
+        installed = env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"
+        self.assertFalse(installed.exists())
 
-    def test_payload_concurrent_change_after_user_stage_fails_root_package_verification(self):
+    def test_payload_concurrent_change_after_user_stage_is_rejected_by_package_manifest(self):
         env = self.env()
         stage = stage_user_payload(env)
-        package_digest = hashlib.sha256((env.payload / "manifest.json").read_bytes()).hexdigest()
-        (env.payload / "hyu-vpn-control").write_text("changed-after-stage", encoding="utf-8")
-        args = [
-            "--dry-run-root", str(env.root),
-            "--stage", str(stage),
-            "--stage-manifest-sha256", hashlib.sha256((stage / "manifest.json").read_bytes()).hexdigest(),
-            "--package-manifest-sha256", package_digest,
-            "--payload", str(env.payload),
-            "--manifest", str(env.manifest),
-            "--admin-user", env.user,
-            "--admin-uid", "501",
-            "--administrator-phase", "install",
-        ]
-        proc = self.run_root_admin_raw(args)
+        (env.payload / "hyu-vpn-macos-service").write_text("#!/bin/sh\nif [ \"${1:-}\" = root-util ] && [ \"${2:-}\" = fsync ]; then exit 0; fi\nprintf changed-after-stage\n", encoding="utf-8")
+        proc = self.run_root_admin(env, stage)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("package snapshot manifest verification failed", proc.stderr)
-        self.assertFalse((env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-control").exists())
+        self.assertIn("hash mismatch", proc.stderr + proc.stdout)
 
 
 
@@ -544,49 +708,23 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("manifest must be package top manifest", proc.stderr)
 
-    def test_root_package_snapshot_rejects_symlinked_verifier_before_execution(self):
+    def test_root_rejects_symlinked_preverified_stage_before_mutation(self):
         env = self.env()
         stage = stage_user_payload(env)
-        package_digest = hashlib.sha256((env.payload / "manifest.json").read_bytes()).hexdigest()
-        verifier = env.payload / "installer/manifest.py"
-        verifier.unlink()
-        verifier.symlink_to("/tmp/evil-manifest.py")
-        args = [
-            "--dry-run-root", str(env.root),
-            "--stage", str(stage),
-            "--stage-manifest-sha256", hashlib.sha256((stage / "manifest.json").read_bytes()).hexdigest(),
-            "--package-manifest-sha256", package_digest,
-            "--payload", str(env.payload),
-            "--manifest", str(env.manifest),
-            "--admin-user", env.user,
-            "--admin-uid", "501",
-            "--administrator-phase", "install",
-        ]
-        proc = self.run_root_admin_raw(args)
+        target = stage / "bin/hyu-vpn-macos-service"
+        target.unlink()
+        target.symlink_to("/tmp/evil-service")
+        proc = self.run_root_admin(env, stage)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("package snapshot manifest verification failed", proc.stderr)
-        self.assertIn("symlink in package snapshot", proc.stderr)
+        self.assertIn("symlink in staged payload", proc.stderr)
 
 
-
-    def test_stale_native_suppression_marker_is_cleared_before_pre_suppression_failure(self):
-        env = DryRunEnvironment(root=self.root / "dry stale", payload=self.payload, home=self.root / "home stale", manifest=self.manifest_path)
-        stage = stage_user_payload(env)
-        state = env.root / "private/var/db/hyu-vpn"
-        state.mkdir(parents=True, exist_ok=True)
-        (state / "native-suppression-transaction").write_text("stale", encoding="utf-8")
-        proc = self.run_root_admin(env, stage, extra_env={"HYU_VPN_FAIL_AFTER": "app"})
-        self.assertNotEqual(proc.returncode, 0)
-        commands_path = state / "command-log.jsonl"
-        commands = commands_path.read_text() if commands_path.exists() else ""
-        self.assertNotIn("restore-auto-launch", commands)
-        self.assertFalse((state / "native-suppression-transaction").exists())
 
     def test_stage_manifest_digest_binds_pre_sudo_stage_against_tamper_and_regenerate(self):
         env = self.env()
         stage = stage_user_payload(env)
         expected = hashlib.sha256((stage / "manifest.json").read_bytes()).hexdigest()
-        (stage / "backend/hyu-vpn-service").write_text("evil", encoding="utf-8")
+        (stage / "bin/hyu-vpn-macos-service").write_text("evil", encoding="utf-8")
         _write_stage_manifest(stage)
         args = [
             "--dry-run-root", str(env.root),
@@ -602,47 +740,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         proc = self.run_root_admin_raw(args)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("staged manifest digest mismatch", proc.stderr)
-        self.assertFalse((env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-service").exists())
-
-    def test_post_native_failure_restores_native_before_rollback_removes_cli(self):
-        env = DryRunEnvironment(root=self.root / "dry native", payload=self.payload, home=self.root / "home native", manifest=self.manifest_path)
-        stage = stage_user_payload(env)
-        proc = self.run_root_admin(env, stage, extra_env={"HYU_VPN_FAIL_AFTER": "native-suppression"}, tools_root=self.make_fake_tools_for(env))
-        self.assertNotEqual(proc.returncode, 0)
-        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text()
-        commands = (env.root / "private/var/db/hyu-vpn/command-log.jsonl").read_text()
-        self.assertIn("rollback-native-restored", journal)
-        self.assertLess(commands.index("suppress-auto-launch"), commands.index("restore-auto-launch"))
-
-    def test_native_suppress_command_failure_is_marked_for_root_rollback_before_cli_runs(self):
-        env = DryRunEnvironment(root=self.root / "dry native command failure", payload=self.payload, home=self.root / "home native command failure", manifest=self.manifest_path)
-        stage = stage_user_payload(env)
-        tools = self.make_fake_tools_for(env)
-        env_tool = tools / "usr/bin/env"
-        env_tool.write_text(
-            '#!/bin/sh\n'
-            'root=""\n'
-            'for arg in "$@"; do case "$arg" in */Library/Application\\ Support/HYU\\ VPN/*) root=${arg%%/Library/Application\\ Support/HYU\\ VPN/*};; esac; done\n'
-            'state="$root/private/var/db/hyu-vpn"\n'
-            'mkdir -p "$state"\n'
-            'case " $* " in\n'
-            '  *" suppress-auto-launch "*) printf \'%s\\n\' \'{"schema_version":1,"console_uid":501,"phase":"rollback-required","pending_identifier":null,"applied_identifiers":["com.paloaltonetworks.gp.pangps"],"stopped_identifiers":[],"mechanisms":[{"identifier":"com.paloaltonetworks.gp.pangps","kind":"launchd-gui","enabled":true,"exact_target":"/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist","running":false}]}\' > "$state/native-suppression.json"; chmod 600 "$state/native-suppression.json"; exit 42 ;;\n'
-            '  *" restore-auto-launch "*) rm -f "$state/native-suppression.json"; exit 0 ;;\n'
-            'esac\n'
-            'exit 99\n',
-            encoding="utf-8",
-        )
-        env_tool.chmod(0o755)
-
-        proc = self.run_root_admin(env, stage, tools_root=tools)
-
-        self.assertNotEqual(proc.returncode, 0)
-        commands = (env.root / "private/var/db/hyu-vpn/command-log.jsonl").read_text(encoding="utf-8")
-        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
-        self.assertIn("suppress-auto-launch", commands)
-        self.assertIn("restore-auto-launch", commands)
-        self.assertLess(commands.index("suppress-auto-launch"), commands.index("restore-auto-launch"))
-        self.assertIn("rollback-native-restored", journal)
+        self.assertFalse((env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service").exists())
 
     def test_dry_root_must_be_fresh_marked_temp_and_tools_root_confined(self):
         args = ["--dry-run-root", "/", "--stage", str(self.payload), "--package-manifest-sha256", hashlib.sha256((self.payload / "manifest.json").read_bytes()).hexdigest(), "--payload", str(self.payload), "--manifest", str(self.manifest_path), "--admin-user", "tester", "--admin-uid", "501", "--administrator-phase", "install"]
@@ -784,31 +882,106 @@ resolver #1
         self.assertFalse((env.root / "Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper").exists())
 
 
-    def test_native_snapshot_validator_accepts_actual_manager_record_schema(self):
-        class Store:
-            def __init__(self):
-                self.mechanisms = {
-                    "com.paloaltonetworks.gp.pangps": AutoLaunchMechanism(
-                        "com.paloaltonetworks.gp.pangps",
-                        "launchd-gui",
-                        True,
-                        "/Library/LaunchAgents/com.paloaltonetworks.gp.pangps.plist",
-                    )
-                }
-            def list_mechanisms(self):
-                return list(self.mechanisms.values())
-            def set_enabled(self, identifier, enabled):
-                current = self.mechanisms[identifier]
-                self.mechanisms[identifier] = AutoLaunchMechanism(current.identifier, current.kind, enabled, current.exact_target)
-        with tempfile.TemporaryDirectory() as td:
-            record = Path(td) / "native-suppression.json"
-            NativeAutoLaunchManager(store=Store(), console_uid=501).suppress_auto_launch(record)
-            data = json.loads(record.read_text(encoding="utf-8"))
-        self.assertEqual(set(data), {"schema_version", "console_uid", "mechanisms"})
-        self.assertEqual(set(data["mechanisms"][0]), {"identifier", "kind", "enabled", "exact_target", "running"})
-        root_admin = (REPO / "installer/root-admin.sh").read_text(encoding="utf-8")
-        for token in ["mechanisms", "exact_target", "com.paloaltonetworks.gp.pangps", "com.paloaltonetworks.gp.pangpa", "com.paloaltonetworks.gp.pangpsd"]:
-            self.assertIn(token, root_admin)
+    def test_root_admin_rejects_privileged_destination_symlink_ancestors(self):
+        targets = [
+            ("Library/Application Support", "privileged destination contains symlink"),
+            ("Library/PrivilegedHelperTools", "privileged destination contains symlink"),
+            ("Applications", "privileged destination contains symlink"),
+            ("Users/tester/Library/LaunchAgents", "privileged destination contains symlink"),
+            ("etc/sudoers.d", "privileged destination contains symlink"),
+            ("private/var/db/hyu-vpn", "privileged destination contains symlink"),
+        ]
+        for rel, message in targets:
+            env = DryRunEnvironment(root=self.root / f"dry symlink {rel.replace('/', '_')}", payload=self.payload, home=self.root / f"home symlink {rel.replace('/', '_')}", manifest=self.manifest_path)
+            stage = stage_user_payload(env)
+            target = env.root / rel
+            if target.exists() and target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(self.root)
+            proc = self.run_root_admin(env, stage)
+            self.assertNotEqual(proc.returncode, 0, rel)
+            self.assertIn(message, proc.stderr)
+
+    def test_root_admin_rejects_group_or_world_writable_privileged_ancestors(self):
+        for rel in ["Library/Application Support", "Library/PrivilegedHelperTools", "Applications", "Users/tester/Library/LaunchAgents", "etc/sudoers.d", "private/var/db/hyu-vpn"]:
+            env = DryRunEnvironment(root=self.root / f"dry writable {rel.replace('/', '_')}", payload=self.payload, home=self.root / f"home writable {rel.replace('/', '_')}", manifest=self.manifest_path)
+            stage = stage_user_payload(env)
+            target = env.root / rel
+            target.mkdir(parents=True, exist_ok=True)
+            target.chmod(0o777)
+            proc = self.run_root_admin(env, stage)
+            self.assertNotEqual(proc.returncode, 0, rel)
+            self.assertIn("privileged destination ancestor is writable", proc.stderr)
+
+    def test_static_forbids_production_native_client_payload_and_python_install_hooks(self):
+        production_files = [
+            "installer/root-admin.sh",
+            "packaging/README-lab.md",
+            "launchd/com.hyu.vpn.service.plist.in",
+        ]
+        combined = "\n".join((REPO / rel).read_text(encoding="utf-8") for rel in production_files)
+        for forbidden in ["hyu-vpn-native-client", "src/hyu_vpn", "suppress-auto-launch", "verify-suppressed", "restore-auto-launch", "native-suppression", "com.paloaltonetworks.gp", "/usr/bin/python3", "PYTHON3_PATH", "python3", "thon3", 'manifest.py" --payload', "manifest.py' --payload"]:
+            self.assertNotIn(forbidden, combined)
+
+    def test_live_style_privileged_chain_guard_checks_absolute_ancestors_from_root(self):
+        sandbox = self.root / "live-style"
+        safe = sandbox / "Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"
+        safe.parent.mkdir(parents=True, exist_ok=True)
+        safe.parent.chmod(0o755)
+        env = {"HYU_VPN_CHAIN_GUARD_SELFTEST_PATH": str(safe)}
+        ok = self.run_root_admin_raw(["--payload", str(self.payload), "--manifest", str(self.manifest_path), "--administrator-phase", "install", "--live-install", f"hyu-install-mutation-{int(time.time())}"], env=env)
+        self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
+
+        writable = sandbox / "Applications/HYU VPN.app"
+        writable.parent.mkdir(parents=True, exist_ok=True)
+        writable.parent.chmod(0o777)
+        bad = self.run_root_admin_raw(["--payload", str(self.payload), "--manifest", str(self.manifest_path), "--administrator-phase", "install", "--live-install", f"hyu-install-mutation-{int(time.time())}"], env={"HYU_VPN_CHAIN_GUARD_SELFTEST_PATH": str(writable)})
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("privileged destination ancestor is writable", bad.stderr)
+
+        writable.write_text("existing", encoding="utf-8")
+        writable.chmod(0o755)
+        existing_bad = self.run_root_admin_raw(["--payload", str(self.payload), "--manifest", str(self.manifest_path), "--administrator-phase", "install", "--live-install", f"hyu-install-mutation-{int(time.time())}"], env={"HYU_VPN_CHAIN_GUARD_SELFTEST_PATH": str(writable)})
+        self.assertNotEqual(existing_bad.returncode, 0)
+        self.assertIn("privileged destination ancestor is writable", existing_bad.stderr)
+
+        link_parent = sandbox / "etc"
+        if link_parent.exists() or link_parent.is_symlink():
+            if link_parent.is_dir() and not link_parent.is_symlink():
+                shutil.rmtree(link_parent)
+            else:
+                link_parent.unlink()
+        link_parent.symlink_to(sandbox / "Library")
+        symlinked = self.run_root_admin_raw(["--payload", str(self.payload), "--manifest", str(self.manifest_path), "--administrator-phase", "install", "--live-install", f"hyu-install-mutation-{int(time.time())}"], env={"HYU_VPN_CHAIN_GUARD_SELFTEST_PATH": str(link_parent / "sudoers.d/hyu-vpn")})
+        self.assertNotEqual(symlinked.returncode, 0)
+        self.assertIn("privileged destination contains symlink", symlinked.stderr)
+
+    def test_live_chain_guard_allows_standard_macos_etc_alias(self):
+        proc = self.run_root_admin_raw(
+            [
+                "--payload", str(self.payload),
+                "--manifest", str(self.manifest_path),
+                "--administrator-phase", "install",
+                "--live-install", f"hyu-install-mutation-{int(time.time())}",
+            ],
+            env={"HYU_VPN_CHAIN_GUARD_SELFTEST_PATH": "/etc"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+
+    def test_live_chain_guard_allows_standard_macos_applications_anchor(self):
+        proc = self.run_root_admin_raw(
+            [
+                "--payload", str(self.payload),
+                "--manifest", str(self.manifest_path),
+                "--administrator-phase", "install",
+                "--live-install", f"hyu-install-mutation-{int(time.time())}",
+            ],
+            env={"HYU_VPN_CHAIN_GUARD_SELFTEST_PATH": "/Applications"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
 
     def test_root_admin_static_security_contracts(self):
         text = (REPO / "installer/root-admin.sh").read_text(encoding="utf-8")
@@ -821,8 +994,8 @@ resolver #1
         self.assertIn('capture_cmd(){', text)
         capture_line = next(line for line in text.splitlines() if line.startswith("capture_cmd(){"))
         self.assertIn('[[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0', capture_line)
-        self.assertIn("validate_native_snapshot", text)
-        self.assertIn('SUDO_UID="$ADMIN_UID"', text)
+        self.assertNotIn("hyu-vpn-native-client", text)
+        self.assertNotIn("suppress-auto-launch", text)
         self.assertIn("print-disabled", text)
         self.assertIn("openconnect.*secure", text)
         self.assertIn("run_optional_cmd", text)
@@ -832,11 +1005,16 @@ resolver #1
         self.assertIn("--package-manifest-sha256", text)
         self.assertIn("verify_package_manifest_digest", text)
         self.assertIn("copy_package_snapshot", text)
-        self.assertIn('--stage-user-payload --stage-dir "$TXN_SNAPSHOT"', text)
         self.assertIn("verify_stage_digest", text)
-        self.assertIn("rollback-native-restored", text)
-        self.assertIn("native-suppression-transaction", text)
-        self.assertIn("/bin/rm -f \"$STATE_DIR/native-suppression-transaction\"", text)
+        self.assertIn("root-util fsync", text)
+        self.assertIn("root-util helper-state", text)
+        self.assertNotIn('"$STAGE/bin/hyu-vpn-macos-service"', text)
+        self.assertNotIn('"$PAYLOAD/hyu-vpn-macos-service"', text)
+        self.assertIn('ROOT_NATIVE_TOOL="$ROOT_NATIVE_TOOL_DIR/hyu-vpn-macos-service"', text)
+        self.assertNotIn("durable_flush(){ :; }", text)
+        self.assertNotIn("sed -n 's/.*\"state\"", text)
+        self.assertIn("validate_privileged_destination_chain", text)
+        self.assertIn("root-service-health-ok", text)
         self.assertIn('/bin/chmod 700 "$dst"', text)
         self.assertIn('/usr/sbin/chown -R root:wheel "$dst"', text)
         self.assertIn('durable_flush', text)
@@ -871,13 +1049,13 @@ class LauncherAndTemplateTests(InstallerTestCase):
     def test_launchd_templates_are_valid_safe_defaults(self):
         for rel in ["launchd/com.hyu.vpn.service.plist.in"]:
             text = (REPO / rel).read_text(encoding="utf-8")
-            rendered = text.replace("@USER_HOME@", "/Users/tester").replace("@APP_PATH@", "/Applications/HYU VPN.app").replace("@SERVICE_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service").replace("@CONTROL_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-control")
+            rendered = text.replace("@USER_HOME@", "/Users/tester").replace("@APP_PATH@", "/Applications/HYU VPN.app").replace("@SERVICE_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service")
             plist = plistlib.loads(rendered.encode("utf-8"))
             self.assertTrue(plist["Label"].startswith("com.hyu.vpn."))
             self.assertTrue(plist["RunAtLoad"])
             self.assertFalse(plist["KeepAlive"])
-        service = plistlib.loads((REPO / "launchd/com.hyu.vpn.service.plist.in").read_text().replace("@USER_HOME@", "/Users/tester").replace("@SERVICE_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service").encode())
-        self.assertEqual(service["ProgramArguments"], ["/usr/bin/python3", "/Library/Application Support/HYU VPN/bin/hyu-vpn-service"])
+        service = plistlib.loads((REPO / "launchd/com.hyu.vpn.service.plist.in").read_text().replace("@USER_HOME@", "/Users/tester").replace("@SERVICE_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service").encode())
+        self.assertEqual(service["ProgramArguments"], ["/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"])
 
     def test_production_menu_bundle_uses_canonical_single_instance_identity(self):
         plist = plistlib.loads((REPO / "macos/Resources/HYUVPNMenuApp/Info.plist").read_bytes())

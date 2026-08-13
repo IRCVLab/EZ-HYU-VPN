@@ -47,6 +47,23 @@ class LaunchdConfigTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertNotIn(value, text)
 
+    def test_macos_launchagent_execs_rust_service_directly(self):
+        template = ROOT / "launchd" / "com.hyu.vpn.service.plist.in"
+        root_admin = (ROOT / "installer" / "root-admin.sh").read_text(encoding="utf-8")
+        service_path = root_admin.split("s#@SERVICE_PATH@#", 1)[1].split("#g", 1)[0]
+        rendered = (
+            template.read_text(encoding="utf-8")
+            .replace("@USER_HOME@", "/Users/tester")
+            .replace("@APP_PATH@", "/Applications/HYU VPN.app")
+            .replace("@SERVICE_PATH@", service_path)
+            .replace("@CONTROL_PATH@", "/Library/Application Support/HYU VPN/bin/hyu-vpn-control")
+        )
+        config = plistlib.loads(rendered.encode("utf-8"))
+
+        self.assertEqual(service_path, "/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service")
+        self.assertEqual(config["ProgramArguments"], ["/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"])
+        self.assertNotIn("/usr/bin/python3", rendered)
+
     def test_service_entrypoint_is_executable_and_imports_supervisor_main(self):
         text = SERVICE.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("#!/usr/bin/env python3"))

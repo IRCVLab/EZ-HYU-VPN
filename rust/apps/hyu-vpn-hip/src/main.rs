@@ -5,6 +5,8 @@ use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
 use hyu_vpn_hip::build_hip_from_args;
+#[cfg(target_os = "macos")]
+use hyu_vpn_hip::build_macos_hip_from_args;
 #[cfg(windows)]
 use hyu_vpn_hip::build_windows_hip_from_args;
 #[cfg(target_os = "linux")]
@@ -43,7 +45,13 @@ fn run() -> Result<(), i32> {
         &generated_at,
         std::env::var("APP_VERSION").ok().as_deref(),
     );
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    let xml = build_macos_hip_from_args(
+        &args,
+        &generated_at,
+        std::env::var("APP_VERSION").ok().as_deref(),
+    );
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     let xml: Result<String, hyu_vpn_hip::HipCliError> = Err(hyu_vpn_hip::HipCliError::Collection);
     let xml = xml.map_err(|error| {
         eprintln!("HYU VPN HIP failed: {error}");

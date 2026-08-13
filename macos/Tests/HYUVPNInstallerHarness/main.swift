@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import HYUVPNInstallerCore
 import HYUVPNMenuCore
 
@@ -100,6 +101,12 @@ private func activationPolicyClassifiesMenuStartAsWarning() throws {
     try expect(InstallerActivationPolicy.classify(serviceStarted: false, failedCode: "SERVICE_KICKSTART_FAILED") == .fatalCleanupCredentials(code: "SERVICE_KICKSTART_FAILED"), "pre-service failure remains fatal")
 }
 
+private func reinstallPreservesAutomaticPreferenceWhileFreshInstallDefaultsOn() throws {
+    try expect(!InstallerAutomaticReconnectPolicy.desiredAfterInstall(existingValue: false), "reinstall preserves automatic reconnect off")
+    try expect(InstallerAutomaticReconnectPolicy.desiredAfterInstall(existingValue: true), "reinstall preserves automatic reconnect on")
+    try expect(InstallerAutomaticReconnectPolicy.desiredAfterInstall(existingValue: nil), "fresh install defaults automatic reconnect on")
+}
+
 
 private func installerAppUsesExplicitAppKitDelegateBootstrap() throws {
     let source = try String(contentsOfFile: "macos/Sources/HYUVPNInstallerApp/main.swift", encoding: .utf8)
@@ -139,6 +146,88 @@ private func installerCollectsAllMissingCredentialsInOneDialog() throws {
     try expect(!source.contains("promptConfirmedSecret") && !source.contains("promptText("), "installer has no sequential credential prompt path")
 }
 
+private func installerAppUsesNativeManifestStagingWithoutProductionPython() throws {
+    let source = try String(contentsOfFile: "macos/Sources/HYUVPNInstallerApp/main.swift", encoding: .utf8)
+    try expect(source.contains("NativePayloadManifest.verify"), "installer verifies manifests with native Swift")
+    try expect(source.contains("NativePayloadManifest.stage"), "installer stages payload with native Swift")
+    try expect(!source.contains("/usr/bin/python3"), "installer app must not invoke production Python")
+    try expect(!source.contains("manifest.py"), "installer app must not require manifest.py")
+}
+
+private func installerWritesTheRustAutomaticReconnectPreference() throws {
+    let source = try String(contentsOfFile: "macos/Sources/HYUVPNInstallerApp/main.swift", encoding: .utf8)
+    try expect(source.contains("/Library/Application Support/hyu-openconnect/automatic-reconnect"), "installer writes the Rust automatic-reconnect preference")
+    try expect(!source.contains("auto-reconnect.json"), "installer does not write the retired Python JSON preference")
+    try expect(source.contains("enabled ? \"true\\n\" : \"false\\n\""), "installer writes the Rust boolean preference format")
+    guard let installStart = source.range(of: "func runInstall()"),
+          let authorize = source.range(of: "RootAdminAuthorizer.authorizeOnce", range: installStart.upperBound..<source.endIndex),
+          let safetyOff = source.range(of: "writeAutoReconnectPreference(enabled: false", range: installStart.upperBound..<authorize.lowerBound) else {
+        throw HarnessError.failure("installer must disable Rust automatic reconnect before root authorization")
+    }
+    try expect(safetyOff.lowerBound < authorize.lowerBound, "installer disables automatic reconnect before root health starts service")
+    try expect(source.contains("restoreAutoReconnectPreference(existingValue:"), "installer restores the previous preference after authorization failure")
+}
+
+private func nativeStageManifestUsesCanonicalRelativePathsAcrossVarAlias() throws {
+    let fm = FileManager.default
+    let payload = URL(fileURLWithPath: "/private/tmp/hyu-installer-harness-payload-\(UUID().uuidString)", isDirectory: true)
+    let userTemporary = fm.temporaryDirectory.path.replacingOccurrences(of: "/private/var/", with: "/var/")
+    let stage = URL(fileURLWithPath: userTemporary, isDirectory: true)
+        .appendingPathComponent("hyu-vpn-stage.\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? fm.removeItem(at: payload)
+        try? fm.removeItem(at: stage)
+    }
+
+    let packageFiles: [(String, String, Int)] = [
+        ("runtime/openconnect/bin/openconnect", "openconnect", 0o755),
+        ("runtime/oathtool", "oathtool", 0o755),
+        ("runtime/gp-hip-report", "hip", 0o755),
+        ("runtime/vpnc/hyu-vpnc-wrapper", "wrapper", 0o755),
+        ("runtime/vpnc/hyu-vpnc-wrapperd", "wrapperd", 0o755),
+        ("runtime/vpnc/vpnc-script", "vpnc", 0o755),
+        ("com.hyu.vpn.helper", "helper", 0o755),
+        ("hyu-vpn-macos-service", "service", 0o755),
+        ("launchd/com.hyu.vpn.service.plist.in", "plist", 0o644),
+        ("HYU VPN.app/Contents/MacOS/HYUVPNMenuApp", "menu", 0o755),
+        ("HYU VPN.app/Contents/MacOS/HYUVPNCredentialReader", "reader", 0o755),
+        ("HYU VPN.app/Contents/Info.plist", "info", 0o644),
+    ]
+    var manifestFiles: [String: Any] = [:]
+    for (relativePath, contents, mode) in packageFiles {
+        let file = payload.appendingPathComponent(relativePath)
+        try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = Data(contents.utf8)
+        try data.write(to: file)
+        try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
+        manifestFiles[relativePath] = [
+            "mode": String(format: "%04o", mode),
+            "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+            "size": data.count,
+        ]
+    }
+    let manifestData = try JSONSerialization.data(
+        withJSONObject: ["schema": 1, "files": manifestFiles],
+        options: [.prettyPrinted, .sortedKeys]
+    )
+    let manifest = payload.appendingPathComponent("manifest.json")
+    try manifestData.write(to: manifest)
+
+    try NativePayloadManifest.stage(payload: payload, manifest: manifest, stage: stage)
+
+    let stagedData = try Data(contentsOf: stage.appendingPathComponent("manifest.json"))
+    let stagedObject = try (JSONSerialization.jsonObject(with: stagedData) as? [String: Any]).unwrap(or: "staged manifest object")
+    let stagedFiles = try (stagedObject["files"] as? [String: Any]).unwrap(or: "staged manifest files")
+    try expect(stagedFiles["runtime/bin/openconnect"] != nil, "stage manifest uses relative runtime path across /var alias")
+    try expect(stagedFiles["HYU VPN.app/Contents/MacOS/HYUVPNMenuApp"] != nil, "stage manifest uses relative app path across /var alias")
+}
+
+private extension Optional {
+    func unwrap(or message: String) throws -> Wrapped {
+        guard let value = self else { throw HarnessError.failure(message) }
+        return value
+    }
+}
 
 private func rootAdminAuthorizationScriptQuotesCommandInOSAScriptArgv() throws {
     let commandArgv = ["/bin/echo", "space value", "apostrophe'", "quote\"", "back\\slash"]
@@ -213,9 +302,13 @@ do {
     try activationFailureCleanupOnlyWrittenKeys()
     try cleanupIncompleteStillAttemptsLaterKeys()
     try activationPolicyClassifiesMenuStartAsWarning()
+    try reinstallPreservesAutomaticPreferenceWhileFreshInstallDefaultsOn()
     try installerAppUsesExplicitAppKitDelegateBootstrap()
     try installerAppProvidesStandardEditShortcutsForCredentialFields()
     try installerCollectsAllMissingCredentialsInOneDialog()
+    try installerAppUsesNativeManifestStagingWithoutProductionPython()
+    try installerWritesTheRustAutomaticReconnectPreference()
+    try nativeStageManifestUsesCanonicalRelativePathsAcrossVarAlias()
     try rootAdminAuthorizationScriptQuotesCommandInOSAScriptArgv()
     try rootAdminHarmlessParserVariantExecutesViaArgv()
     try privilegedArgvAndSingleAuthorization()

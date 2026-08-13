@@ -130,6 +130,12 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
 }
 
 @Suite struct MenuStatusProtocolTests {
+    @Test func acceptsRustFractionalSecondTimestamps() throws {
+        var document = sampleDocument()
+        document["last_transition_at"] = "2026-08-13T05:20:45.063847Z"
+        #expect(try VPNStatusDecoder.decode(try json(document)).state == .connected)
+    }
+
     @Test func strictDecoderAcceptsOnlyPythonStatusSchemaV1AndRejectsUnsafeInputs() throws {
         let status = try VPNStatusDecoder.decode(try json(sampleDocument()))
         #expect(status.state == .connected)
@@ -244,16 +250,6 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
 }
 
 @Suite struct ControlNotificationAndWatcherTests {
-    @Test func controlClientUsesFixedExecutableAndArgvWithoutShell() throws {
-        let client = VPNControlClient(executablePath: "/Library/Application Support/HYU VPN/bin/hyu-vpn-control")
-        #expect(client.request(for: .connect).executablePath == "/Library/Application Support/HYU VPN/bin/hyu-vpn-control")
-        #expect(client.request(for: .connect).arguments == ["connect"])
-        #expect(client.request(for: .disconnect).arguments == ["disconnect"])
-        #expect(client.request(for: .reconnect).arguments == ["reconnect"])
-        #expect(client.request(for: .setAutomaticReconnect(false)).arguments == ["automatic-off"])
-        #expect(client.request(for: .setAutomaticReconnect(true)).arguments == ["automatic-on"])
-        #expect(!client.request(for: .connect).usesShell)
-    }
     @Test func watcherConfigurationUsesFileEventsAndCoarseTimersWithoutReadingLogs() {
         let config = StatusWatcherConfiguration.default(statusPath: URL(fileURLWithPath: "/tmp/status.json"))
         #expect(config.statusPath.path == "/tmp/status.json")
@@ -263,23 +259,10 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(config.allowedReadPurpose == .sanitizedStatusOnly)
     }
 
-    @Test func secureControlClientDecodesStrictCLIJsonAndFallsBackForMalformedOutput() throws {
-        let metadata = UnitTestExecutableMetadata(ownerUID: 0, mode: 0o755, symlink: false, executable: true, parentModes: ["/Library": 0o755, "/Library/Application Support": 0o755, "/Library/Application Support/HYU VPN": 0o755, "/Library/Application Support/HYU VPN/bin": 0o755])
-        let runner = UnitTestProcessRunner(results: [
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE"}"#, stderr: "", stdoutOverflowed: false),
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"REPAIR_REQUIRED"}"#, stderr: "", stdoutOverflowed: false),
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"BROKEN"}"#, stderr: "", stdoutOverflowed: false),
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE","error_code":"REPAIR_REQUIRED"}"#, stderr: "", stdoutOverflowed: false),
-            .success(exitCode: 1, stdout: #"{"schema_version":1,"ok":false,"error_code":"CONTROL_UNAVAILABLE"}"#, stderr: "", stdoutOverflowed: true),
-            .success(exitCode: 1, stdout: "not-json", stderr: "", stdoutOverflowed: false)
-        ])
-        let client = SecureVPNControlClient(metadata: metadata, runner: runner)
-        #expect(try client.run(.connect).errorCode == "CONTROL_UNAVAILABLE")
-        #expect(try client.run(.disconnect).errorCode == "REPAIR_REQUIRED")
-        #expect(try client.run(.reconnect).errorCode == "CONTROL_EXIT_1")
-        #expect(try client.run(.connect).errorCode == "CONTROL_EXIT_1")
-        #expect(try client.run(.disconnect).errorCode == "CONTROL_EXIT_1")
-        #expect(try client.run(.reconnect).errorCode == "CONTROL_EXIT_1")
+    @Test func otpMenuPresenterMatchesCopyContract() {
+        #expect(OTPMenuPresenter.model(snapshot: nil) == OTPMenuItemModel(title: "OTP unavailable", code: nil, isEnabled: false))
+        let snapshot = TOTPDisplaySnapshot(code: "123456", secondsRemaining: 17)
+        #expect(OTPMenuPresenter.model(snapshot: snapshot) == OTPMenuItemModel(title: "OTP: 123456 · 17s — Copy", code: "123456", isEnabled: true))
     }
 }
 
@@ -304,39 +287,12 @@ private func fixedDate(_ string: String) -> Date { let f = ISO8601DateFormatter(
         #expect(sink.presentations.last?.statusItemTitle == "")
     }
 
-    @Test func runnerExposesOnlyMinimalFixedEnvironment() {
-        let env = SystemControlProcessRunner.fixedEnvironment()
-        #expect(env.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"))
-        #expect(env.contains("LC_ALL=C"))
-        #expect(!env.contains { $0.hasPrefix("HOME=") || $0.hasPrefix("USER=") || $0.contains("CANARY") })
-    }
-
-    @Test func internalSpawnSetupFailureDoesNotSpawnAndClosesFDs() throws {
-        let pipeFactory = TestCountingPipeFactory(failOnCall: 0)
-        let setup = TestFailingSpawnSetup()
-        let runner = SystemControlProcessRunner(pipeFactory: pipeFactory, spawnSetup: setup)
-        let result = try runner.run(ProcessLaunchRequest(executablePath: "/bin/true", arguments: [], usesShell: false), timeout: 1, maxOutputBytes: 128)
-        #expect(result == .failure(.launchFailed))
-        #expect(pipeFactory.openDescriptors.isEmpty)
-        #expect(setup.spawnCalls == 0)
-    }
 
 }
 
 final class TestStatusSink: StatusUpdateSink { var presentations: [MenuPresentation] = []; func apply(_ presentation: MenuPresentation) { presentations.append(presentation) } }
 final class TestStatusReader: StatusReading { var results: [Result<VPNStatus, Error>]; init(_ results: [Result<VPNStatus, Error>]) { self.results = results }; func readStatus() throws -> VPNStatus { try results.removeFirst().get() } }
 
-final class TestFailingSpawnSetup: SpawnSetupManaging, @unchecked Sendable {
-    private(set) var spawnCalls = 0
-    func setup(actions: inout posix_spawn_file_actions_t?, attrs: inout posix_spawnattr_t?, stdoutPipe: [Int32], stderrPipe: [Int32]) -> Int32 { EINVAL }
-    func spawn(pid: inout pid_t, path: String, actions: inout posix_spawn_file_actions_t?, attrs: inout posix_spawnattr_t?, argv: inout [UnsafeMutablePointer<CChar>?], env: inout [UnsafeMutablePointer<CChar>?]) -> Int32 { spawnCalls += 1; return 0 }
-}
-final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
-    let failOnCall: Int; private(set) var calls = 0; private(set) var openDescriptors: Set<Int32> = []
-    init(failOnCall: Int) { self.failOnCall = failOnCall }
-    func makePipe(_ fds: inout [Int32]) -> Int32 { calls += 1; if calls == failOnCall { errno = EMFILE; return -1 }; let result = pipe(&fds); if result == 0 { openDescriptors.insert(fds[0]); openDescriptors.insert(fds[1]) }; return result }
-    func close(_ fd: Int32) { openDescriptors.remove(fd); Darwin.close(fd) }
-}
 
 @Suite struct ControlTowerCoreTests {
     private func input(
@@ -584,36 +540,26 @@ final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
         #expect(LoginItemState.unavailable(code: "SM_UNAVAILABLE") == .unavailable(code: "SM_UNAVAILABLE"))
     }
 
-    @Test func lifecycleCoordinatorHandlesStartupRetryAndRetryBound() {
+    @Test func lifecycleCoordinatorLaunchDoesNotChangeBackendPreference() {
         var coordinator = AppLifecycleCoordinator()
-        #expect(coordinator.handle(.appLaunched) == .init(terminationDirective: .none, effects: [.runControl(command: .connect, operation: .connect, timeout: 3)]))
-        #expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE"))) == .init(terminationDirective: .none, effects: [.scheduleStartupRetry(after: 1)]))
-        #expect(coordinator.handle(.startupRetryTimerFired) == .init(terminationDirective: .none, effects: [.runControl(command: .connect, operation: .connect, timeout: 3)]))
-
-        var bounded = AppLifecycleCoordinator()
-        _ = bounded.handle(.appLaunched)
-        for _ in 0..<29 {
-            let transition = bounded.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE")))
-            #expect(transition.effects == [.scheduleStartupRetry(after: 1)])
-            #expect(bounded.handle(.startupRetryTimerFired).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)])
-        }
-        #expect(bounded.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE"))).effects.isEmpty)
+        #expect(coordinator.handle(.appLaunched) == .init(terminationDirective: .none, effects: []))
+        #expect(coordinator.handle(.startupRetryTimerFired).effects.isEmpty)
     }
 
     @Test func lifecycleCoordinatorDisconnectPauseAbsorbsCancelledRetryAndPendingDisconnect() {
         var coordinator = AppLifecycleCoordinator()
         _ = coordinator.handle(.appLaunched)
+        _ = coordinator.handle(.primaryConnectRequested)
         #expect(coordinator.handle(.disconnectRequested) == .init(terminationDirective: .none, effects: []))
         #expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.runControl(command: .disconnect, operation: .disconnect, timeout: 3)]))
 
         var retry = AppLifecycleCoordinator()
-        _ = retry.handle(.appLaunched)
-        _ = retry.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .failed, errorCode: "CONTROL_UNAVAILABLE")))
-        #expect(retry.handle(.disconnectRequested) == .init(terminationDirective: .none, effects: [.cancelStartupRetry, .runControl(command: .disconnect, operation: .disconnect, timeout: 3)]))
+        #expect(retry.handle(.disconnectRequested) == .init(terminationDirective: .none, effects: [.runControl(command: .disconnect, operation: .disconnect, timeout: 3)]))
         #expect(retry.handle(.startupRetryTimerFired).effects.isEmpty)
 
         var terminateAbsorbsPending = AppLifecycleCoordinator()
         _ = terminateAbsorbsPending.handle(.appLaunched)
+        _ = terminateAbsorbsPending.handle(.primaryConnectRequested)
         _ = terminateAbsorbsPending.handle(.disconnectRequested)
         #expect(terminateAbsorbsPending.handle(.terminateRequested).terminationDirective == .terminateLater)
         #expect(terminateAbsorbsPending.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]))
@@ -622,7 +568,6 @@ final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
     @Test func lifecycleCoordinatorHandlesTerminateIdleInFlightDuplicateAndReplyOrdering() {
         var idle = AppLifecycleCoordinator()
         _ = idle.handle(.appLaunched)
-        _ = idle.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
         #expect(idle.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]))
         #expect(idle.handle(.controlCompleted(operation: .quit, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.replyToTermination(true)]))
         #expect(idle.handle(.terminateRequested) == .init(terminationDirective: .terminateNow, effects: []))
@@ -631,12 +576,14 @@ final class TestCountingPipeFactory: PipeCreating, @unchecked Sendable {
 
         var inFlightConnect = AppLifecycleCoordinator()
         _ = inFlightConnect.handle(.appLaunched)
+        _ = inFlightConnect.handle(.primaryConnectRequested)
         #expect(inFlightConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []))
         #expect(inFlightConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []))
         #expect(inFlightConnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))) == .init(terminationDirective: .none, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]))
 
         var existingDisconnect = AppLifecycleCoordinator()
         _ = existingDisconnect.handle(.appLaunched)
+        _ = existingDisconnect.handle(.primaryConnectRequested)
         _ = existingDisconnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
         _ = existingDisconnect.handle(.disconnectRequested)
         #expect(existingDisconnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []))
@@ -684,29 +631,5 @@ final class RecordingTOTPResetter: TOTPStateResetting {
     func resetTOTPState() throws {
         resetCount += 1
         if fail { throw ResetFailure.injected }
-    }
-}
-
-struct UnitTestExecutableMetadata: ExecutableMetadataProviding {
-    var ownerUID: uid_t
-    var mode: mode_t
-    var symlink: Bool
-    var executable: Bool
-    var parentModes: [String: mode_t]
-
-    func metadata(for path: String) throws -> FileMetadata {
-        FileMetadata(ownerUID: path == SecureVPNControlClient.defaultExecutablePath ? ownerUID : uid_t(0), mode: parentModes[path] ?? mode, isSymlink: symlink, isRegularFile: true, isExecutable: executable)
-    }
-}
-
-final class UnitTestProcessRunner: ControlProcessRunning {
-    var results: [ControlProcessOutcome]
-
-    init(results: [ControlProcessOutcome]) {
-        self.results = results
-    }
-
-    func run(_ request: ProcessLaunchRequest, timeout: TimeInterval, maxOutputBytes: Int) throws -> ControlProcessOutcome {
-        results.removeFirst()
     }
 }

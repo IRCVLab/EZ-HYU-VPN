@@ -5,10 +5,12 @@ members = [
     "rust/crates/hyu-vpn-daemon",
     "rust/crates/hyu-vpn-protocol",
     "rust/crates/hyu-vpn-platform-linux",
+    "rust/crates/hyu-vpn-platform-macos",
     "rust/crates/hyu-vpn-platform-windows",
     "rust/apps/hyu-vpn-gtk",
     "rust/apps/hyu-vpn-hip",
     "rust/apps/hyu-vpn-linux-service",
+    "rust/apps/hyu-vpn-macos-service",
     "rust/apps/hyu-vpn-windows-service",
     "rust/apps/hyu-vpn-windows-tray",
 ]
@@ -17,7 +19,7 @@ members = [
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
-version = "0.2.0"
+version = "0.2.2"
 
 [workspace.dependencies]
 aes-gcm = "0.10"

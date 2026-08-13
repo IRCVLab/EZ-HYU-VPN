@@ -1,0 +1,21 @@
+[package]
+name = "hyu-vpn-platform-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hyu-vpn-core = { path = "../hyu-vpn-core" }
+hyu-vpn-daemon = { path = "../hyu-vpn-daemon" }
+hyu-vpn-protocol = { path = "../hyu-vpn-protocol" }
+libc.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
