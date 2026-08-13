@@ -130,8 +130,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $upgradeDirectory = Join-Path $env:RUNNER_TEMP 'hyu-vpn-upgrade'
-          ./scripts/package-windows.ps1 -Version '0.2.2' -OutputDirectory $upgradeDirectory -SkipRustBuild
-          $upgrade = Get-ChildItem $upgradeDirectory/HYU-VPN-0.2.2-x64.msi | Select-Object -First 1
+          ./scripts/package-windows.ps1 -Version '0.2.3' -OutputDirectory $upgradeDirectory -SkipRustBuild
+          $upgrade = Get-ChildItem $upgradeDirectory/HYU-VPN-0.2.3-x64.msi | Select-Object -First 1
           $log = Join-Path $env:RUNNER_TEMP 'hyu-vpn-msi-upgrade.log'
           $process = Start-Process msiexec.exe -ArgumentList @('/i', $upgrade.FullName, '/qn', '/norestart', '/l*v', $log) -Wait -PassThru
           if ($process.ExitCode -ne 0) { Get-Content $log; throw "MSI major upgrade failed: $($process.ExitCode)" }

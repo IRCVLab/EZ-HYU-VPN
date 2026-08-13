@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
-VERSION="${VERSION:-0.2.2}"
+VERSION="${VERSION:-0.2.3}"
 SOURCE_COMPLIANCE_BUNDLE="${SOURCE_COMPLIANCE_BUNDLE:-}"
 BUILD_ROOT="$(mktemp -d /private/tmp/hyu-vpn-macos-build.XXXXXX)"
 RELEASE_OUTPUT_ROOT="$(mktemp -d /private/tmp/hyu-vpn-macos-output.XXXXXX)"

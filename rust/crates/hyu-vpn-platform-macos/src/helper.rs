@@ -683,11 +683,10 @@ async fn run_start_child(task: StartChildTask) -> Result<HelperSessionOutcome, H
     let (chunk_sender, mut chunks) = mpsc::channel::<Result<Vec<u8>, HelperError>>(8);
     tokio::spawn(read_chunks(stdout, chunk_sender.clone()));
     tokio::spawn(read_chunks(stderr, chunk_sender));
-    let mut driver = StartPromptDriver::new(input);
+    let mut driver = StartPromptDriver::new(input, max_output_bytes);
     if let Err(error) = driver.write_initial(&mut stdin).await {
         return report_active_start_failure(&mut child, error).await;
     }
-    let mut total_output = 0_usize;
     loop {
         tokio::select! {
             _ = &mut cancel => {
@@ -698,11 +697,13 @@ async fn run_start_child(task: StartChildTask) -> Result<HelperSessionOutcome, H
             }
             chunk = chunks.recv() => {
                 let Some(chunk) = chunk else {
-                    return report_active_start_failure(
-                        &mut child,
-                        HelperError::InvalidResponse,
-                    )
-                    .await;
+                    let status = child
+                        .wait()
+                        .await
+                        .map_err(|_| HelperError::InvocationFailed)?;
+                    return Ok(HelperSessionOutcome::Exited {
+                        status: status.code().unwrap_or(128),
+                    });
                 };
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
@@ -710,14 +711,6 @@ async fn run_start_child(task: StartChildTask) -> Result<HelperSessionOutcome, H
                         return report_active_start_failure(&mut child, error).await;
                     }
                 };
-                total_output = total_output.saturating_add(chunk.len());
-                if total_output > max_output_bytes {
-                    return report_active_start_failure(
-                        &mut child,
-                        HelperError::OutputLimitExceeded,
-                    )
-                    .await;
-                }
                 let driver_events = match driver.feed_output(&chunk, &mut stdin).await {
                     Ok(events) => events,
                     Err(error) => return report_active_start_failure(&mut child, error).await,
@@ -857,10 +850,11 @@ struct StartPromptDriver {
     prompt_responses: usize,
     hip_submitted: bool,
     connected: bool,
+    max_output_bytes: usize,
 }
 
 impl StartPromptDriver {
-    fn new(input: HelperStartInput) -> Self {
+    fn new(input: HelperStartInput, max_output_bytes: usize) -> Self {
         Self {
             input,
             tail: Vec::new(),
@@ -868,6 +862,7 @@ impl StartPromptDriver {
             prompt_responses: 0,
             hip_submitted: false,
             connected: false,
+            max_output_bytes,
         }
     }
 
@@ -900,6 +895,9 @@ impl StartPromptDriver {
             }
             let normalized = if byte == b'\r' { b'\n' } else { byte };
             self.line_buffer.push(normalized);
+            if self.line_buffer.len() > self.max_output_bytes {
+                return Err(HelperError::OutputLimitExceeded);
+            }
             if self.line_buffer.len() > 512 {
                 return Err(HelperError::InvalidResponse);
             }
@@ -1021,15 +1019,10 @@ pub async fn drive_start_prompts_for_test(
     max_output_bytes: usize,
 ) -> Result<PromptDriveTestResult, HelperError> {
     let mut writer = VecWriter::default();
-    let mut driver = StartPromptDriver::new(input);
+    let mut driver = StartPromptDriver::new(input, max_output_bytes);
     driver.write_initial(&mut writer).await?;
-    let mut total = 0_usize;
     let mut events = Vec::new();
     for chunk in output_chunks {
-        total = total.saturating_add(chunk.len());
-        if total > max_output_bytes {
-            return Err(HelperError::OutputLimitExceeded);
-        }
         events.extend(driver.feed_output(chunk, &mut writer).await?);
     }
     Ok(PromptDriveTestResult {
@@ -1091,6 +1084,50 @@ pub async fn production_short_overflow_launcher_for_test(
         Err(error) => Err(error),
         Ok(_) => Err(HelperError::InvalidResponse),
     }
+}
+
+pub async fn production_start_eof_launcher_for_test(
+    exit_status: i32,
+) -> Result<HelperSessionOutcome, HelperError> {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", &format!("exit {exit_status}")])
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|_| HelperError::InvocationFailed)?;
+    let stdin = child.stdin.take().ok_or(HelperError::InvocationFailed)?;
+    let stdout = child.stdout.take().ok_or(HelperError::InvocationFailed)?;
+    let stderr = child.stderr.take().ok_or(HelperError::InvocationFailed)?;
+    run_start_child(StartChildTask {
+        child,
+        stdin,
+        stdout,
+        stderr,
+        input: start_input_for_production_test(),
+        max_output_bytes: MAX_OUTPUT_BYTES,
+        events: mpsc::channel(1).0,
+        cancel: oneshot::channel().1,
+    })
+    .await
+}
+
+fn start_input_for_production_test() -> HelperStartInput {
+    struct MissingTotp;
+    #[async_trait]
+    impl HelperTotpProvider for MissingTotp {
+        async fn next_totp(&self) -> Result<SecretBytes, HelperError> {
+            Err(HelperError::PromptInputUnavailable)
+        }
+    }
+    HelperStartInput::new(
+        "test-user",
+        SecretBytes::from_utf8_for_test("test-password"),
+        Arc::new(MissingTotp),
+    )
+    .expect("fixed test input must be valid")
 }
 
 pub async fn drop_start_session_cancel_signal_for_test() -> bool {

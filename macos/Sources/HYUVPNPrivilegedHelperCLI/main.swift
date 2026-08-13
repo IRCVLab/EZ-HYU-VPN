@@ -2,7 +2,9 @@ import Foundation
 import HYUVPNPrivilegedHelper
 
 func fail(_ message: String) -> Never {
-    if let data = (message + "\n").data(using: .utf8) { FileHandle.standardError.write(data) }
+    if let data = (message + "\n").data(using: .utf8) {
+        try? FileHandle.standardError.write(contentsOf: data)
+    }
     exit(64)
 }
 
