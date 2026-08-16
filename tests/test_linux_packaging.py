@@ -91,7 +91,9 @@ class LinuxPackagingTests(unittest.TestCase):
         upstream = wrapper.index('"$UPSTREAM" "$@"')
         self.assertLess(preserve, upstream)
 
-    def test_vpnc_wrapper_route_guard_orders_add_upstream_cleanup_on_failure(self):
+    def _run_vpnc_wrapper_route_guard(
+        self, *, portal_ip, ssh_line, upstream_exit, reasons
+    ):
         source = (ROOT / "packaging/linux/hyu-vpnc-script").read_text()
         with tempfile.TemporaryDirectory() as raw:
             temp = Path(raw)
@@ -99,6 +101,7 @@ class LinuxPackagingTests(unittest.TestCase):
             state = temp / "established-ssh-routes"
             fake_ip = temp / "ip"
             fake_ss = temp / "ss"
+            fake_getent = temp / "getent"
             upstream = temp / "upstream"
             fake_ip.write_text(
                 "#!/bin/sh\n"
@@ -112,14 +115,18 @@ class LinuxPackagingTests(unittest.TestCase):
             )
             fake_ss.write_text(
                 "#!/bin/sh\n"
-                "printf '%s\\n' 'tcp 0 0 192.168.0.10:22 166.104.168.168:57477'\n"
+                + (f"printf '%s\\n' '{ssh_line}'\n" if ssh_line else "exit 0\n")
+            )
+            fake_getent.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' '{portal_ip} STREAM portal.hanyang.ac.kr'\n"
             )
             upstream.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' upstream >> \"$HYU_TEST_LOG\"\n"
-                "exit 23\n"
+                "exit \"$HYU_UPSTREAM_EXIT\"\n"
             )
-            for executable in (fake_ip, fake_ss, upstream):
+            for executable in (fake_ip, fake_ss, fake_getent, upstream):
                 executable.chmod(0o700)
             script = source
             for tool in ("awk", "cat", "chmod", "chown", "grep", "install", "mktemp", "mv", "printf", "readlink", "rm", "sort", "timeout"):
@@ -131,6 +138,11 @@ class LinuxPackagingTests(unittest.TestCase):
             )
             script = script.replace("IP=/usr/sbin/ip", f"IP={fake_ip}")
             script = script.replace("SS=/usr/bin/ss", f"SS={fake_ss}")
+            script = script.replace("GETENT=/usr/bin/getent", f"GETENT={fake_getent}")
+            script = script.replace(
+                "RESOLVECTL=/usr/bin/resolvectl", f"RESOLVECTL={temp / 'resolvectl'}"
+            )
+            script = script.replace("/etc/resolv.conf", str(temp / "resolv.conf"))
             script = script.replace(
                 "SSH_ROUTE_STATE=/run/hyu-vpn/established-ssh-routes",
                 f"SSH_ROUTE_STATE={state}",
@@ -142,24 +154,88 @@ class LinuxPackagingTests(unittest.TestCase):
             env.update(
                 {
                     "HYU_TEST_LOG": str(log),
-                    "reason": "connect",
+                    "HYU_UPSTREAM_EXIT": str(upstream_exit),
                     "TUNDEV": "tun0",
                 }
             )
-            completed = subprocess.run(
-                [str(wrapper)], env=env, text=True, capture_output=True, check=False
-            )
-            self.assertEqual(completed.returncode, 23, completed.stderr)
-            calls = log.read_text().splitlines()
-            self.assertEqual(
-                calls,
-                [
-                    "add -4 route add 166.104.168.168/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
-                    "upstream",
-                    "del -4 route del 166.104.168.168/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
-                ],
-            )
-            self.assertFalse(state.exists())
+            snapshots = []
+            for reason in reasons:
+                env["reason"] = reason
+                completed = subprocess.run(
+                    [str(wrapper)], env=env, text=True, capture_output=True, check=False
+                )
+                snapshots.append(
+                    (
+                        completed,
+                        log.read_text().splitlines(),
+                        state.read_text() if state.exists() else None,
+                    )
+                )
+            return snapshots
+
+    def test_vpnc_wrapper_route_guard_orders_add_upstream_cleanup_on_failure(self):
+        snapshots = self._run_vpnc_wrapper_route_guard(
+            portal_ip="166.104.177.170",
+            ssh_line="tcp 0 0 192.168.0.10:22 166.104.168.168:57477",
+            upstream_exit=23,
+            reasons=("connect",),
+        )
+        completed, calls, state_text = snapshots[0]
+        self.assertEqual(completed.returncode, 23, completed.stderr)
+        self.assertEqual(
+            calls,
+            [
+                "add -4 route add 166.104.168.168/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
+                "add -4 route add 166.104.177.170/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
+                "upstream",
+                "del -4 route del 166.104.168.168/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
+                "del -4 route del 166.104.177.170/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
+            ],
+        )
+        self.assertIsNone(state_text)
+
+    def test_vpnc_wrapper_rejects_portal_route_outside_hanyang_network(self):
+        snapshots = self._run_vpnc_wrapper_route_guard(
+            portal_ip="203.0.113.10",
+            ssh_line="",
+            upstream_exit=23,
+            reasons=("connect",),
+        )
+        completed, calls, state_text = snapshots[0]
+        self.assertEqual(completed.returncode, 23, completed.stderr)
+        self.assertEqual(calls, ["upstream"])
+        self.assertIsNone(state_text)
+
+    def test_vpnc_wrapper_removes_portal_route_on_disconnect(self):
+        snapshots = self._run_vpnc_wrapper_route_guard(
+            portal_ip="166.104.177.170",
+            ssh_line="",
+            upstream_exit=0,
+            reasons=("connect", "disconnect"),
+        )
+        connected, connected_calls, connected_state = snapshots[0]
+        self.assertEqual(connected.returncode, 0, connected.stderr)
+        self.assertEqual(
+            connected_calls,
+            [
+                "add -4 route add 166.104.177.170/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
+                "upstream",
+            ],
+        )
+        self.assertEqual(connected_state, "166.104.177.170 192.168.0.1 eth0\n")
+
+        disconnected, disconnected_calls, disconnected_state = snapshots[1]
+        self.assertEqual(disconnected.returncode, 0, disconnected.stderr)
+        self.assertEqual(
+            disconnected_calls,
+            [
+                "add -4 route add 166.104.177.170/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
+                "upstream",
+                "upstream",
+                "del -4 route del 166.104.177.170/32 via 192.168.0.1 dev eth0 proto 186 metric 42760",
+            ],
+        )
+        self.assertIsNone(disconnected_state)
 
     def test_vpnc_wrapper_flushes_owned_routes_even_when_runtime_state_was_lost(self):
         source = (ROOT / "packaging/linux/hyu-vpnc-script").read_text()

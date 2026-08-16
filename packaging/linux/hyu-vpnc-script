@@ -5,8 +5,10 @@ UPSTREAM=/usr/share/vpnc-scripts/vpnc-script
 RESOLVECTL=/usr/bin/resolvectl
 IP=/usr/sbin/ip
 SS=/usr/bin/ss
+GETENT=/usr/bin/getent
 AWK=/usr/bin/awk
 SORT=/usr/bin/sort
+PORTAL_HOST=portal.hanyang.ac.kr
 SSH_ROUTE_STATE=/run/hyu-vpn/established-ssh-routes
 SSH_ROUTE_PROTOCOL=186
 SSH_ROUTE_METRIC=42760
@@ -101,6 +103,19 @@ preserve_ssh_peer_route() {
     /usr/bin/printf '%s %s %s\n' "$peer" "$gateway" "$device" >> "$temporary"
 }
 
+preserve_portal_route() {
+    [ -x "$GETENT" ] || return 0
+    # $1/$2 belong to awk, not the shell.
+    # shellcheck disable=SC2016
+    peer=$(
+        "$GETENT" ahostsv4 "$PORTAL_HOST" 2>/dev/null |
+            "$AWK" '$2 == "STREAM" { print $1; exit }'
+    ) || return 0
+    case "$peer" in
+        166.104.*) preserve_ssh_peer_route "$peer" ;;
+    esac
+}
+
 preserve_established_ssh_routes() {
     [ -x "$IP" ] && [ -x "$SS" ] && [ -x "$AWK" ] && [ -x "$SORT" ] || return 0
     state_dir=${SSH_ROUTE_STATE%/*}
@@ -120,6 +135,11 @@ preserve_established_ssh_routes() {
             peer=${endpoint%:*}
             preserve_ssh_peer_route "$peer"
         done
+
+    # The VPN advertises 166.104.0.0/16 but does not serve the public course
+    # portal through the tunnel. Keep this one allowlisted host on its
+    # pre-tunnel route so login remains reachable while the VPN is active.
+    preserve_portal_route
 
     if [ -s "$temporary" ]; then
         "$SORT" -u -o "$temporary" "$temporary"
