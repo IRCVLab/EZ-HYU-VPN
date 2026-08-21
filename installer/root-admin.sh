@@ -107,6 +107,7 @@ _allowed_destination_owner(){
   [[ "$uid" == 0 ]] && return 0
   [[ -n "${USER_HOME:-}" && -n "${ADMIN_UID:-}" ]] || return 1
   case "$target" in
+    "$USER_HOME/Library/LaunchAgents"|\
     "$USER_HOME/Library/LaunchAgents"/*|\
     "$USER_HOME/Library/Application Support/hyu-openconnect"/*|\
     "$USER_HOME/.cache/hyu-openconnect"|"$USER_HOME/.cache/hyu-openconnect"/*|\

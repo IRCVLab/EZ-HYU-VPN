@@ -1081,6 +1081,8 @@ resolver #1
         self.assertIn("validate_privileged_destination_chain", text)
         self.assertIn('"$USER_HOME/Library/Application Support/hyu-openconnect"/*', text)
         self.assertIn('"$USER_HOME/.cache/hyu-openconnect"', text)
+        self.assertIn('"$USER_HOME/Library/LaunchAgents"|\\', text)
+        self.assertIn('"$USER_HOME/Library/LaunchAgents"/*', text)
         self.assertIn("root-service-health-ok", text)
         self.assertIn('/bin/chmod 700 "$dst"', text)
         self.assertIn('/usr/sbin/chown -R root:wheel "$dst"', text)
