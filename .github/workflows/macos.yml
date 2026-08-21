@@ -63,9 +63,9 @@ jobs:
             target/macos-input/SOURCE-COMPLIANCE-BUNDLE.tar.gz | shasum -a 256 -c -
       - name: Build and validate macOS DMG
         run: |
-          version=0.2.3
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then version="${GITHUB_REF_NAME#v}"; fi
-          VERSION="$version" \
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
           SOURCE_COMPLIANCE_BUNDLE="$GITHUB_WORKSPACE/target/macos-input/SOURCE-COMPLIANCE-BUNDLE.tar.gz" \
             scripts/package-macos.sh
       - name: Inspect mounted macOS artifact

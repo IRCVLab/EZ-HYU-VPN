@@ -231,8 +231,8 @@ class NativeAppAssemblyTests(PackagingTestCase):
         feed = json.loads((REPO / "update.json").read_text(encoding="utf-8"))
         self.assertEqual(set(feed), {"schema_version", "version", "release_url"})
         self.assertEqual(feed["schema_version"], 1)
-        self.assertEqual(feed["version"], "0.2.3")
-        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.2.3")
+        self.assertEqual(feed["version"], "0.2.9")
+        self.assertEqual(feed["release_url"], "https://github.com/IRCVLab/EZ-HYU-VPN/releases/tag/v0.2.9")
 
 
 class FakeOtoolRunner:
