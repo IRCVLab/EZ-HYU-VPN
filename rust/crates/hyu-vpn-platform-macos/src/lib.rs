@@ -4,8 +4,9 @@ mod paths;
 mod storage;
 
 pub use network::{
-    InterfaceConnector, InterfaceScopedResolver, MacNetworkMonitor, MacPortalProbe, ResumeNotifier,
-    SocketBindParameters, parse_default_route, socket_bind_parameters_for_test,
+    InterfaceConnector, InterfaceScopedResolver, MacNetworkMonitor, MacPortalProbe,
+    MacTunnelDnsProbe, ResumeNotifier, SocketBindParameters, parse_default_route,
+    socket_bind_parameters_for_test,
 };
 pub use paths::{MacPaths, PlatformError};
 pub use storage::MacCredentialRepository;

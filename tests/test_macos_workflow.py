@@ -72,6 +72,9 @@ class MacOSWorkflowTests(unittest.TestCase):
 
     def test_macos_packager_uses_fresh_arm64_release_builder_inputs(self):
         text = PACKAGE.read_text(encoding="utf-8")
+        self.assertIn("WORKSPACE_VERSION", text)
+        self.assertIn('VERSION="${VERSION:-$WORKSPACE_VERSION}"', text)
+        self.assertNotIn('VERSION="${VERSION:-0.2.3}"', text)
         self.assertIn("uname -m", text)
         self.assertIn("arm64", text)
         self.assertIn("swift build", text)

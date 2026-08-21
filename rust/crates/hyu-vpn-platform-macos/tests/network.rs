@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
-use hyu_vpn_core::ports::{NetworkMonitor, PortalProbe};
+use hyu_vpn_core::ports::{NetworkMonitor, PortalProbe, TunnelHealthProbe};
 use hyu_vpn_core::state::NetworkIdentity;
 use hyu_vpn_platform_macos::{
-    MacNetworkMonitor, MacPortalProbe, PlatformError, parse_default_route,
+    MacNetworkMonitor, MacPortalProbe, MacTunnelDnsProbe, PlatformError, parse_default_route,
 };
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -148,6 +148,85 @@ async fn portal_probe_attempts_subsequent_resolved_addresses_after_failures() {
         attempts[1],
         (second, "en0".to_owned(), Duration::from_secs(2))
     );
+}
+
+#[tokio::test]
+async fn tunnel_dns_probe_sends_one_bounded_query_and_accepts_a_matching_answer() {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_address = server.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let mut query = [0_u8; 512];
+        let (length, peer) = server.recv_from(&mut query).await.unwrap();
+        assert!(length > 12);
+        assert_eq!(&query[12..20], &[6, b's', b'e', b'c', b'u', b'r', b'e', 7]);
+
+        let mut response = Vec::from(&query[..length]);
+        response[2] = 0x81;
+        response[3] = 0x80;
+        response[6] = 0;
+        response[7] = 1;
+        response.extend_from_slice(&[
+            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x04, 166, 104, 0, 17,
+        ]);
+        server.send_to(&response, peer).await.unwrap();
+    });
+    let probe = MacTunnelDnsProbe::new(
+        server_address,
+        "secure.hanyang.ac.kr",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+
+    assert!(probe.healthy().await.unwrap());
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn tunnel_dns_probe_rejects_mismatched_answers_and_times_out_closed() {
+    let mismatch_server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mismatch_address = mismatch_server.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let mut query = [0_u8; 512];
+        let (length, peer) = mismatch_server.recv_from(&mut query).await.unwrap();
+        let mut response = Vec::from(&query[..length]);
+        response[0] ^= 0xff;
+        response[2] = 0x81;
+        response[3] = 0x80;
+        response[6] = 0;
+        response[7] = 1;
+        response.extend_from_slice(&[
+            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x04, 166, 104, 0, 17,
+        ]);
+        mismatch_server.send_to(&response, peer).await.unwrap();
+    });
+    let mismatch_probe = MacTunnelDnsProbe::new(
+        mismatch_address,
+        "secure.hanyang.ac.kr",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(!mismatch_probe.healthy().await.unwrap());
+    responder.await.unwrap();
+
+    let silent_server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let silent_probe = MacTunnelDnsProbe::new(
+        silent_server.local_addr().unwrap(),
+        "secure.hanyang.ac.kr",
+        Duration::from_millis(20),
+    )
+    .unwrap();
+    let started = Instant::now();
+    assert!(!silent_probe.healthy().await.unwrap());
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn tunnel_dns_probe_rejects_unbounded_or_unsafe_configuration() {
+    let server = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 53);
+    for host in ["", "bad..name", "-bad.example", "bad name.example"] {
+        assert!(MacTunnelDnsProbe::new(server, host, Duration::from_secs(1)).is_err());
+    }
+    assert!(MacTunnelDnsProbe::new(server, "secure.hanyang.ac.kr", Duration::ZERO).is_err());
 }
 
 fn route(interface: &str, gateway: &str) -> Vec<u8> {

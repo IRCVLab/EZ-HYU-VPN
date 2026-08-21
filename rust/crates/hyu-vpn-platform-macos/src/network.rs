@@ -4,13 +4,15 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::os::raw::{c_char, c_int, c_void};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use hyu_vpn_core::ports::{NetworkMonitor, NetworkProbeError, PortalProbe};
+use hyu_vpn_core::ports::{NetworkMonitor, NetworkProbeError, PortalProbe, TunnelHealthProbe};
 use hyu_vpn_core::state::NetworkIdentity;
 use tokio::io::AsyncReadExt;
+use tokio::net::UdpSocket;
 use tokio::process::Command;
 use tokio::sync::Notify;
 
@@ -33,6 +35,11 @@ const DNS_SERVICE_FLAGS_ADD: u32 = 0x2;
 const DNS_SERVICE_PROTOCOL_IPV4: u32 = 0x01;
 const DNS_SERVICE_PROTOCOL_IPV6: u32 = 0x02;
 const DNS_SERVICE_ERR_NO_ERROR: i32 = 0;
+const TUNNEL_DNS_SERVER: SocketAddr =
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(166, 104, 100, 100)), 53);
+const TUNNEL_DNS_HOST: &str = "secure.hanyang.ac.kr";
+const TUNNEL_DNS_TIMEOUT: Duration = Duration::from_secs(2);
+static DNS_QUERY_SEQUENCE: AtomicU16 = AtomicU16::new(1);
 
 pub fn parse_default_route(bytes: &[u8]) -> Result<Option<NetworkIdentity>, PlatformError> {
     if bytes.len() > MAX_ROUTE_OUTPUT {
@@ -399,6 +406,130 @@ impl PortalProbe for MacPortalProbe {
         }
         Ok(false)
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct MacTunnelDnsProbe {
+    server: SocketAddr,
+    host: String,
+    timeout: Duration,
+}
+
+impl MacTunnelDnsProbe {
+    pub fn new(
+        server: SocketAddr,
+        host: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<Self, NetworkProbeError> {
+        let host = host.into();
+        if server.port() == 0 || timeout.is_zero() || encode_dns_name(&host).is_none() {
+            return Err(NetworkProbeError::ProbeFailed);
+        }
+        Ok(Self {
+            server,
+            host,
+            timeout: timeout.min(Duration::from_secs(10)),
+        })
+    }
+
+    pub fn production() -> Self {
+        Self::new(TUNNEL_DNS_SERVER, TUNNEL_DNS_HOST, TUNNEL_DNS_TIMEOUT)
+            .expect("fixed tunnel DNS probe configuration must be valid")
+    }
+}
+
+#[async_trait]
+impl TunnelHealthProbe for MacTunnelDnsProbe {
+    async fn healthy(&self) -> Result<bool, NetworkProbeError> {
+        let query_id = DNS_QUERY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let query = dns_query(query_id, &self.host).ok_or(NetworkProbeError::ProbeFailed)?;
+        let bind_address = match self.server {
+            SocketAddr::V4(_) => "0.0.0.0:0",
+            SocketAddr::V6(_) => "[::]:0",
+        };
+        let probe = async {
+            let socket = UdpSocket::bind(bind_address)
+                .await
+                .map_err(|_| NetworkProbeError::ProbeFailed)?;
+            socket
+                .connect(self.server)
+                .await
+                .map_err(|_| NetworkProbeError::ProbeFailed)?;
+            socket
+                .send(&query)
+                .await
+                .map_err(|_| NetworkProbeError::ProbeFailed)?;
+            let mut response = [0_u8; 2048];
+            let length = socket
+                .recv(&mut response)
+                .await
+                .map_err(|_| NetworkProbeError::ProbeFailed)?;
+            Ok::<bool, NetworkProbeError>(dns_response_matches(
+                query_id,
+                &query,
+                &response[..length],
+            ))
+        };
+        match tokio::time::timeout(self.timeout, probe).await {
+            Ok(Ok(healthy)) => Ok(healthy),
+            Ok(Err(_)) | Err(_) => Ok(false),
+        }
+    }
+}
+
+fn dns_query(query_id: u16, host: &str) -> Option<Vec<u8>> {
+    let encoded_name = encode_dns_name(host)?;
+    let mut query = Vec::with_capacity(12 + encoded_name.len() + 4);
+    query.extend_from_slice(&query_id.to_be_bytes());
+    query.extend_from_slice(&0x0100_u16.to_be_bytes());
+    query.extend_from_slice(&1_u16.to_be_bytes());
+    query.extend_from_slice(&0_u16.to_be_bytes());
+    query.extend_from_slice(&0_u16.to_be_bytes());
+    query.extend_from_slice(&0_u16.to_be_bytes());
+    query.extend_from_slice(&encoded_name);
+    query.extend_from_slice(&1_u16.to_be_bytes());
+    query.extend_from_slice(&1_u16.to_be_bytes());
+    Some(query)
+}
+
+fn encode_dns_name(host: &str) -> Option<Vec<u8>> {
+    if host.is_empty() || host.len() > 253 || !host.is_ascii() {
+        return None;
+    }
+    let mut encoded = Vec::with_capacity(host.len() + 2);
+    for label in host.trim_end_matches('.').split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return None;
+        }
+        encoded.push(label.len() as u8);
+        encoded.extend_from_slice(label.as_bytes());
+    }
+    encoded.push(0);
+    Some(encoded)
+}
+
+fn dns_response_matches(query_id: u16, query: &[u8], response: &[u8]) -> bool {
+    if response.len() < query.len() || response.len() < 12 {
+        return false;
+    }
+    let response_id = u16::from_be_bytes([response[0], response[1]]);
+    let flags = u16::from_be_bytes([response[2], response[3]]);
+    let questions = u16::from_be_bytes([response[4], response[5]]);
+    let answers = u16::from_be_bytes([response[6], response[7]]);
+    response_id == query_id
+        && flags & 0x8000 != 0
+        && flags & 0x0200 == 0
+        && flags & 0x000f == 0
+        && questions == 1
+        && answers > 0
+        && response[12..query.len()] == query[12..]
 }
 
 #[derive(Debug)]

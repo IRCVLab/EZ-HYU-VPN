@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
-VERSION="${VERSION:-0.2.3}"
+WORKSPACE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+VERSION="${VERSION:-$WORKSPACE_VERSION}"
 SOURCE_COMPLIANCE_BUNDLE="${SOURCE_COMPLIANCE_BUNDLE:-}"
 BUILD_ROOT="$(mktemp -d /private/tmp/hyu-vpn-macos-build.XXXXXX)"
 RELEASE_OUTPUT_ROOT="$(mktemp -d /private/tmp/hyu-vpn-macos-output.XXXXXX)"
@@ -16,6 +17,10 @@ if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
 fi
 if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   echo "package-macos: VERSION must be semantic x.y.z" >&2
+  exit 2
+fi
+if [[ "$VERSION" != "$WORKSPACE_VERSION" ]]; then
+  echo "package-macos: VERSION must match Cargo workspace version $WORKSPACE_VERSION" >&2
   exit 2
 fi
 if [[ -z "$SOURCE_COMPLIANCE_BUNDLE" || ! -f "$SOURCE_COMPLIANCE_BUNDLE" || -L "$SOURCE_COMPLIANCE_BUNDLE" ]]; then

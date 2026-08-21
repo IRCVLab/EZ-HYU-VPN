@@ -5,10 +5,10 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use hyu_vpn_core::ports::{NetworkMonitor, PortalProbe};
+use hyu_vpn_core::ports::{NetworkMonitor, PortalProbe, TunnelHealthProbe};
 use hyu_vpn_core::state::{ConnectionGeneration, EngineAction, EngineEvent, NetworkIdentity};
 use hyu_vpn_core::totp::{CounterGuard, TotpError, TotpGenerator, TotpSecret};
 use hyu_vpn_daemon::ipc::{RequestHandler, serve_connection};
@@ -20,10 +20,10 @@ use hyu_vpn_platform_macos::{
     HelperCleanupOutcome, HelperCommand, HelperError, HelperRunner, HelperSessionEvent,
     HelperSessionOutcome, HelperSessionRunner, HelperStartInput, HelperState, HelperTotpProvider,
     InstalledHelperRunner, MacCredentialRepository, MacNetworkMonitor, MacPaths, MacPortalProbe,
-    SecretBytes,
+    MacTunnelDnsProbe, SecretBytes,
 };
 use hyu_vpn_protocol::{
-    Credentials, ErrorCode, Request, RequestEnvelope, Response, ResponseEnvelope,
+    Credentials, ErrorCode, Request, RequestEnvelope, Response, ResponseEnvelope, VpnState,
 };
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -143,6 +143,12 @@ impl SystemClock for SharedClock {
 pub trait MacHelper: HelperRunner + HelperSessionRunner {}
 impl<T> MacHelper for T where T: HelperRunner + HelperSessionRunner {}
 
+type NetworkServices = (
+    Arc<dyn NetworkMonitor>,
+    Arc<dyn PortalProbe>,
+    Arc<dyn TunnelHealthProbe>,
+);
+
 pub struct ServiceConfig {
     socket: PathBuf,
     status: PathBuf,
@@ -152,7 +158,7 @@ pub struct ServiceConfig {
     credentials: Arc<dyn CredentialRepository>,
     helper: Arc<dyn MacHelper>,
     clock: Arc<dyn SystemClock>,
-    network: Option<(Arc<dyn NetworkMonitor>, Arc<dyn PortalProbe>)>,
+    network: Option<NetworkServices>,
     cleanup_timeout: Duration,
 }
 
@@ -174,6 +180,7 @@ impl ServiceConfig {
             network: Some((
                 Arc::new(MacNetworkMonitor::production()),
                 Arc::new(MacPortalProbe::production()),
+                Arc::new(MacTunnelDnsProbe::production()),
             )),
             cleanup_timeout: Duration::from_secs(5),
         })
@@ -209,7 +216,7 @@ impl ServiceConfig {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn for_test_with_network<C, H, M, P>(
+    pub fn for_test_with_network<C, H, M, P, T>(
         socket: PathBuf,
         status: PathBuf,
         automatic: PathBuf,
@@ -220,12 +227,14 @@ impl ServiceConfig {
         clock: C,
         monitor: M,
         portal: P,
+        tunnel_health: T,
     ) -> Self
     where
         C: SystemClock + 'static,
         H: MacHelper + 'static,
         M: NetworkMonitor + 'static,
         P: PortalProbe + 'static,
+        T: TunnelHealthProbe + 'static,
     {
         Self {
             socket,
@@ -236,7 +245,7 @@ impl ServiceConfig {
             credentials,
             helper,
             clock: Arc::new(clock),
-            network: Some((Arc::new(monitor), Arc::new(portal))),
+            network: Some((Arc::new(monitor), Arc::new(portal), Arc::new(tunnel_health))),
             cleanup_timeout: Duration::from_secs(5),
         }
     }
@@ -328,6 +337,7 @@ struct SessionControl {
 
 const CONNECT_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(150);
 const CONNECT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTED_TUNNEL_HEALTH_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 struct SessionCompletion {
@@ -804,17 +814,52 @@ pub struct NetworkReadinessTracker {
     candidate: Option<NetworkIdentity>,
     stable_samples: u8,
     published: Option<NetworkIdentity>,
+    last_connected_health_probe: Option<Instant>,
+    consecutive_connected_health_failures: u8,
+    tunnel_health_failure_episodes: u8,
+    tunnel_health_cooldown_until: Option<Instant>,
+    tunnel_health_failure_identity: Option<NetworkIdentity>,
 }
 
 impl NetworkReadinessTracker {
     pub fn portal_probe_required(&self, sample: Option<&NetworkIdentity>) -> bool {
-        sample.is_some() && sample != self.published.as_ref()
+        self.portal_probe_required_at(sample, Instant::now())
     }
+
+    pub fn portal_probe_required_at(&self, sample: Option<&NetworkIdentity>, now: Instant) -> bool {
+        sample.is_some()
+            && !self.tunnel_health_cooldown_active_for(sample, now)
+            && sample != self.published.as_ref()
+    }
+
     pub fn observe(
         &mut self,
         sample: Option<NetworkIdentity>,
         portal_reachable: bool,
     ) -> Option<EngineEvent> {
+        self.observe_at(sample, portal_reachable, Instant::now())
+    }
+
+    pub fn observe_at(
+        &mut self,
+        sample: Option<NetworkIdentity>,
+        portal_reachable: bool,
+        now: Instant,
+    ) -> Option<EngineEvent> {
+        if self.tunnel_health_cooldown_active_for(sample.as_ref(), now) {
+            return None;
+        }
+        if self.tunnel_health_cooldown_until.is_some() {
+            if sample.is_some() && sample.as_ref() != self.tunnel_health_failure_identity.as_ref() {
+                self.tunnel_health_failure_episodes = 0;
+                self.tunnel_health_failure_identity = None;
+            }
+            self.tunnel_health_cooldown_until = None;
+        }
+        if sample.as_ref() != self.published.as_ref() {
+            self.last_connected_health_probe = None;
+            self.consecutive_connected_health_failures = 0;
+        }
         let ready = match sample {
             Some(identity) if self.published.as_ref() == Some(&identity) || portal_reachable => {
                 Some(identity)
@@ -836,12 +881,74 @@ impl NetworkReadinessTracker {
             None => EngineEvent::NetworkUnavailable,
         })
     }
+
+    pub fn connected_health_probe_required_at(
+        &self,
+        sample: Option<&NetworkIdentity>,
+        connected: bool,
+        now: Instant,
+        interval: Duration,
+    ) -> bool {
+        connected
+            && sample.is_some()
+            && sample == self.published.as_ref()
+            && self
+                .last_connected_health_probe
+                .is_none_or(|last| now.saturating_duration_since(last) >= interval)
+    }
+
+    pub fn observe_connected_health_at(
+        &mut self,
+        healthy: bool,
+        now: Instant,
+    ) -> Option<EngineEvent> {
+        if self.published.is_none() {
+            self.last_connected_health_probe = None;
+            self.consecutive_connected_health_failures = 0;
+            return None;
+        }
+        self.last_connected_health_probe = Some(now);
+        if healthy {
+            self.consecutive_connected_health_failures = 0;
+            self.tunnel_health_failure_episodes = 0;
+            self.tunnel_health_cooldown_until = None;
+            self.tunnel_health_failure_identity = None;
+            return None;
+        }
+        self.consecutive_connected_health_failures =
+            self.consecutive_connected_health_failures.saturating_add(1);
+        if self.consecutive_connected_health_failures < 2 {
+            return None;
+        }
+        self.candidate = None;
+        self.stable_samples = 0;
+        self.tunnel_health_failure_episodes = self.tunnel_health_failure_episodes.saturating_add(1);
+        let exponent = self.tunnel_health_failure_episodes.saturating_sub(1).min(4);
+        let delay_seconds = 120_u64.min(10_u64.saturating_mul(1_u64 << exponent));
+        self.tunnel_health_cooldown_until = now.checked_add(Duration::from_secs(delay_seconds));
+        self.tunnel_health_failure_identity = self.published.clone();
+        self.published = None;
+        self.last_connected_health_probe = None;
+        self.consecutive_connected_health_failures = 0;
+        Some(EngineEvent::NetworkUnavailable)
+    }
+
+    fn tunnel_health_cooldown_active_for(
+        &self,
+        sample: Option<&NetworkIdentity>,
+        now: Instant,
+    ) -> bool {
+        self.tunnel_health_cooldown_until
+            .is_some_and(|until| now < until)
+            && (sample.is_none() || sample == self.tunnel_health_failure_identity.as_ref())
+    }
 }
 
 pub async fn run_network_watch<R, C>(
     control: Arc<ControlPlane<R, C>>,
     monitor: Arc<dyn NetworkMonitor>,
     portal: Arc<dyn PortalProbe>,
+    tunnel_health: Arc<dyn TunnelHealthProbe>,
     mut shutdown: watch::Receiver<bool>,
 ) where
     R: CredentialRepository + 'static,
@@ -853,7 +960,8 @@ pub async fn run_network_watch<R, C>(
             return;
         }
         let sample: Option<NetworkIdentity> = monitor.current_identity().await.unwrap_or_default();
-        let portal_reachable = if tracker.portal_probe_required(sample.as_ref()) {
+        let now = Instant::now();
+        let portal_reachable = if tracker.portal_probe_required_at(sample.as_ref(), now) {
             match sample.as_ref() {
                 Some(identity) => portal.reachable(identity).await.unwrap_or(false),
                 None => false,
@@ -861,8 +969,19 @@ pub async fn run_network_watch<R, C>(
         } else {
             sample.is_some()
         };
-        if let Some(event) = tracker.observe(sample, portal_reachable) {
+        if let Some(event) = tracker.observe_at(sample.clone(), portal_reachable, now) {
             control.apply_event(event);
+        }
+        if tracker.connected_health_probe_required_at(
+            sample.as_ref(),
+            control.status().state == VpnState::Connected,
+            now,
+            CONNECTED_TUNNEL_HEALTH_INTERVAL,
+        ) {
+            let healthy = tunnel_health.healthy().await.unwrap_or(false);
+            if let Some(event) = tracker.observe_connected_health_at(healthy, now) {
+                control.apply_event(event);
+            }
         }
         tokio::select! { _ = shutdown.changed() => {}, result = monitor.wait_for_change(Duration::from_secs(1)) => { let _ = result; } }
         tokio::task::yield_now().await;
@@ -1136,11 +1255,12 @@ pub async fn run_service(
     );
     let runtime_shutdown = shutdown.clone();
     let runtime_task = tokio::spawn(runtime.run(runtime_shutdown));
-    let network_task = config.network.map(|(monitor, portal)| {
+    let network_task = config.network.map(|(monitor, portal, tunnel_health)| {
         tokio::spawn(run_network_watch(
             Arc::clone(&control),
             monitor,
             portal,
+            tunnel_health,
             shutdown.clone(),
         ))
     });

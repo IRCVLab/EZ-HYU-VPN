@@ -566,6 +566,75 @@ esac
         #expect(fixture.tools.restoredDNSServers.isEmpty)
     }
 
+    @Test func repairRetiresArtifactFreeLedgerAcrossBootAndServiceChangeWithoutNetworkMutation() throws {
+        let fixture = try staleNetworkEpochFixture()
+        fixture.tools.rebootIdentityValue = 0x8000_0000_0000_1093
+        fixture.tools.primaryServiceIDValue = "service-current"
+        fixture.tools.defaultGateway = "172.16.225.254"
+        fixture.tools.resolverServers = ["168.126.63.1", "8.8.8.8"]
+        fixture.tools.resolverSearchDomains = []
+        fixture.tools.resolverServersPresent = true
+        fixture.tools.resolverSearchDomainsPresent = false
+        let currentDNS = ResolverFieldSnapshot(
+            servers: fixture.tools.resolverServers,
+            searchDomains: [],
+            serversPresent: true,
+            searchDomainsPresent: false
+        )
+        fixture.tools.resolverSurfaces = [
+            "Setup:/Network/Service/service-current/DNS": currentDNS,
+            "State:/Network/Service/service-current/DNS": currentDNS,
+            "State:/Network/Global/DNS": currentDNS,
+            "State:/Network/Interface/en0/DNS": currentDNS,
+            "Effective:/scutil/--dns": currentDNS,
+        ]
+
+        try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.ledger.path))
+        #expect(fixture.tools.routes.isEmpty)
+        #expect(fixture.tools.restoredRoutes.isEmpty)
+        #expect(fixture.tools.restoredDNSServers.isEmpty)
+        #expect(fixture.tools.restoredSearchDomains.isEmpty)
+        #expect(fixture.tools.resolverServers == ["168.126.63.1", "8.8.8.8"])
+    }
+
+    @Test func repairKeepsCrossContextLedgerWhenAppliedDNSMarkerRemainsOnNewService() throws {
+        let fixture = try staleNetworkEpochFixture()
+        fixture.tools.rebootIdentityValue = 0x8000_0000_0000_1093
+        fixture.tools.primaryServiceIDValue = "service-current"
+        fixture.tools.defaultGateway = "172.16.225.254"
+        fixture.tools.resolverServers = ["168.126.63.1", "8.8.8.8"]
+        fixture.tools.resolverServersPresent = true
+        fixture.tools.resolverSearchDomainsPresent = false
+        let currentDNS = ResolverFieldSnapshot(
+            servers: fixture.tools.resolverServers,
+            searchDomains: [],
+            serversPresent: true,
+            searchDomainsPresent: false
+        )
+        fixture.tools.resolverSurfaces = [
+            "Setup:/Network/Service/service-current/DNS": currentDNS,
+            "State:/Network/Service/service-current/DNS": ResolverFieldSnapshot(
+                servers: ["168.126.63.1", "166.104.100.100"],
+                searchDomains: []
+            ),
+            "State:/Network/Global/DNS": currentDNS,
+            "State:/Network/Interface/en0/DNS": currentDNS,
+            "Effective:/scutil/--dns": currentDNS,
+        ]
+
+        #expect(throws: (any Error).self) {
+            try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: fixture.ledger.path))
+        #expect(fixture.tools.routes.isEmpty)
+        #expect(fixture.tools.restoredRoutes.isEmpty)
+        #expect(fixture.tools.restoredDNSServers.isEmpty)
+        #expect(fixture.tools.restoredSearchDomains.isEmpty)
+    }
+
     @Test func systemNetworkToolsUsesStableBootSessionUUID() throws {
         let dir = try temporaryDirectory()
         let sysctl = dir.appendingPathComponent("sysctl")

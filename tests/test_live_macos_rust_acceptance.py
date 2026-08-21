@@ -198,6 +198,7 @@ class Task9Fixture:
             "com.hyu.vpn.helper": b"helper",
             "runtime/gp-hip-report": b"hip",
             "launchd/com.hyu.vpn.service.plist.in": plistlib.dumps({"Label": "com.hyu.vpn.service", "ProgramArguments": ["/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service"]}),
+            "release-metadata.json": json.dumps({"schema": 1, "version": "0.2.3"}, separators=(",", ":")).encode(),
             "manifest.json": b"{}",
         }
         manifest: dict[str, dict[str, object]] = {}
@@ -632,6 +633,9 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
         self.assertIn('hyu-install-mutation-', text)
         self.assertIn('wait_until_unhealthy', text)
         self.assertIn('wait_wifi_connected_transition', text)
+        self.assertIn('EXPECTED_BACKEND_VERSION', text)
+        self.assertIn('release-metadata.json', text)
+        self.assertNotIn('d["backend_build_version"]=="0.2.3"', text)
 
     def test_fix2_ipc_uses_exact_rust_protocol_ack_and_status_variants(self):
         with Task9Fixture(self) as f:

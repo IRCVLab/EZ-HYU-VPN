@@ -21,3 +21,8 @@ pub trait NetworkMonitor: Send + Sync {
 pub trait PortalProbe: Send + Sync {
     async fn reachable(&self, identity: &NetworkIdentity) -> Result<bool, NetworkProbeError>;
 }
+
+#[async_trait]
+pub trait TunnelHealthProbe: Send + Sync {
+    async fn healthy(&self) -> Result<bool, NetworkProbeError>;
+}

@@ -197,6 +197,43 @@ fn changed_physical_network_restarts_an_active_generation() {
 }
 
 #[test]
+fn connected_health_loss_stops_once_and_waits_for_network_without_backoff() {
+    let mut engine = Engine::new(true);
+    let started = engine.handle(EngineEvent::NetworkReady(wifi("en0")));
+    let generation = started
+        .iter()
+        .find_map(|action| match action {
+            EngineAction::StartConnection { generation } => Some(*generation),
+            _ => None,
+        })
+        .unwrap();
+    engine.handle(EngineEvent::ConnectorConnected {
+        generation,
+        tunnel_interface: Some("utun7".to_owned()),
+        hip_succeeded: true,
+    });
+
+    assert_eq!(
+        engine.handle(EngineEvent::NetworkUnavailable),
+        vec![
+            EngineAction::PublishState(VpnState::WaitingForNetwork),
+            EngineAction::StopConnection { generation },
+        ]
+    );
+    assert!(engine.handle(EngineEvent::NetworkUnavailable).is_empty());
+    assert_eq!(
+        engine.handle(EngineEvent::ConnectorExited {
+            generation,
+            return_code: 1,
+            runtime_seconds: 60,
+        }),
+        vec![EngineAction::PublishState(VpnState::WaitingForNetwork)]
+    );
+    assert_eq!(engine.state(), VpnState::WaitingForNetwork);
+    assert_eq!(engine.pending_retry_seconds(), None);
+}
+
+#[test]
 fn connection_timeout_enters_backoff_and_schedules_retry() {
     let mut engine = Engine::new(true);
     let started = engine.handle(EngineEvent::NetworkReady(NetworkIdentity::new(

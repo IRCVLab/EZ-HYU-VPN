@@ -227,6 +227,12 @@ impl Engine {
     }
 
     fn network_unavailable(&mut self) -> Vec<EngineAction> {
+        if self.network.is_none()
+            && self.state == VpnState::WaitingForNetwork
+            && self.pending_retry_seconds.is_none()
+        {
+            return Vec::new();
+        }
         self.network = None;
         self.policy.reset();
         let mut actions = Vec::new();

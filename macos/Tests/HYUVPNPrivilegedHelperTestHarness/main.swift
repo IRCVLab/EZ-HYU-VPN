@@ -80,6 +80,8 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-retires-empty-baseline-after-service-change", testRepairRetiresEmptyBaselineAfterServiceChange),
                 ("network-repair-retires-clean-legacy-ledger-without-boot-match", testRepairRetiresCleanLegacyLedgerWithoutBootMatch),
                 ("network-repair-keeps-stable-ledger-on-boot-mismatch", testRepairKeepsStableLedgerOnBootMismatch),
+                ("network-repair-retires-artifact-free-ledger-across-boot-and-service-change", testRepairRetiresArtifactFreeLedgerAcrossBootAndServiceChange),
+                ("network-repair-keeps-cross-context-ledger-when-applied-dns-remains", testRepairKeepsCrossContextLedgerWhenAppliedDNSRemains),
                 ("network-repair-never-mutates-dns-for-legacy-boot-identity", testRepairNeverMutatesDNSForLegacyBootIdentity),
                 ("system-network-tools-normalizes-static-host-route-mask", testSystemNetworkToolsNormalizesStaticHostRouteMask),
                 ("system-network-tools-resolves-explicit-network-host-route", testSystemNetworkToolsResolvesExplicitNetworkHostRoute),
@@ -1052,6 +1054,76 @@ printf '{ PrimaryService : 730F133F-1F6A-4C84-901E-9E41A028E092 }\\n'
         try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "stable boot mismatch keeps repair evidence")
         try expect(fixture.tools.restoredRoutes.isEmpty, "stable boot mismatch never mutates routes")
         try expect(fixture.tools.restoredDNSServers.isEmpty, "stable boot mismatch never mutates DNS")
+    }
+
+    static func testRepairRetiresArtifactFreeLedgerAcrossBootAndServiceChange() throws {
+        let (fixture, _, _) = try staleNetworkLedgerFixture()
+        fixture.tools.rebootIdentityValue = 0x8000_0000_0000_1093
+        fixture.tools.primaryServiceIDValue = "service-current"
+        fixture.tools.defaultGateway = "172.16.225.254"
+        fixture.tools.resolverServers = ["168.126.63.1", "8.8.8.8"]
+        fixture.tools.resolverSearchDomains = []
+        fixture.tools.resolverServersPresent = true
+        fixture.tools.resolverSearchDomainsPresent = false
+        let currentDNS = ResolverFieldSnapshot(
+            servers: fixture.tools.resolverServers,
+            searchDomains: [],
+            serversPresent: true,
+            searchDomainsPresent: false
+        )
+        fixture.tools.resolverSurfaces = [
+            "Setup:/Network/Service/service-current/DNS": currentDNS,
+            "State:/Network/Service/service-current/DNS": currentDNS,
+            "State:/Network/Global/DNS": currentDNS,
+            "State:/Network/Interface/en0/DNS": currentDNS,
+            "Effective:/scutil/--dns": currentDNS,
+        ]
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "artifact-free stale ledger is retired after boot and service change")
+        try expect(fixture.tools.routes.isEmpty, "cross-context retirement leaves routes untouched")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "cross-context retirement never restores obsolete routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "cross-context retirement never restores obsolete DNS")
+        try expect(fixture.tools.restoredSearchDomains.isEmpty, "cross-context retirement never restores obsolete search domains")
+        try expect(fixture.tools.resolverServers == ["168.126.63.1", "8.8.8.8"], "cross-context retirement preserves current DNS")
+    }
+
+    static func testRepairKeepsCrossContextLedgerWhenAppliedDNSRemains() throws {
+        let (fixture, _, _) = try staleNetworkLedgerFixture()
+        fixture.tools.rebootIdentityValue = 0x8000_0000_0000_1093
+        fixture.tools.primaryServiceIDValue = "service-current"
+        fixture.tools.defaultGateway = "172.16.225.254"
+        fixture.tools.resolverServers = ["168.126.63.1", "8.8.8.8"]
+        fixture.tools.resolverSearchDomains = []
+        fixture.tools.resolverServersPresent = true
+        fixture.tools.resolverSearchDomainsPresent = false
+        let currentDNS = ResolverFieldSnapshot(
+            servers: fixture.tools.resolverServers,
+            searchDomains: [],
+            serversPresent: true,
+            searchDomainsPresent: false
+        )
+        fixture.tools.resolverSurfaces = [
+            "Setup:/Network/Service/service-current/DNS": currentDNS,
+            "State:/Network/Service/service-current/DNS": ResolverFieldSnapshot(
+                servers: ["168.126.63.1", "166.104.100.100"],
+                searchDomains: []
+            ),
+            "State:/Network/Global/DNS": currentDNS,
+            "State:/Network/Interface/en0/DNS": currentDNS,
+            "Effective:/scutil/--dns": currentDNS,
+        ]
+
+        try expectThrows("applied VPN DNS on a new service blocks cross-context retirement") {
+            try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+        }
+
+        try expect(FileManager.default.fileExists(atPath: fixture.ledger.path), "remaining VPN DNS keeps repair evidence")
+        try expect(fixture.tools.routes.isEmpty, "blocked cross-context retirement leaves routes untouched")
+        try expect(fixture.tools.restoredRoutes.isEmpty, "blocked cross-context retirement never restores routes")
+        try expect(fixture.tools.restoredDNSServers.isEmpty, "blocked cross-context retirement never restores DNS")
+        try expect(fixture.tools.restoredSearchDomains.isEmpty, "blocked cross-context retirement never restores search domains")
     }
 
     static func staleNetworkLedgerFixture(ledgerBootIdentity: UInt64 = stableTestBootIdentity, tunnelRouteWasAlreadyPresent: Bool = false) throws -> (HarnessNetworkFixture, RouteSnapshot, ResolverSnapshot) {

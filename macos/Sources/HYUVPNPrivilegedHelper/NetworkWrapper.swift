@@ -608,6 +608,10 @@ public struct NetworkWrapperRunner {
                 try removeLedgerAndSyncDirectory(ledgerPath)
                 return
             }
+            if crossContextArtifactFreeRetirementSafe(ledger: ledger, current: preflight) {
+                try removeLedgerAndSyncDirectory(ledgerPath)
+                return
+            }
             if let staleRoutes = staleNetworkOwnedRouteCleanupPlan(ledger: ledger, current: preflight), !staleRoutes.isEmpty {
                 do {
                     for route in staleRoutes { try tools.deleteRoute(route) }
@@ -890,6 +894,48 @@ public struct NetworkWrapperRunner {
               ledger.defaultRouteBefore != current.defaultRoute || sameRouteAppliedDNSArtifactsAbsent(ledger: ledger, current: current.resolver)
         else { return false }
         return true
+    }
+
+    private func crossContextArtifactFreeRetirementSafe(ledger: NetworkLedger, current: NetworkSnapshotData) -> Bool {
+        let networkContextChanged = !stableBootIdentityMatches(ledger.rebootIdentity, current: current)
+            || ledger.serviceIDBefore != current.serviceID
+            || ledger.defaultInterfaceBefore != current.defaultInterface
+        guard ledger.status == "repair-required",
+              networkContextChanged,
+              current.routes.isEmpty,
+              current.tunnelInterface.isEmpty,
+              !current.defaultInterface.hasPrefix("utun"),
+              current.resolver.serviceID == current.serviceID,
+              current.resolver.activeInterface == current.defaultInterface,
+              let recordedTunnel = ledger.tunnelInterface,
+              let tunnelSurface = current.resolver.surfaces["State:/Network/Interface/\(recordedTunnel)/DNS"],
+              !tunnelSurface.keyPresent,
+              sameRouteAppliedDNSArtifactsAbsent(ledger: ledger, current: current.resolver),
+              appliedResolverValuesAbsent(ledger: ledger, current: current.resolver)
+        else { return false }
+        return true
+    }
+
+    private func appliedResolverValuesAbsent(ledger: NetworkLedger, current: ResolverSnapshot) -> Bool {
+        guard let applied = ledger.dnsApplied else { return true }
+        guard let before = ledger.dnsBefore else { return false }
+
+        let baselineServers = resolverValues(before, topLevel: before.servers, surfaceKeyPath: \.servers)
+        let baselineSearchDomains = resolverValues(before, topLevel: before.searchDomains, surfaceKeyPath: \.searchDomains)
+        let appliedOnlyServers = resolverValues(applied, topLevel: applied.servers, surfaceKeyPath: \.servers).subtracting(baselineServers)
+        let appliedOnlySearchDomains = resolverValues(applied, topLevel: applied.searchDomains, surfaceKeyPath: \.searchDomains).subtracting(baselineSearchDomains)
+        let currentServers = resolverValues(current, topLevel: current.servers, surfaceKeyPath: \.servers)
+        let currentSearchDomains = resolverValues(current, topLevel: current.searchDomains, surfaceKeyPath: \.searchDomains)
+        return appliedOnlyServers.isDisjoint(with: currentServers)
+            && appliedOnlySearchDomains.isDisjoint(with: currentSearchDomains)
+    }
+
+    private func resolverValues(_ snapshot: ResolverSnapshot, topLevel: [String], surfaceKeyPath: KeyPath<ResolverFieldSnapshot, [String]>) -> Set<String> {
+        var values = Set(topLevel)
+        for surface in snapshot.surfaces.values where surface.keyPresent {
+            values.formUnion(surface[keyPath: surfaceKeyPath])
+        }
+        return values
     }
 
     private func emptyBaselineRetirementSafe(ledger: NetworkLedger, current: NetworkSnapshotData) -> Bool {

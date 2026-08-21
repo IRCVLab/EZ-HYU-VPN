@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use hyu_vpn_core::ports::{NetworkMonitor, NetworkProbeError, PortalProbe};
+use hyu_vpn_core::ports::{NetworkMonitor, NetworkProbeError, PortalProbe, TunnelHealthProbe};
 use hyu_vpn_core::state::{ConnectionGeneration, EngineEvent, NetworkIdentity};
 use hyu_vpn_daemon::ipc::RequestHandler;
 use hyu_vpn_daemon::runtime::{ControlPlane, CredentialRepository, RepositoryError, SystemClock};
@@ -513,6 +513,113 @@ impl PortalProbe for FakeProbe {
     async fn reachable(&self, _identity: &NetworkIdentity) -> Result<bool, NetworkProbeError> {
         Ok(self.0)
     }
+}
+struct FakeTunnelProbe(bool);
+#[async_trait]
+impl TunnelHealthProbe for FakeTunnelProbe {
+    async fn healthy(&self) -> Result<bool, NetworkProbeError> {
+        Ok(self.0)
+    }
+}
+
+#[test]
+fn connected_tunnel_health_is_rate_limited_and_two_failures_publish_unavailable() {
+    let identity = NetworkIdentity::new("en0", "192.0.2.1");
+    let started = Instant::now();
+    let interval = Duration::from_secs(15);
+    let mut tracker = hyu_vpn_macos_service::NetworkReadinessTracker::default();
+
+    assert!(tracker.observe(Some(identity.clone()), true).is_none());
+    assert_eq!(
+        tracker.observe(Some(identity.clone()), true),
+        Some(EngineEvent::NetworkReady(identity.clone()))
+    );
+    assert!(tracker.connected_health_probe_required_at(Some(&identity), true, started, interval));
+    assert!(
+        tracker
+            .observe_connected_health_at(false, started)
+            .is_none()
+    );
+    assert!(!tracker.connected_health_probe_required_at(
+        Some(&identity),
+        true,
+        started + Duration::from_secs(14),
+        interval
+    ));
+    assert!(tracker.connected_health_probe_required_at(
+        Some(&identity),
+        true,
+        started + Duration::from_secs(15),
+        interval
+    ));
+    assert_eq!(
+        tracker.observe_connected_health_at(false, started + Duration::from_secs(15)),
+        Some(EngineEvent::NetworkUnavailable)
+    );
+    assert!(!tracker.portal_probe_required_at(Some(&identity), started + Duration::from_secs(24)));
+    assert!(tracker.portal_probe_required_at(Some(&identity), started + Duration::from_secs(25)));
+}
+
+#[test]
+fn persistent_tunnel_health_failures_apply_exponential_reconnect_cooldown() {
+    let identity = NetworkIdentity::new("en0", "192.0.2.1");
+    let started = Instant::now();
+    let mut tracker = hyu_vpn_macos_service::NetworkReadinessTracker::default();
+
+    assert!(
+        tracker
+            .observe_at(Some(identity.clone()), true, started)
+            .is_none()
+    );
+    assert_eq!(
+        tracker.observe_at(
+            Some(identity.clone()),
+            true,
+            started + Duration::from_secs(1)
+        ),
+        Some(EngineEvent::NetworkReady(identity.clone()))
+    );
+    assert!(
+        tracker
+            .observe_connected_health_at(false, started + Duration::from_secs(1))
+            .is_none()
+    );
+    assert_eq!(
+        tracker.observe_connected_health_at(false, started + Duration::from_secs(16)),
+        Some(EngineEvent::NetworkUnavailable)
+    );
+
+    assert!(!tracker.portal_probe_required_at(Some(&identity), started + Duration::from_secs(25)));
+    assert!(tracker.portal_probe_required_at(Some(&identity), started + Duration::from_secs(26)));
+    assert!(
+        tracker
+            .observe_at(
+                Some(identity.clone()),
+                true,
+                started + Duration::from_secs(26)
+            )
+            .is_none()
+    );
+    assert_eq!(
+        tracker.observe_at(
+            Some(identity.clone()),
+            true,
+            started + Duration::from_secs(27)
+        ),
+        Some(EngineEvent::NetworkReady(identity.clone()))
+    );
+
+    assert!(
+        tracker
+            .observe_connected_health_at(false, started + Duration::from_secs(27))
+            .is_none()
+    );
+    assert_eq!(
+        tracker.observe_connected_health_at(false, started + Duration::from_secs(42)),
+        Some(EngineEvent::NetworkUnavailable)
+    );
+    assert!(!tracker.portal_probe_required_at(Some(&identity), started + Duration::from_secs(61)));
+    assert!(tracker.portal_probe_required_at(Some(&identity), started + Duration::from_secs(62)));
 }
 
 #[tokio::test]
@@ -1358,6 +1465,7 @@ async fn health_check_is_status_only_and_never_starts_helper() {
             ]),
         },
         FakeProbe(true),
+        FakeTunnelProbe(true),
     );
 
     let result = tokio::time::timeout(
@@ -1423,6 +1531,7 @@ async fn run_health_check_uses_delayed_existing_service_without_helper_start() {
             ]),
         },
         FakeProbe(true),
+        FakeTunnelProbe(true),
     );
     run_health_check(config, Duration::from_secs(1))
         .await
