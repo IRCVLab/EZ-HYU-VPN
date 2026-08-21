@@ -450,16 +450,19 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
 
     static func lifecycleCoordinatorRuntime() throws {
         var coordinator = AppLifecycleCoordinator()
-        try expect(coordinator.handle(.appLaunched).effects.isEmpty, "launch leaves backend automatic-reconnect preference unchanged")
+        try expect(coordinator.handle(.appLaunched).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)], "launch enables always-on VPN through the backend")
+        try expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))).effects.isEmpty, "startup connect completion is absorbed")
         try expect(coordinator.handle(.primaryConnectRequested).effects == [.runControl(command: .connect, operation: .connect, timeout: 3)], "explicit connect starts once")
         try expect(coordinator.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))).effects.isEmpty, "explicit connect completion is absorbed")
 
         var disconnect = AppLifecycleCoordinator()
         _ = disconnect.handle(.appLaunched)
+        _ = disconnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
         try expect(disconnect.handle(.disconnectRequested).effects == [.runControl(command: .disconnect, operation: .disconnect, timeout: 3)], "explicit disconnect starts while idle")
 
         var terminateIdle = AppLifecycleCoordinator()
         _ = terminateIdle.handle(.appLaunched)
+        _ = terminateIdle.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
         try expect(terminateIdle.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: [.runControl(command: .disconnect, operation: .quit, timeout: 15)]), "idle terminate starts one quit disconnect")
         try expect(terminateIdle.handle(.controlCompleted(operation: .quit, result: ControlResult(status: .ok, errorCode: nil))).effects == [.replyToTermination(true)], "quit success replies true")
         try expect(terminateIdle.handle(.terminateRequested) == .init(terminationDirective: .terminateNow, effects: []), "post-success terminate returns terminateNow")
@@ -467,14 +470,12 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
 
         var terminateConnect = AppLifecycleCoordinator()
         _ = terminateConnect.handle(.appLaunched)
-        _ = terminateConnect.handle(.primaryConnectRequested)
         try expect(terminateConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "terminate during connect waits")
         try expect(terminateConnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "duplicate terminate adds nothing")
         try expect(terminateConnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil))).effects == [.runControl(command: .disconnect, operation: .quit, timeout: 15)], "post-connect terminate starts one quit disconnect")
 
         var terminateDisconnect = AppLifecycleCoordinator()
         _ = terminateDisconnect.handle(.appLaunched)
-        _ = terminateDisconnect.handle(.primaryConnectRequested)
         _ = terminateDisconnect.handle(.controlCompleted(operation: .connect, result: ControlResult(status: .ok, errorCode: nil)))
         _ = terminateDisconnect.handle(.disconnectRequested)
         try expect(terminateDisconnect.handle(.terminateRequested) == .init(terminationDirective: .terminateLater, effects: []), "terminate attaches to existing disconnect")

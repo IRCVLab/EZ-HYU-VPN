@@ -187,7 +187,7 @@ public struct AppLifecycleCoordinator: Equatable, Sendable {
 
         switch event {
         case .appLaunched:
-            return AppLifecycleTransition(terminationDirective: .none, effects: [])
+            return startControlIfPossible(command: .connect, operation: .connect, timeout: 3, source: .startup)
 
         case .primaryConnectRequested:
             return startPrimary(command: .connect, operation: .connect, source: .primaryConnect)
