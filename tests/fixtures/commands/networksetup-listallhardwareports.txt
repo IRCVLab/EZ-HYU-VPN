@@ -1,7 +1,0 @@
-Hardware Port: Wi-Fi
-Device: en0
-Ethernet Address: aa:bb:cc:dd:ee:ff
-
-Hardware Port: Thunderbolt Bridge
-Device: bridge0
-Ethernet Address: 11:22:33:44:55:66

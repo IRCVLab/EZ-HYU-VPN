@@ -105,9 +105,16 @@ _allowed_standard_applications_anchor(){
 _allowed_destination_owner(){
   local target="$1" current="$2" uid="$3"
   [[ "$uid" == 0 ]] && return 0
-  if [[ -n "${USER_HOME:-}" && -n "${ADMIN_UID:-}" && "$target" == "$USER_HOME/Library/LaunchAgents"* ]]; then
-    case "$current" in "$USER_HOME"|"$USER_HOME"/*) [[ "$uid" == "$ADMIN_UID" ]] && return 0;; esac
-  fi
+  [[ -n "${USER_HOME:-}" && -n "${ADMIN_UID:-}" ]] || return 1
+  case "$target" in
+    "$USER_HOME/Library/LaunchAgents"/*|\
+    "$USER_HOME/Library/Application Support/hyu-openconnect"/*|\
+    "$USER_HOME/.cache/hyu-openconnect"|"$USER_HOME/.cache/hyu-openconnect"/*|\
+    "$USER_HOME/Library/Logs/hyu-openconnect-service.log"|\
+    "$USER_HOME/Library/Logs/hyu-openconnect-service.err")
+      case "$current" in "$USER_HOME"|"$USER_HOME"/*) [[ "$uid" == "$ADMIN_UID" ]] && return 0;; esac
+      ;;
+  esac
   return 1
 }
 validate_privileged_destination_chain(){
@@ -208,7 +215,8 @@ STATE_DIR="$(map_path /private/var/db/hyu-vpn)"; TX_STATE="$STATE_DIR/transactio
 SUDOERS_TMP="$STATE_DIR/sudoers-candidate.$$"
 APP_SUPPORT="$(map_path '/Library/Application Support/HYU VPN')"; HELPER_DST="$(map_path /Library/PrivilegedHelperTools/com.hyu.vpn.helper)"; VPNC_WRAPPER_DST="$(map_path /Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper)"; SUDOERS_DST="$(map_path /etc/sudoers.d/hyu-vpn)"; APP_DST="$(map_path '/Applications/HYU VPN.app')"
 LEGACY_SUDOERS_DST="$(map_path /etc/sudoers.d/com.hyu.vpn)"
-USER_HOME="$(map_path "$ADMIN_HOME")"; SERVICE_PLIST="$USER_HOME/Library/LaunchAgents/com.hyu.vpn.service.plist"; LEGACY_MENUBAR_PLIST="$USER_HOME/Library/LaunchAgents/com.hyu.vpn.menubar.plist"; MENU_LABEL="com.hyu.vpn.menubar"
+LEGACY_OPENCONNECT_SUDOERS_DST="$(map_path /etc/sudoers.d/openconnect-gp)"
+USER_HOME="$(map_path "$ADMIN_HOME")"; USER_STATE_DIR="$USER_HOME/Library/Application Support/hyu-openconnect"; SERVICE_PLIST="$USER_HOME/Library/LaunchAgents/com.hyu.vpn.service.plist"; LEGACY_MENUBAR_PLIST="$USER_HOME/Library/LaunchAgents/com.hyu.vpn.menubar.plist"; LEGACY_SERVICE_PLIST="$USER_HOME/Library/LaunchAgents/local.hyu-openconnect.plist"; MENU_LABEL="com.hyu.vpn.menubar"
 PACKAGE_SNAPSHOT="$STATE_DIR/package-snapshot"; TXN_SNAPSHOT="$STATE_DIR/root-snapshot"; ROOT_NATIVE_TOOL_DIR="$STATE_DIR/native-tool"; ROOT_NATIVE_TOOL="$ROOT_NATIVE_TOOL_DIR/hyu-vpn-macos-service"; LEGACY_LABEL="local.hyu-openconnect"
 
 trusted_native_tool(){
@@ -505,6 +513,38 @@ write_file(){ local dst="$1" mode="$2" content="$3"; log "before-mutate-write $(
 render_from_template(){ local template="$1" dst="$2"; validate_privileged_destination_chain "$dst"; /usr/bin/sed -e "s#@USER_HOME@#/Users/$ADMIN_USER#g" -e "s#@APP_PATH@#/Applications/HYU VPN.app#g" -e "s#@SERVICE_PATH@#/Library/Application Support/HYU VPN/bin/hyu-vpn-macos-service#g" "$template" > "$dst"; }
 render_plists(){ ensure_parent_dir "$SERVICE_PLIST"; backup_target "$SERVICE_PLIST"; render_from_template "$TXN_SNAPSHOT/config/launchd/com.hyu.vpn.service.plist.in" "$SERVICE_PLIST"; /bin/chmod 644 "$SERVICE_PLIST"; record_path "$SERVICE_PLIST"; }
 migrate_legacy_menu_launchagent(){ log "legacy-menu-launchagent-migration-start"; run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID/$MENU_LABEL"; if [[ -f "$LEGACY_MENUBAR_PLIST" || -L "$LEGACY_MENUBAR_PLIST" ]]; then backup_target "$LEGACY_MENUBAR_PLIST"; /bin/rm -f "$LEGACY_MENUBAR_PLIST"; log "legacy-menu-launchagent-removed com.hyu.vpn.menubar"; else log "legacy-menu-launchagent-absent com.hyu.vpn.menubar"; fi; }
+erase_legacy_residue(){
+  local target legacy_hyu_bin_prefix="$APP_SUPPORT/bin/hyu-vpn"
+  log "legacy-residue-erasure-start"
+  for target in \
+    "${legacy_hyu_bin_prefix}-native-client" \
+    "${legacy_hyu_bin_prefix}-control" \
+    "${legacy_hyu_bin_prefix}-connect" \
+    "${legacy_hyu_bin_prefix}-service" \
+    "$APP_SUPPORT/bin/gp-hip-report" \
+    "$APP_SUPPORT/src" \
+    "$APP_SUPPORT/live-rust-backup" \
+    "$APP_SUPPORT/runtime/openconnect" \
+    "$APP_SUPPORT/runtime/oathtool" \
+    "$APP_SUPPORT/runtime/gp-hip-report.rust-backup" \
+    "$LEGACY_SUDOERS_DST" \
+    "$LEGACY_OPENCONNECT_SUDOERS_DST" \
+    "$LEGACY_SERVICE_PLIST" \
+    "$USER_STATE_DIR/auto-reconnect.json" \
+    "$USER_STATE_DIR/supervisor.lock" \
+    "$USER_STATE_DIR/totp-counter.json" \
+    "$USER_STATE_DIR/totp-counter.json.lock" \
+    "$USER_HOME/.cache/hyu-openconnect" \
+    "$USER_HOME/Library/Logs/hyu-openconnect-service.log" \
+    "$USER_HOME/Library/Logs/hyu-openconnect-service.err"
+  do
+    if [[ -e "$target" || -L "$target" ]]; then
+      backup_target "$target"
+      log "legacy-residue-erased $(rel_path "$target")"
+    fi
+  done
+  log "legacy-residue-erasure-complete"
+}
 write_installed_manifest(){ local tmp="$INSTALLED_MANIFEST.tmp" paths_tmp="$INSTALLED_PATHS.tmp" first=1; print '{"schema":1,"paths":[' > "$tmp"; : > "$paths_tmp"; while IFS= read -r rel; do [[ -z "$rel" ]] && continue; [[ "$rel" == private/var/db/hyu-vpn/installed-manifest.json || "$rel" == private/var/db/hyu-vpn/installed-paths.tsv ]] && continue; print -- "$rel" >> "$paths_tmp"; [[ $first -eq 0 ]] && print ',' >> "$tmp"; first=0; printf '"%s"' "$rel" >> "$tmp"; done < "$TXN_PATHS"; print ']}' >> "$tmp"; /bin/mv "$tmp" "$INSTALLED_MANIFEST"; /bin/mv "$paths_tmp" "$INSTALLED_PATHS"; /bin/chmod 600 "$INSTALLED_MANIFEST" "$INSTALLED_PATHS"; durable_flush "$INSTALLED_MANIFEST"; durable_flush "$INSTALLED_PATHS"; }
 root_service_health_check(){
   log "root-service-bootstrap-start"
@@ -522,11 +562,12 @@ install_phase(){
   drain_existing_helper
   quarantine_legacy
   migrate_legacy_menu_launchagent
+  erase_legacy_residue
   copy_file "$TXN_SNAPSHOT/com.hyu.vpn.helper" "$HELPER_DST" 755; fail_after helper
   validate_privileged_destination_chain "$APP_SUPPORT"; validate_privileged_destination_chain "$STATE_DIR"
-  /bin/mkdir -p "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime/openconnect" "$APP_SUPPORT/runtime/vpnc" "$STATE_DIR/ledger"
+  /bin/mkdir -p "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime/vpnc" "$STATE_DIR/ledger"
   validate_privileged_destination_chain "$APP_SUPPORT"; validate_privileged_destination_chain "$APP_SUPPORT/bin"; validate_privileged_destination_chain "$APP_SUPPORT/runtime"; validate_privileged_destination_chain "$STATE_DIR"; validate_privileged_destination_chain "$STATE_DIR/ledger"
-  /bin/chmod 755 "$APP_SUPPORT" "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime" "$APP_SUPPORT/runtime/openconnect" "$APP_SUPPORT/runtime/vpnc"; /bin/chmod 700 "$STATE_DIR" "$STATE_DIR/ledger"
+  /bin/chmod 755 "$APP_SUPPORT" "$APP_SUPPORT/bin" "$APP_SUPPORT/runtime" "$APP_SUPPORT/runtime/vpnc"; /bin/chmod 700 "$STATE_DIR" "$STATE_DIR/ledger"
   RUNTIME_DIR="$APP_SUPPORT/runtime/current"
   copy_dir "$TXN_SNAPSHOT/runtime/bin" "$RUNTIME_DIR/bin" 755; [[ -d "$TXN_SNAPSHOT/runtime/lib" ]] && copy_dir "$TXN_SNAPSHOT/runtime/lib" "$RUNTIME_DIR/lib" 755
   copy_file "$TXN_SNAPSHOT/runtime/gp-hip-report" "$APP_SUPPORT/runtime/gp-hip-report" 755; copy_file "$TXN_SNAPSHOT/runtime/vpnc/hyu-vpnc-wrapper" "$APP_SUPPORT/runtime/vpnc/hyu-vpnc-wrapper" 755; copy_file "$TXN_SNAPSHOT/runtime/vpnc/hyu-vpnc-wrapper" "$VPNC_WRAPPER_DST" 755; copy_file "$TXN_SNAPSHOT/runtime/vpnc/hyu-vpnc-wrapperd" "$APP_SUPPORT/runtime/vpnc/hyu-vpnc-wrapperd" 755; copy_file "$TXN_SNAPSHOT/runtime/vpnc/vpnc-script" "$APP_SUPPORT/runtime/vpnc/vpnc-script" 755
@@ -536,10 +577,10 @@ install_phase(){
   OC_ABS="/Library/Application Support/HYU VPN/runtime/current/bin/openconnect"; VPNC_ABS="/Library/PrivilegedHelperTools/com.hyu.vpn.vpnc-wrapper"; HIP_ABS="/Library/Application Support/HYU VPN/runtime/gp-hip-report"; OC_HASH="$(sha256 "$RUNTIME_DIR/bin/openconnect")"; VPNC_HASH="$(sha256 "$VPNC_WRAPPER_DST")"; HIP_HASH="$(sha256 "$APP_SUPPORT/runtime/gp-hip-report")"; cfg="{\"openConnectExecutable\":\"$OC_ABS\",\"vpncScript\":\"$VPNC_ABS\",\"hipWrapper\":\"$HIP_ABS\",\"stateDirectory\":\"/private/var/db/hyu-vpn\",\"ledgerDirectory\":\"/private/var/db/hyu-vpn/ledger\",\"openConnectExecutableSHA256\":\"$OC_HASH\",\"vpncScriptSHA256\":\"$VPNC_HASH\",\"hipWrapperSHA256\":\"$HIP_HASH\"}"
   write_file "$APP_SUPPORT/helper-config.json" 600 "$cfg"; fail_after app
   verify_installed_helper_stopped
-  ensure_parent_dir "$SUDOERS_DST"; print -- "$ADMIN_USER ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/com.hyu.vpn.helper start, /Library/PrivilegedHelperTools/com.hyu.vpn.helper stop, /Library/PrivilegedHelperTools/com.hyu.vpn.helper status, /Library/PrivilegedHelperTools/com.hyu.vpn.helper repair" > "$SUDOERS_TMP"; /bin/chmod 440 "$SUDOERS_TMP"; run_cmd /usr/sbin/visudo -c -f "$SUDOERS_TMP"; backup_target "$SUDOERS_DST"; record_path "$SUDOERS_DST"; run_cmd /bin/mv "$SUDOERS_TMP" "$SUDOERS_DST"; [[ -e "$SUDOERS_TMP" ]] && /bin/mv "$SUDOERS_TMP" "$SUDOERS_DST"; /bin/chmod 440 "$SUDOERS_DST"; run_cmd /usr/sbin/visudo -c -f "$SUDOERS_DST"; run_cmd /usr/sbin/visudo -c; backup_target "$LEGACY_SUDOERS_DST"; fail_after sudoers
+  ensure_parent_dir "$SUDOERS_DST"; print -- "$ADMIN_USER ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/com.hyu.vpn.helper start, /Library/PrivilegedHelperTools/com.hyu.vpn.helper stop, /Library/PrivilegedHelperTools/com.hyu.vpn.helper status, /Library/PrivilegedHelperTools/com.hyu.vpn.helper repair" > "$SUDOERS_TMP"; /bin/chmod 440 "$SUDOERS_TMP"; run_cmd /usr/sbin/visudo -c -f "$SUDOERS_TMP"; backup_target "$SUDOERS_DST"; record_path "$SUDOERS_DST"; run_cmd /bin/mv "$SUDOERS_TMP" "$SUDOERS_DST"; [[ -e "$SUDOERS_TMP" ]] && /bin/mv "$SUDOERS_TMP" "$SUDOERS_DST"; /bin/chmod 440 "$SUDOERS_DST"; run_cmd /usr/sbin/visudo -c -f "$SUDOERS_DST"; run_cmd /usr/sbin/visudo -c; fail_after sudoers
   render_plists; run_cmd /usr/sbin/chown "${ADMIN_USER}:staff" "$SERVICE_PLIST"; fail_after launchagent
   root_service_health_check
-  write_file "$STATE_DIR/migration.json" 600 '{"liveHelper":"drained-before-replace-and-verified-stopped","rootServiceHealth":"schema-v1-status-ok"}'; write_installed_manifest; print commit >| "$TX_STATE"; durable_flush "$TX_STATE"; log "install-commit"; /bin/rm -rf "$PACKAGE_SNAPSHOT" "$TXN_SNAPSHOT"; print complete >| "$TX_STATE"; durable_flush "$TX_STATE"; log "install-complete"; durable_flush "$JOURNAL"; /bin/rm -rf "$ROOT_NATIVE_TOOL_DIR"
+  write_file "$STATE_DIR/migration.json" 600 '{"liveHelper":"drained-before-replace-and-verified-stopped","legacyResidue":"transactionally-erased","rootServiceHealth":"schema-v1-status-ok"}'; write_installed_manifest; print commit >| "$TX_STATE"; durable_flush "$TX_STATE"; log "install-commit"; /bin/rm -rf "$PACKAGE_SNAPSHOT" "$TXN_SNAPSHOT"; print complete >| "$TX_STATE"; durable_flush "$TX_STATE"; log "install-complete"; durable_flush "$JOURNAL"; /bin/rm -rf "$ROOT_NATIVE_TOOL_DIR" "$STATE_DIR/backups" "$STATE_DIR/backups.tsv"
 }
 uninstall_phase(){
   if [[ -x "$HELPER_DST" ]]; then

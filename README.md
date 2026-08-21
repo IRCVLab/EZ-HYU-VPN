@@ -45,5 +45,3 @@ hyu-vpn
 - **Connect**, **Disconnect**, **Reconnect**, **Launch at Login**, **Quit HYU VPN**을 같은 메뉴에서 사용할 수 있습니다.
 
 OTP 설정용 비밀키는 현재 표시되는 6자리 코드가 아닙니다. 자격 증명은 각 컴퓨터에 암호화하여 저장하며 저장소나 로그에 기록하지 않습니다.
-
-v0.1.0에는 업데이트 알림 기능이 없으므로 기존 macOS 사용자는 한 번 직접 업데이트해야 합니다. 이후 버전은 앱 또는 GitHub Releases에서 확인할 수 있습니다.

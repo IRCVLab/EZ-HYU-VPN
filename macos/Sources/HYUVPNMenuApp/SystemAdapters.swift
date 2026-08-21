@@ -268,7 +268,7 @@ package final class FileTOTPStateResetter: TOTPStateResetting {
         defer { close(dirFD) }
         try verifyDescriptor(dirFD, directory: true, mode: 0o700)
 
-        let lockFD = openat(dirFD, "totp-counter.json.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        let lockFD = openat(dirFD, "totp-counter.lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard lockFD >= 0 else { throw AdapterError.unsafePath }
         defer { close(lockFD) }
         try verifyDescriptor(lockFD, directory: false, mode: 0o600)
@@ -276,13 +276,13 @@ package final class FileTOTPStateResetter: TOTPStateResetting {
         defer { _ = flock(lockFD, LOCK_UN) }
 
         var stateInfo = stat()
-        let stateStatus = fstatat(dirFD, "totp-counter.json", &stateInfo, AT_SYMLINK_NOFOLLOW)
+        let stateStatus = fstatat(dirFD, "totp-counter", &stateInfo, AT_SYMLINK_NOFOLLOW)
         if stateStatus != 0 {
             if errno == ENOENT { return }
             throw AdapterError.unsafePath
         }
         try verify(info: stateInfo, directory: false, mode: 0o600)
-        guard unlinkat(dirFD, "totp-counter.json", 0) == 0 else { throw AdapterError.unsafePath }
+        guard unlinkat(dirFD, "totp-counter", 0) == 0 else { throw AdapterError.unsafePath }
     }
 
     private func verifyDescriptor(_ fd: Int32, directory: Bool, mode: mode_t) throws {

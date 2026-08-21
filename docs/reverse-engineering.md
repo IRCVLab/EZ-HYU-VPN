@@ -6,7 +6,7 @@ This document summarizes sanitized evidence only. It does not contain real crede
 
 - 38 native reports were parsed from the local GlobalProtect diagnostic history during design.
 - All quoted structures here are sanitized evidence using placeholders and documentation IP ranges such as `192.0.2.0/24` and `2001:db8::/32`.
-- The native application remains a temporary migration oracle only; the runtime in this repository has no native runtime dependency on PanGPS, PanGPA, PanGpHip, PanGpHipMp, or GlobalProtect binaries or cached report files.
+- The native application was used only as a migration oracle during design and is no longer required; the runtime has no dependency on PanGPS, PanGPA, PanGpHip, PanGpHipMp, GlobalProtect binaries, or cached native reports.
 
 ## False-positive schema correction
 

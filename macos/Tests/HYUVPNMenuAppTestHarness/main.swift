@@ -708,9 +708,10 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
     static func encryptedCredentialAndTOTPSourceContract() throws {
         let root = packageRoot().deletingLastPathComponent()
         let source = try String(contentsOf: root.appendingPathComponent("macos/Sources/HYUVPNMenuApp/SystemAdapters.swift"))
-        for required in ["import CryptoKit", "AES.GCM.seal", "AES.GCM.open", "credentials.key", "credentials.enc", "credentials.lock", "gp-vpn-username", "gp-vpn-password", "gp-vpn-totp", "O_NOFOLLOW", "O_CLOEXEC", "flock", "LOCK_EX", "fstatat", "AT_SYMLINK_NOFOLLOW", "unlinkat", "totp-counter.json.lock", "totp-counter.json", "0o600", "0o700"] {
+        for required in ["import CryptoKit", "AES.GCM.seal", "AES.GCM.open", "credentials.key", "credentials.enc", "credentials.lock", "gp-vpn-username", "gp-vpn-password", "gp-vpn-totp", "O_NOFOLLOW", "O_CLOEXEC", "flock", "LOCK_EX", "fstatat", "AT_SYMLINK_NOFOLLOW", "unlinkat", "totp-counter.lock", "totp-counter", "0o600", "0o700"] {
             try expect(source.contains(required), "system adapter source contains \(required)")
         }
+        try expect(!source.contains("totp-counter.json"), "system adapter omits retired Python TOTP state names")
         for forbidden in ["import Security", "SecItem", "SecAccess", "KeychainCredential", "/usr/bin/security", "Process(", "posix_spawn", "NSTask", "NSLog", "os_log", "print("] {
             try expect(!source.contains(forbidden), "system adapter source omits \(forbidden)")
         }
@@ -745,9 +746,9 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         try FileManager.default.createDirectory(at: unsafeTarget, withIntermediateDirectories: true)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unsafeTarget.path)
         try FileManager.default.createSymbolicLink(atPath: parentSymlink.root.path, withDestinationPath: unsafeTarget.path)
-        try writeSecureFile(unsafeTarget.appendingPathComponent("totp-counter.json"), Data("state".utf8), mode: 0o600)
+        try writeSecureFile(unsafeTarget.appendingPathComponent("totp-counter"), Data("state".utf8), mode: 0o600)
         try expectThrows("parent symlink") { try FileTOTPStateResetter(home: parentSymlink.home).resetTOTPState() }
-        try expect(FileManager.default.fileExists(atPath: unsafeTarget.appendingPathComponent("totp-counter.json").path), "parent symlink target state preserved")
+        try expect(FileManager.default.fileExists(atPath: unsafeTarget.appendingPathComponent("totp-counter").path), "parent symlink target state preserved")
 
         try assertUnsafeFixture(name: "parent-wrong-mode", prepare: { fixture in
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fixture.root.path)
@@ -858,7 +859,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
         defer { try? FileManager.default.removeItem(at: root) }
         let store = EncryptedCredentialStore(root: root)
         try store.write("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", for: .totpSeed)
-        let stateURL = root.appendingPathComponent("totp-counter.json")
+        let stateURL = root.appendingPathComponent("totp-counter")
         let stateBefore = Data("{\"last_counter\":42}".utf8)
         try stateBefore.write(to: stateURL)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
@@ -1063,7 +1064,7 @@ func requireIndex(of needle: String, in haystack: String, message: String) throw
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
         }
-        return TOTPFixture(home: home, root: root, lock: root.appendingPathComponent("totp-counter.json.lock"), state: root.appendingPathComponent("totp-counter.json"))
+        return TOTPFixture(home: home, root: root, lock: root.appendingPathComponent("totp-counter.lock"), state: root.appendingPathComponent("totp-counter"))
     }
 
     static func writeSecureFile(_ url: URL, _ data: Data, mode: Int) throws {

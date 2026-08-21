@@ -19,7 +19,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "live-macos-rust-acceptance.sh"
 CHECKLIST = ROOT / "docs" / "release-checklist-macos-rust.md"
-REPORT = ROOT / "task-9-report.md"
 
 SERVICE_HASH = "a" * 64
 HELPER_HASH = "b" * 64
@@ -607,16 +606,14 @@ printf tampered > '{f.install_root}/Library/Application Support/HYU VPN/bin/hyu-
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("installer app timed out", result.stderr)
 
-    def test_docs_and_report_are_updated_with_non_forgeable_boundaries(self):
+    def test_release_checklist_has_non_forgeable_boundaries(self):
         checklist = CHECKLIST.read_text(encoding="utf-8")
-        report = REPORT.read_text(encoding="utf-8")
-        for text in (checklist, report):
-            self.assertIn("reruns scripts/macos-dmg-acceptance.sh", text)
-            self.assertIn("test-root evidence", text)
-            self.assertIn("--exercise-uninstall-reinstall", text)
-            self.assertIn("Unix-socket framed IPC", text)
-            self.assertIn("physical Wi-Fi gate last", text)
-            self.assertNotIn("contract-only", text)
+        self.assertIn("reruns scripts/macos-dmg-acceptance.sh", checklist)
+        self.assertIn("test-root evidence", checklist)
+        self.assertIn("--exercise-uninstall-reinstall", checklist)
+        self.assertIn("Unix-socket framed IPC", checklist)
+        self.assertIn("physical Wi-Fi gate last", checklist)
+        self.assertNotIn("contract-only", checklist)
 
     def test_fix2_static_contracts_socket_protocol_cleanup_and_no_load_bearing_true(self):
         text = SCRIPT.read_text(encoding="utf-8")

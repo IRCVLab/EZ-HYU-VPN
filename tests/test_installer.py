@@ -200,6 +200,33 @@ class StageAndCliTests(InstallerTestCase):
 
 
 class RootAdminShellHarnessTests(InstallerTestCase):
+    @staticmethod
+    def legacy_residue_paths(env):
+        return [
+            env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-native-client",
+            env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-control",
+            env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-connect",
+            env.root / "Library/Application Support/HYU VPN/bin/hyu-vpn-service",
+            env.root / "Library/Application Support/HYU VPN/bin/gp-hip-report",
+            env.root / "Library/Application Support/HYU VPN/src/hyu_vpn/legacy.py",
+            env.root / "Library/Application Support/HYU VPN/live-rust-backup/old-service",
+            env.root / "Library/Application Support/HYU VPN/runtime/openconnect/old-runtime",
+            env.root / "Library/Application Support/HYU VPN/runtime/gp-hip-report.rust-backup",
+            env.root / "etc/sudoers.d/openconnect-gp",
+            env.root / "Users/tester/Library/Application Support/hyu-openconnect/auto-reconnect.json",
+            env.root / "Users/tester/Library/Application Support/hyu-openconnect/supervisor.lock",
+            env.root / "Users/tester/Library/Application Support/hyu-openconnect/totp-counter.json",
+            env.root / "Users/tester/Library/Application Support/hyu-openconnect/totp-counter.json.lock",
+        ]
+
+    def seed_legacy_residue(self, env):
+        paths = self.legacy_residue_paths(env)
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"legacy:{path.name}", encoding="utf-8")
+            path.chmod(0o440 if path.parent.name == "sudoers.d" else 0o600)
+        return paths
+
     def run_root_admin(self, env, stage, action="install", extra_env=None, recover=False, tools_root=None):
         args = [
             "/bin/zsh", str(REPO / "installer/root-admin.sh"),
@@ -320,6 +347,34 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertNotIn("hyu-vpn-native-client", commands)
         self.assertNotIn("install_name_tool", commands)
         self.assertNotIn("codesign", commands)
+
+    def test_successful_upgrade_erases_all_allowlisted_legacy_residue(self):
+        env = DryRunEnvironment(root=self.root / "dry legacy erase", payload=self.payload, home=self.root / "home legacy erase", manifest=self.manifest_path)
+        residue = self.seed_legacy_residue(env)
+        stage = stage_user_payload(env)
+
+        proc = self.run_root_admin(env, stage)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertEqual([str(path) for path in residue if path.exists() or path.is_symlink()], [])
+        self.assertFalse((env.root / "private/var/db/hyu-vpn/backups").exists())
+        self.assertFalse((env.root / "private/var/db/hyu-vpn/backups.tsv").exists())
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        self.assertIn("legacy-residue-erasure-complete", journal)
+
+    def test_failed_upgrade_restores_every_legacy_residue_before_reporting_rollback(self):
+        env = DryRunEnvironment(root=self.root / "dry legacy rollback", payload=self.payload, home=self.root / "home legacy rollback", manifest=self.manifest_path)
+        residue = self.seed_legacy_residue(env)
+        before = {path: path.read_bytes() for path in residue}
+        stage = stage_user_payload(env)
+
+        proc = self.run_root_admin(env, stage, extra_env={"HYU_VPN_FAIL_AFTER": "helper"})
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual({path: path.read_bytes() for path in residue}, before)
+        journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
+        self.assertIn("legacy-residue-erasure-complete", journal)
+        self.assertIn("rollback-complete", journal)
 
     def test_root_admin_real_health_cli_failure_rolls_back_and_recover_is_idempotent(self):
         env = DryRunEnvironment(root=self.root / "dry real health rollback", payload=self.payload, home=self.root / "home real health rollback", manifest=self.manifest_path)
@@ -922,13 +977,17 @@ resolver #1
 
     def test_static_forbids_production_native_client_payload_and_python_install_hooks(self):
         production_files = [
-            "installer/root-admin.sh",
             "packaging/README-lab.md",
             "launchd/com.hyu.vpn.service.plist.in",
         ]
         combined = "\n".join((REPO / rel).read_text(encoding="utf-8") for rel in production_files)
         for forbidden in ["hyu-vpn-native-client", "src/hyu_vpn", "suppress-auto-launch", "verify-suppressed", "restore-auto-launch", "native-suppression", "com.paloaltonetworks.gp", "/usr/bin/python3", "PYTHON3_PATH", "python3", "thon3", 'manifest.py" --payload', "manifest.py' --payload"]:
             self.assertNotIn(forbidden, combined)
+        root_admin = (REPO / "installer/root-admin.sh").read_text(encoding="utf-8")
+        for forbidden in ["suppress-auto-launch", "verify-suppressed", "restore-auto-launch", "native-suppression", "com.paloaltonetworks.gp", "/usr/bin/python3", "PYTHON3_PATH", "python3", "thon3"]:
+            self.assertNotIn(forbidden, root_admin)
+        self.assertIn('legacy_hyu_bin_prefix="$APP_SUPPORT/bin/hyu-vpn"', root_admin)
+        self.assertNotIn('run_cmd "${legacy_hyu_bin_prefix}-native-client"', root_admin)
 
     def test_live_style_privileged_chain_guard_checks_absolute_ancestors_from_root(self):
         sandbox = self.root / "live-style"
@@ -993,12 +1052,14 @@ resolver #1
         self.assertIn('LEGACY_SUDOERS_DST="$(map_path /etc/sudoers.d/com.hyu.vpn)"', text)
         self.assertIn('SUDOERS_TMP="$STATE_DIR/sudoers-candidate.$$"', text)
         self.assertIn('/bin/rm -f "$SUDOERS_TMP"', text)
-        self.assertIn('backup_target "$LEGACY_SUDOERS_DST"', text)
+        self.assertIn('"$LEGACY_SUDOERS_DST"', text)
+        self.assertIn('backup_target "$target"', text)
         self.assertIn("etc/sudoers.d/hyu-vpn|etc/sudoers.d/com.hyu.vpn", text)
         self.assertIn('capture_cmd(){', text)
         capture_line = next(line for line in text.splitlines() if line.startswith("capture_cmd(){"))
         self.assertIn('[[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0', capture_line)
-        self.assertNotIn("hyu-vpn-native-client", text)
+        self.assertIn('legacy_hyu_bin_prefix="$APP_SUPPORT/bin/hyu-vpn"', text)
+        self.assertNotIn('run_cmd "${legacy_hyu_bin_prefix}-native-client"', text)
         self.assertNotIn("suppress-auto-launch", text)
         self.assertIn("print-disabled", text)
         self.assertIn("openconnect.*secure", text)
@@ -1018,6 +1079,8 @@ resolver #1
         self.assertNotIn("durable_flush(){ :; }", text)
         self.assertNotIn("sed -n 's/.*\"state\"", text)
         self.assertIn("validate_privileged_destination_chain", text)
+        self.assertIn('"$USER_HOME/Library/Application Support/hyu-openconnect"/*', text)
+        self.assertIn('"$USER_HOME/.cache/hyu-openconnect"', text)
         self.assertIn("root-service-health-ok", text)
         self.assertIn('/bin/chmod 700 "$dst"', text)
         self.assertIn('/usr/sbin/chown -R root:wheel "$dst"', text)
@@ -1037,11 +1100,25 @@ class LauncherAndTemplateTests(InstallerTestCase):
         ]:
             self.assertFalse((REPO / rel).exists(), rel)
 
+    def test_legacy_python_runtime_and_live_mutation_harnesses_are_removed(self):
+        retired = [
+            "src/hyu_vpn",
+            "bin/gp-hip-report",
+            "bin/hyu-vpn-connect",
+            "bin/hyu-vpn-control",
+            "bin/hyu-vpn-native-client",
+            "bin/hyu-vpn-service",
+            "launchd/local.hyu-openconnect.plist",
+            "scripts/assemble-app.sh",
+            "scripts/preflight.sh",
+            "tests/live_acceptance.sh",
+            "tests/live_acceptance_gate.sh",
+        ]
+        self.assertEqual([rel for rel in retired if (REPO / rel).exists()], [])
+
     def test_runtime_sources_do_not_invoke_generic_keychain_cli(self):
         for rel in [
-            "src/hyu_vpn/otp.py",
             "installer/manifest.py",
-            "scripts/preflight.sh",
             "macos/Sources/HYUVPNMenuApp/SystemAdapters.swift",
         ]:
             self.assertNotIn("/usr/bin/security", (REPO / rel).read_text(encoding="utf-8"), rel)

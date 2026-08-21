@@ -31,7 +31,6 @@ from release_packaging import (
     verify_rewrite_target_exists,
 )
 
-ASSEMBLE_APP = REPO / "scripts" / "assemble-app.sh"
 ASSEMBLE_MENU_APP = REPO / "macos" / "Scripts" / "assemble-menu-app.sh"
 ASSEMBLE_INSTALLER_APP = REPO / "macos" / "Scripts" / "assemble-installer-app.sh"
 PACKAGE_RELEASE = REPO / "scripts" / "package-release.py"
@@ -357,28 +356,14 @@ class DestinationGuardTests(PackagingTestCase):
                 guard_root(bad)
         self.assertEqual(guard_root(Path("/tmp/hyu-vpn-safe-root")).as_posix(), "/private/tmp/hyu-vpn-safe-root")
 
-    @unittest.skipUnless(sys.platform == "darwin", "macOS /tmp resolves through /private/tmp")
-    def test_legacy_assemblers_allow_unresolved_temp_alias_when_destination_is_safe_empty_dir(self):
-        canonical_tmp = Path(tempfile.mkdtemp(prefix="hyu-assembler-var-", dir="/private/tmp"))
-        self.addCleanup(lambda: subprocess.run(["/bin/rm", "-rf", str(canonical_tmp)]))
-        unresolved = Path(str(canonical_tmp).replace("/private/tmp/", "/tmp/", 1))
-        fixture = unresolved / "fixture"
-        dest = unresolved / "out"
-        (fixture / "source").mkdir(parents=True)
-        dest.mkdir()
-        (fixture / "source" / "main.swift").write_text("print(\"x\")\n", encoding="utf-8")
-        proc = subprocess.run([str(ASSEMBLE_APP), str(fixture), str(dest)], text=True, capture_output=True)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-
-    def test_legacy_assemblers_refuse_repo_root_and_symlink_destinations_before_building(self):
+    def test_native_assemblers_refuse_repo_root_and_symlink_destinations_before_building(self):
         fixture = self.root / "fixture"
         (fixture / "source").mkdir(parents=True)
         (fixture / "source" / "main.swift").write_text("print(\"x\")\n", encoding="utf-8")
-        for script in [ASSEMBLE_APP, ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
+        for script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
             with self.subTest(script=script.name, destination="repo"):
                 arguments = [str(script), str(fixture), str(REPO)]
-                if script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
-                    arguments.append("0.1.1")
+                arguments.append("0.1.1")
                 proc = subprocess.run(arguments, text=True, capture_output=True)
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("unsafe destination", proc.stderr)
@@ -386,8 +371,7 @@ class DestinationGuardTests(PackagingTestCase):
             link.symlink_to(self.build_root)
             with self.subTest(script=script.name, destination="symlink"):
                 arguments = [str(script), str(fixture), str(link)]
-                if script in [ASSEMBLE_MENU_APP, ASSEMBLE_INSTALLER_APP]:
-                    arguments.append("0.1.1")
+                arguments.append("0.1.1")
                 proc = subprocess.run(arguments, text=True, capture_output=True)
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("unsafe destination", proc.stderr)
