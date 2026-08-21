@@ -69,6 +69,7 @@ case "${1:-}" in
     ;;
   repair)
     [ "${HYU_FAKE_NEW_HELPER_REPAIR_FAIL:-0}" = 1 ] && exit 42
+    rm -f "$root/private/var/db/hyu-vpn/session.json" "$root/private/var/db/hyu-vpn/ledger/"*.ledger
     printf stopped > "$state"
     ;;
   *) exit 64 ;;
@@ -530,6 +531,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         state = state_dir / "fake-helper-state"
         session = state_dir / "session.json"
         ledger = state_dir / "ledger/oldsession1.ledger"
+        repair_marker = state_dir / "old-helper-repair-called"
         launchctl = tools / "bin/launchctl"
         launchctl.write_text(
             "#!/bin/sh\n"
@@ -540,7 +542,7 @@ class RootAdminShellHarnessTests(InstallerTestCase):
             f"state={str(state)!r}\n"
             "case \"${1:-}\" in\n"
             '  status) printf \'%s\\n\' \'{"schema_version":1,"state":"repair-required","pid":null,"session_nonce":"oldsession1","tunnel_interface":null}\' ;;\n'
-            "  repair) exit 42 ;;\n"
+            f"  repair) printf called > {str(repair_marker)!r}; exit 42 ;;\n"
             "  stop) exit 42 ;;\n"
             "  *) exit 64 ;;\n"
             "esac\n"
@@ -555,37 +557,38 @@ class RootAdminShellHarnessTests(InstallerTestCase):
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
-        return helper, state
+        return helper, state, repair_marker
 
     def test_upgrade_defers_old_repair_bug_then_new_helper_repairs_and_verifies_stopped(self):
         env = DryRunEnvironment(root=self.root / "dry helper repair upgrade", payload=self.payload, home=self.root / "home helper repair upgrade", manifest=self.manifest_path)
         stage = stage_user_payload(env)
         tools = self.make_fake_tools_for(env)
-        _, state = self._inject_stale_old_helper_during_quarantine(env, tools)
+        _, state, repair_marker = self._inject_stale_old_helper_during_quarantine(env, tools)
 
         proc = self.run_root_admin(env, stage, tools_root=tools)
 
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertFalse(repair_marker.exists(), "installer must not execute a repair-required legacy helper")
         self.assertEqual(state.read_text(encoding="utf-8"), "stopped")
         self.assertFalse((env.root / "private/var/db/hyu-vpn/session.json").exists())
         self.assertFalse((env.root / "private/var/db/hyu-vpn/ledger/oldsession1.ledger").exists())
         journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
         self.assertLess(journal.index("old-helper-repair-deferred"), journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"))
-        self.assertLess(journal.index("legacy-quarantined-never-restore"), journal.index("inactive-repair-state-cleared"))
-        self.assertLess(journal.index("inactive-repair-state-cleared"), journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"))
+        self.assertLess(journal.index("legacy-quarantined-never-restore"), journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"))
         self.assertLess(journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"), journal.index("installed-helper-stopped"))
 
     def test_upgrade_rolls_back_if_new_helper_cannot_clear_deferred_repair(self):
         env = DryRunEnvironment(root=self.root / "dry helper repair rollback", payload=self.payload, home=self.root / "home helper repair rollback", manifest=self.manifest_path)
         stage = stage_user_payload(env)
         tools = self.make_fake_tools_for(env)
-        old_helper, _ = self._inject_stale_old_helper_during_quarantine(env, tools)
+        old_helper, _, repair_marker = self._inject_stale_old_helper_during_quarantine(env, tools)
 
         proc = self.run_root_admin(env, stage, tools_root=tools, extra_env={"HYU_FAKE_NEW_HELPER_REPAIR_FAIL": "1"})
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertTrue(old_helper.exists())
-        self.assertIn("repair) exit 42", old_helper.read_text(encoding="utf-8"))
+        self.assertIn("repair) printf called", old_helper.read_text(encoding="utf-8"))
+        self.assertFalse(repair_marker.exists(), "rollback must not require executing the legacy repair path")
         journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
         self.assertIn("rollback-complete", journal)
 
@@ -621,7 +624,8 @@ class RootAdminShellHarnessTests(InstallerTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         journal = (env.root / "private/var/db/hyu-vpn/install-transaction.log").read_text(encoding="utf-8")
         self.assertIn("old-helper-stop-repair-deferred", journal)
-        self.assertIn("inactive-repair-state-cleared", journal)
+        self.assertLess(journal.index("old-helper-stop-repair-deferred"), journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"))
+        self.assertLess(journal.index("before-mutate Library/PrivilegedHelperTools/com.hyu.vpn.helper"), journal.index("installed-helper-stopped"))
 
     def test_failed_upgrade_restarts_service_after_rollback(self):
         env = DryRunEnvironment(root=self.root / "dry rollback restart", payload=self.payload, home=self.root / "home rollback restart", manifest=self.manifest_path)

@@ -273,12 +273,6 @@ helper_state(){
   tool="$(native_service_tool)" || return 1
   print -r -- "$raw" | "$tool" root-util helper-state
 }
-helper_repair_nonce(){
-  local raw tool
-  raw="$(capture_cmd "$HELPER_DST" status)"
-  tool="$(native_service_tool)" || return 1
-  print -r -- "$raw" | "$tool" root-util helper-repair-nonce
-}
 drain_existing_helper(){
   [[ -x "$HELPER_DST" ]] || return 0
   [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0
@@ -302,38 +296,13 @@ drain_existing_helper(){
       fi
       ;;
     repair-required)
-      if run_cmd "$HELPER_DST" repair; then
-        [[ "$(helper_state)" == stopped ]] || { print -u2 "existing HYU VPN helper repair did not reach stopped"; return 1; }
-        log "old-helper-repaired"
-      else
-        after="$(helper_state)" || { print -u2 "existing HYU VPN helper state became unreadable"; return 1; }
-        case "$after" in
-          stopped) log "old-helper-repaired-after-nonzero" ;;
-          repair-required) log "old-helper-repair-deferred" ;;
-          *) print -u2 "existing HYU VPN helper changed state during failed repair"; return 1 ;;
-        esac
-      fi
+      # A repair-required helper may be an older build with the bug being
+      # upgraded. Never execute its recovery path. Preserve its ledger until
+      # the package helper has replaced it, then let the new fail-closed
+      # implementation decide whether recovery is safe.
+      log "old-helper-repair-deferred"
       ;;
   esac
-}
-clear_inactive_repair_state(){
-  [[ -x "$HELPER_DST" ]] || return 0
-  [[ -n "$DRY_RUN_ROOT" && -z "$TOOLS_ROOT" ]] && return 0
-  local state nonce ledger_dir ledger_path ledger_lock owner mode
-  state="$(helper_state)" || { print -u2 "existing HYU VPN helper status is invalid after quarantine"; return 1; }
-  [[ "$state" == repair-required ]] || return 0
-  nonce="$(helper_repair_nonce)" || { print -u2 "existing HYU VPN repair state has invalid nonce"; return 1; }
-  ledger_dir="$STATE_DIR/ledger"
-  [[ -d "$ledger_dir" && ! -L "$ledger_dir" ]] || { print -u2 "existing HYU VPN ledger directory is unsafe"; return 1; }
-  if [[ -z "$DRY_RUN_ROOT" ]]; then
-    owner="$(/usr/bin/stat -f %u "$ledger_dir")"; mode="$(/usr/bin/stat -f %Lp "$ledger_dir")"
-    [[ "$owner" == 0 && "$mode" == 700 ]] || { print -u2 "existing HYU VPN ledger directory is unsafe"; return 1; }
-  fi
-  ledger_path="$ledger_dir/$nonce.ledger"; ledger_lock="$ledger_dir/.$nonce.lock"
-  log "inactive-repair-state-clear-start"
-  /bin/rm -f "$STATE_DIR/session.json" "$ledger_path" "$ledger_lock"
-  durable_flush "$STATE_DIR"; durable_flush "$ledger_dir"
-  log "inactive-repair-state-cleared"
 }
 stop_current_user_service(){
   log "current-service-stop-start"
@@ -346,6 +315,10 @@ verify_installed_helper_stopped(){
   local state
   state="$(helper_state)" || { print -u2 "installed HYU VPN helper status is invalid"; return 1; }
   if [[ "$state" == repair-required ]]; then
+    [[ -f "$PAYLOAD/com.hyu.vpn.helper" && "$(sha256 "$HELPER_DST")" == "$(sha256 "$PAYLOAD/com.hyu.vpn.helper")" ]] || {
+      print -u2 "refusing repair through an unverified HYU VPN helper"
+      return 1
+    }
     run_cmd "$HELPER_DST" repair || { print -u2 "installed HYU VPN helper could not repair retained state"; return 1; }
     state="$(helper_state)" || { print -u2 "installed HYU VPN helper status is invalid after repair"; return 1; }
   fi
@@ -548,7 +521,6 @@ install_phase(){
   stop_current_user_service
   drain_existing_helper
   quarantine_legacy
-  clear_inactive_repair_state
   migrate_legacy_menu_launchagent
   copy_file "$TXN_SNAPSHOT/com.hyu.vpn.helper" "$HELPER_DST" 755; fail_after helper
   validate_privileged_destination_chain "$APP_SUPPORT"; validate_privileged_destination_chain "$STATE_DIR"
@@ -572,7 +544,6 @@ install_phase(){
 uninstall_phase(){
   if [[ -x "$HELPER_DST" ]]; then
     drain_existing_helper
-    clear_inactive_repair_state
     verify_installed_helper_stopped
   fi
   [[ -f "$SERVICE_PLIST" ]] && run_optional_cmd /bin/launchctl bootout "gui/$ADMIN_UID" "$SERVICE_PLIST"
