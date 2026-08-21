@@ -420,6 +420,37 @@ esac
         #expect(fixture.tools.restoredSearchDomains.isEmpty)
     }
 
+    @Test func repairRemovesExactStaleRouteAndRestoresExactAppliedDNSInOneTransaction() throws {
+        let fixture = try staleNetworkEpochFixture()
+        let decayedOwnedRoute = RouteSnapshot(
+            destination: fixture.tunnelRoute.destination,
+            gateway: fixture.tunnelRoute.gateway,
+            interface: "en0",
+            netmask: fixture.tunnelRoute.netmask,
+            protocol: fixture.tunnelRoute.protocol
+        )
+        fixture.tools.routes = [decayedOwnedRoute]
+        fixture.tools.resolverServers = fixture.appliedDNS.servers
+        fixture.tools.resolverServersPresent = fixture.appliedDNS.serversPresent
+        fixture.tools.onRestoreDNSServers = { snapshot in
+            let setupKey = "Setup:/Network/Service/service-wifi/DNS"
+            let stateKey = "State:/Network/Service/service-wifi/DNS"
+            fixture.tools.resolverSurfaces?[setupKey] = snapshot.surfaces[setupKey]
+            fixture.tools.resolverSurfaces?[stateKey] = ResolverFieldSnapshot(
+                servers: ["166.104.100.200"],
+                searchDomains: []
+            )
+        }
+
+        try fixture.runner.run(reason: "repair", nonce: "nonceabc123", environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.ledger.path))
+        #expect(fixture.tools.routes.isEmpty)
+        #expect(fixture.tools.restoredDNSServers.count == 1)
+        #expect(fixture.tools.resolverServers.isEmpty)
+        #expect(!fixture.tools.resolverServersPresent)
+    }
+
     @Test func repairRemovesInheritedHYUTunnelRouteAfterItsInterfaceFallsBackToPhysicalNetwork() throws {
         let fixture = try staleNetworkEpochFixture(tunnelRouteWasAlreadyPresent: true)
         let decayedOwnedRoute = RouteSnapshot(
@@ -870,6 +901,7 @@ private final class TunnelSurfaceNetworkTools: NetworkTooling {
     var restoredResolvers: [ResolverSnapshot] = []
     var restoredDNSServers: [ResolverSnapshot] = []
     var restoredSearchDomains: [ResolverSnapshot] = []
+    var onRestoreDNSServers: ((ResolverSnapshot) -> Void)?
     func rebootIdentity() throws -> UInt64 { rebootIdentityValue }
     func primaryServiceID() throws -> String { primaryServiceIDValue }
     func defaultRoute() throws -> RouteSnapshot { RouteSnapshot(destination: "default", gateway: defaultGateway, interface: defaultInterface, netmask: "0.0.0.0", protocol: "ipv4") }
@@ -904,6 +936,7 @@ private final class TunnelSurfaceNetworkTools: NetworkTooling {
         restoredDNSServers.append(snapshot)
         resolverServers = snapshot.servers
         resolverServersPresent = snapshot.serversPresent
+        onRestoreDNSServers?(snapshot)
     }
     func restoreSearchDomains(serviceID: String, snapshot: ResolverSnapshot) throws {
         restoredSearchDomains.append(snapshot)

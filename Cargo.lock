@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-core"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-daemon"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "hyu-vpn-core",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-gtk"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "gtk4",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-hip"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "hyu-vpn-platform-linux",
  "hyu-vpn-platform-windows",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-linux-service"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "hyu-vpn-core",
@@ -771,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-macos-service"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "hyu-vpn-core",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-platform-linux"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "hyu-vpn-core",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-platform-macos"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "hyu-vpn-core",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-platform-windows"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "hyu-vpn-core",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-protocol"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-windows-service"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "hyu-vpn-core",
@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "hyu-vpn-windows-tray"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "hyu-vpn-platform-windows",
  "hyu-vpn-protocol",

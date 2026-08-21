@@ -63,6 +63,7 @@ func expectThrows(_ message: String, _ body: () throws -> Void) throws {
                 ("network-repair-restores-missing-foreign-baseline-host-route", testRepairRestoresMissingForeignBaselineHostRoute),
                 ("network-repair-retires-clean-ledger-after-default-network-change", testRepairRetiresCleanLedgerAfterDefaultNetworkChange),
                 ("network-repair-removes-owned-tunnel-route-rehomed-to-physical-interface", testRepairRemovesOwnedTunnelRouteRehomedToPhysicalInterface),
+                ("network-repair-removes-stale-route-and-restores-applied-dns-atomically", testRepairRemovesStaleRouteAndRestoresAppliedDNSAtomically),
                 ("network-repair-removes-inherited-hyu-tunnel-route-rehomed-to-physical-interface", testRepairRemovesInheritedHYUTunnelRouteRehomedToPhysicalInterface),
                 ("network-repair-retires-artifact-free-ledger-after-default-route-return", testRepairRetiresArtifactFreeLedgerAfterDefaultRouteReturn),
                 ("network-repair-keeps-same-route-ledger-when-applied-dynamic-dns-remains", testRepairKeepsSameRouteLedgerWhenAppliedDynamicDNSRemains),
@@ -892,6 +893,38 @@ printf '{ PrimaryService : 730F133F-1F6A-4C84-901E-9E41A028E092 }\\n'
         try expect(fixture.tools.restoredSearchDomains.isEmpty, "stale route cleanup leaves baseline search domains untouched")
     }
 
+    static func testRepairRemovesStaleRouteAndRestoresAppliedDNSAtomically() throws {
+        let (fixture, tunnelRoute, appliedDNS) = try staleNetworkLedgerFixture()
+        fixture.tools.routes = [
+            RouteSnapshot(
+                destination: tunnelRoute.destination,
+                gateway: tunnelRoute.gateway,
+                interface: "en0",
+                netmask: tunnelRoute.netmask,
+                protocol: tunnelRoute.protocol
+            )
+        ]
+        fixture.tools.resolverServers = appliedDNS.servers
+        fixture.tools.resolverServersPresent = appliedDNS.serversPresent
+        fixture.tools.onRestoreDNSServers = { snapshot in
+            let setupKey = "Setup:/Network/Service/service-wifi/DNS"
+            let stateKey = "State:/Network/Service/service-wifi/DNS"
+            fixture.tools.resolverSurfaces?[setupKey] = snapshot.surfaces[setupKey]
+            fixture.tools.resolverSurfaces?[stateKey] = ResolverFieldSnapshot(
+                servers: ["166.104.100.200"],
+                searchDomains: []
+            )
+        }
+
+        try fixture.runner.run(reason: "repair", nonce: fixture.nonce, environment: [:], suppliedLedgerPath: fixture.ledger)
+
+        try expect(!FileManager.default.fileExists(atPath: fixture.ledger.path), "combined stale residue retires its ledger")
+        try expect(fixture.tools.routes.isEmpty, "combined repair deletes the exact stale route")
+        try expect(fixture.tools.restoredDNSServers.count == 1, "combined repair restores exact recorded DNS")
+        try expect(fixture.tools.resolverServers.isEmpty, "combined repair returns DNS to its baseline")
+        try expect(!fixture.tools.resolverServersPresent, "combined repair restores absent manual DNS")
+    }
+
     static func testRepairRemovesInheritedHYUTunnelRouteRehomedToPhysicalInterface() throws {
         let (fixture, tunnelRoute, _) = try staleNetworkLedgerFixture(tunnelRouteWasAlreadyPresent: true)
         fixture.tools.routes = [
@@ -1465,6 +1498,7 @@ final class HarnessNetworkTools: NetworkTooling {
     var restoredResolvers: [ResolverSnapshot] = []
     var restoredDNSServers: [ResolverSnapshot] = []
     var restoredSearchDomains: [ResolverSnapshot] = []
+    var onRestoreDNSServers: ((ResolverSnapshot) -> Void)?
     var includeTunnelSurface = false
     func rebootIdentity() throws -> UInt64 { rebootIdentityValue }
     func primaryServiceID() throws -> String { primaryServiceIDSequence.isEmpty ? primaryServiceIDValue : primaryServiceIDSequence.removeFirst() }
@@ -1504,6 +1538,7 @@ final class HarnessNetworkTools: NetworkTooling {
         restoredDNSServers.append(snapshot)
         resolverServers = snapshot.servers
         resolverServersPresent = snapshot.serversPresent
+        onRestoreDNSServers?(snapshot)
     }
     func restoreSearchDomains(serviceID: String, snapshot: ResolverSnapshot) throws {
         restoredSearchDomains.append(snapshot)

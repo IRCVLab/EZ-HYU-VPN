@@ -612,9 +612,14 @@ public struct NetworkWrapperRunner {
                 try removeLedgerAndSyncDirectory(ledgerPath)
                 return
             }
-            if let staleRoutes = staleNetworkOwnedRouteCleanupPlan(ledger: ledger, current: preflight), !staleRoutes.isEmpty {
+            if let stalePlan = staleNetworkOwnedRouteCleanupPlan(ledger: ledger, current: preflight), !stalePlan.routes.isEmpty {
                 do {
-                    for route in staleRoutes { try tools.deleteRoute(route) }
+                    for route in stalePlan.routes { try tools.deleteRoute(route) }
+                    if let dnsPlan = stalePlan.dns, let before = ledger.dnsBefore, let service = ledger.serviceIDBefore {
+                        if dnsPlan.restoreServers { try tools.restoreDNSServers(serviceID: service, snapshot: before) }
+                        if dnsPlan.restoreSearchDomains { try tools.restoreSearchDomains(serviceID: service, snapshot: before) }
+                    }
+                    tools.waitForNetworkIdentityResample()
                     preflight = try snapshot(destinations: destinations, environment: snapshotEnvironment)
                     guard staleNetworkLedgerRetirementSafe(ledger: ledger, current: preflight) else { throw HelperError.processMismatch }
                     try removeLedgerAndSyncDirectory(ledgerPath)
@@ -830,8 +835,9 @@ public struct NetworkWrapperRunner {
     }
 
     private struct StaleNetworkDNSRepairPlan { let restoreServers: Bool; let restoreSearchDomains: Bool }
+    private struct StaleNetworkRouteCleanupPlan { let routes: [RouteDelta]; let dns: StaleNetworkDNSRepairPlan? }
 
-    private func staleNetworkOwnedRouteCleanupPlan(ledger: NetworkLedger, current: NetworkSnapshotData) -> [RouteDelta]? {
+    private func staleNetworkOwnedRouteCleanupPlan(ledger: NetworkLedger, current: NetworkSnapshotData) -> StaleNetworkRouteCleanupPlan? {
         guard stableBootIdentityMatches(ledger.rebootIdentity, current: current), !current.routes.isEmpty else { return nil }
         let projectedCleanState = NetworkSnapshotData(
             rebootIdentity: current.rebootIdentity,
@@ -842,7 +848,8 @@ public struct NetworkWrapperRunner {
             routes: [],
             resolver: current.resolver
         )
-        guard staleNetworkLedgerRetirementSafe(ledger: ledger, current: projectedCleanState),
+        let dnsPlan = staleNetworkLedgerDNSRepairPlan(ledger: ledger, current: projectedCleanState)
+        guard (staleNetworkLedgerRetirementSafe(ledger: ledger, current: projectedCleanState) || dnsPlan != nil),
               let recordedTunnel = ledger.tunnelInterface,
               recordedTunnel.hasPrefix("utun")
         else { return nil }
@@ -867,7 +874,7 @@ public struct NetworkWrapperRunner {
                 protocol: route.protocol
             ))
         }
-        return removals
+        return StaleNetworkRouteCleanupPlan(routes: removals, dns: dnsPlan)
     }
 
     private func staleNetworkLedgerDNSRepairPlan(ledger: NetworkLedger, current: NetworkSnapshotData) -> StaleNetworkDNSRepairPlan? {
