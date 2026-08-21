@@ -1118,6 +1118,11 @@ class LauncherAndTemplateTests(InstallerTestCase):
         ]
         self.assertEqual([rel for rel in retired if (REPO / rel).exists()], [])
 
+    def test_macos_hip_never_recreates_the_retired_home_cache(self):
+        source = (REPO / "rust/apps/hyu-vpn-hip/src/macos.rs").read_text(encoding="utf-8")
+        self.assertNotIn(".cache/hyu-openconnect", source)
+        self.assertIn("Library/Caches/com.hyu.vpn/softwareupdate-cache.json", source)
+
     def test_runtime_sources_do_not_invoke_generic_keychain_cli(self):
         for rel in [
             "installer/manifest.py",

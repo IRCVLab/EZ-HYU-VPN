@@ -911,10 +911,14 @@ fn write_update_cache(path: &Path, now: OffsetDateTime, patches: &[Patch]) -> st
 }
 
 fn update_cache_path() -> PathBuf {
-    std::env::var_os("HOME")
+    let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/root"))
-        .join(".cache/hyu-openconnect/softwareupdate-cache.json")
+        .unwrap_or_else(|| PathBuf::from("/var/root"));
+    update_cache_path_for(&home)
+}
+
+fn update_cache_path_for(home: &Path) -> PathBuf {
+    home.join("Library/Caches/com.hyu.vpn/softwareupdate-cache.json")
 }
 
 fn run_command(program: &str, args: &[&str], timeout: Duration) -> CommandResult {
@@ -1101,6 +1105,14 @@ mod tests {
             .chain(args.iter().copied())
             .collect::<Vec<_>>()
             .join("\0")
+    }
+
+    #[test]
+    fn update_cache_uses_native_macos_cache_directory() {
+        assert_eq!(
+            update_cache_path_for(Path::new("/Users/tester")),
+            PathBuf::from("/Users/tester/Library/Caches/com.hyu.vpn/softwareupdate-cache.json")
+        );
     }
 
     #[test]
